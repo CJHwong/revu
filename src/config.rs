@@ -23,14 +23,17 @@ open_diff: "gh pr diff {number} -R {repo} | delta"
 # Diff views for the Files changed and Commits tabs; m switches between them.
 # Each command runs in the repo's clone. {base} and {head} are commits, {paths} is
 # the file (both names for a rename), {width} is the pane width. Values are quoted
-# for the shell, so write {paths}, not "{paths}".
+# for the shell, so write {paths}, not "{paths}". highlight: true adds syntax colors
+# from bat to a renderer that has none of its own.
 diff_renderers:
   - name: word
     command: git diff --color=always --word-diff=color {base}...{head} -- {paths}
+    highlight: true
   - name: delta
     command: git diff {base}...{head} -- {paths} | delta --paging=never --width={width}
   - name: difftastic
     command: GIT_EXTERNAL_DIFF="difft --color=always --width={width}" git diff --ext-diff {base}...{head} -- {paths}
+    highlight: true
 
 groups:
   - title: Needs your review
@@ -64,6 +67,9 @@ pub struct Config {
 pub struct Renderer {
     pub name: String,
     pub command: String,
+    /// Add syntax colors from `bat` under the renderer's change colors.
+    #[serde(default)]
+    pub highlight: bool,
 }
 
 /// The renderers in DEFAULT_CONFIG, for config files written before the key existed.

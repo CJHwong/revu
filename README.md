@@ -26,7 +26,7 @@ The first run writes `~/.config/rs-github-inbox/config.yaml` (or `$XDG_CONFIG_HO
 - `updated_within_days`: adds `updated:>=<date>` to every query. Remove the key to see older pull requests.
 - `theme`: `dracula` (the default) or `terminal`, which uses your terminal's own colors.
 - `workspace_dir`: the folder that holds your clones. The Files changed tab asks for it once and appends it here.
-- `diff_renderers`: the diff views that `m` switches between, as shell commands run inside the clone. `{base}`, `{head}`, `{paths}` and `{width}` are replaced and quoted for the shell. The defaults are `word` (`git diff --word-diff`), `delta` and `difftastic`.
+- `diff_renderers`: the diff views that `m` switches between, as shell commands run inside the clone. `{base}`, `{head}`, `{paths}` and `{width}` are replaced and quoted for the shell. The defaults are `word` (`git diff --word-diff`), `delta` and `difftastic`. `highlight: true` on a renderer adds syntax colors from `bat`, and shows the renderer's red and green as a background tint. It is on for `word` and `difftastic`, which color little of the code themselves. Without `bat`, the output shows as the renderer drew it.
 - `open_diff`: the shell command that `d` runs. `{repo}`, `{number}` and `{url}` are replaced. The default is `gh pr diff {number} -R {repo} | delta`.
 
 A search shows at most 100 pull requests. A group with more matches shows a count like `100 of 140`.
@@ -54,7 +54,7 @@ Press `?` anywhere for this list.
 | Overview | `Enter` | Open or close the card, review thread or `<details>` block under the cursor |
 | Overview | `]` / `[` | Next or previous card or folded block |
 | Overview | `f` / `F` / `n` | Filter the comments (All, Unresolved, Mine), flip oldest or newest first, hide bots. Mine shows only your own words, with the threads you replied in open. |
-| Files changed | `Enter` | Show the whole file with its changes marked, drawn by the current renderer. delta and difftastic add syntax colors; `word` has none. On a folder, fold or open it. |
+| Files changed | `Enter` | Show the whole file with its changes marked, drawn by the current renderer, with syntax colors. On a folder, fold or open it. |
 | Files changed | `t` | Switch the list between a folder tree and flat paths |
 | Files changed | `z` | Hide or show the list, so the diff gets the full width |
 | Files changed | `v` | Toggle Viewed. It syncs to GitHub's Viewed checkbox at once. |

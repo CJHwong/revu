@@ -263,33 +263,40 @@ pub fn highlight_file(
     bat_theme: &str,
 ) -> Result<Vec<u8>> {
     let text = show_file(dir, commit, path)?;
-    let mut bat = Command::new("bat");
-    bat.args([
-        "--color=always",
-        "--style=numbers",
-        "--paging=never",
-        "--file-name",
-        path,
-    ])
-    .args(["--theme", bat_theme])
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
-    if line > 0 {
-        bat.args(["--highlight-line", &line.to_string()]);
+    let line = line.to_string();
+    let mut args = vec!["--color=always", "--style=numbers", "--paging=never"];
+    args.extend(["--file-name", path, "--theme", bat_theme]);
+    if line != "0" {
+        args.extend(["--highlight-line", &line]);
     }
-    let mut child = match bat.spawn() {
-        Ok(child) => child,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(numbered(&text)),
-        Err(error) => return Err(error).context("run bat"),
-    };
+    match bat(text.clone(), &args) {
+        Err(error) if is_missing(&error) => Ok(numbered(&text)),
+        result => result,
+    }
+}
+
+/// Runs `bat` on `input` and returns its colored output.
+pub fn bat(input: String, args: &[&str]) -> Result<Vec<u8>> {
+    let mut child = Command::new("bat")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("run bat")?;
     let mut stdin = child.stdin.take().context("open bat's input")?;
     // Write from another thread: bat fills its output pipe while it reads a large file.
-    let writer = std::thread::spawn(move || stdin.write_all(text.as_bytes()));
+    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
     let output = child.wait_with_output().context("wait for bat")?;
     let _ = writer.join();
     ensure_success(&output, "bat")?;
     Ok(output.stdout)
+}
+
+fn is_missing(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }
 
 fn numbered(text: &str) -> Vec<u8> {

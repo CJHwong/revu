@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod file_tree;
 mod github;
+mod highlight;
 mod markdown;
 mod model;
 mod overview;
@@ -18,7 +19,9 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::supports_keyboard_enhancement;
+use highlight::Syntax;
 use ratatui::DefaultTerminal;
+use ratatui::text::Text;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
@@ -64,7 +67,7 @@ enum Message {
     Diff {
         pr: PrRef,
         key: DiffKey,
-        result: Result<Vec<u8>, String>,
+        result: Result<Text<'static>, String>,
     },
     Grep {
         pr: PrRef,
@@ -74,7 +77,7 @@ enum Message {
     File {
         pr: PrRef,
         path: String,
-        result: Result<Vec<u8>, String>,
+        result: Result<Text<'static>, String>,
     },
 }
 
@@ -270,7 +273,8 @@ fn perform(
             let bat_theme = session.config.theme.bat_theme;
             thread::spawn(move || {
                 let result = repo::highlight_file(&dir, &commit, &path, line, bat_theme)
-                    .map_err(|error| format!("{error:#}"));
+                    .map_err(|error| format!("{error:#}"))
+                    .and_then(|bytes| highlight::to_text(&bytes, None));
                 let _ = sender.send(Message::File { pr, path, result });
             });
         }
@@ -278,10 +282,10 @@ fn perform(
             let Some(command) = renderer_command(session, &job) else {
                 return Ok(true);
             };
+            let syntax = renderer_syntax(session, &job);
             let sender = session.sender.clone();
             thread::spawn(move || {
-                let result = repo::run_renderer(&job.dir, &command, true)
-                    .map_err(|error| format!("{error:#}"));
+                let result = render_diff(&job, &command, true, syntax);
                 let path = job.paths.last().cloned().unwrap_or_default();
                 let _ = sender.send(Message::File {
                     pr: job.pr,
@@ -436,14 +440,37 @@ fn renderer_command(session: &Session, job: &DiffJob) -> Option<String> {
     ))
 }
 
+/// The syntax colors to add to this job's renderer, when its config asks for them.
+fn renderer_syntax(session: &Session, job: &DiffJob) -> Option<Syntax> {
+    let renderer = session.config.diff_renderers.get(job.key.renderer)?;
+    let theme = &session.config.theme;
+    renderer.highlight.then_some(Syntax {
+        bat_theme: theme.bat_theme,
+        added: theme.added_bg,
+        removed: theme.removed_bg,
+    })
+}
+
+/// Runs the renderer and turns its output into styled text, off the UI thread.
+fn render_diff(
+    job: &DiffJob,
+    command: &str,
+    whole_file: bool,
+    syntax: Option<Syntax>,
+) -> Result<Text<'static>, String> {
+    let bytes =
+        repo::run_renderer(&job.dir, command, whole_file).map_err(|error| format!("{error:#}"))?;
+    highlight::to_text(&bytes, syntax)
+}
+
 fn start_diff(session: &Session, job: DiffJob) {
     let Some(command) = renderer_command(session, &job) else {
         return;
     };
+    let syntax = renderer_syntax(session, &job);
     let sender = session.sender.clone();
     thread::spawn(move || {
-        let result =
-            repo::run_renderer(&job.dir, &command, false).map_err(|error| format!("{error:#}"));
+        let result = render_diff(&job, &command, false, syntax);
         let _ = sender.send(Message::Diff {
             pr: job.pr,
             key: job.key,

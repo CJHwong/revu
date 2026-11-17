@@ -19,6 +19,9 @@ pub struct Theme {
     pub fold: Color,
     /// The `bat` theme that matches, for syntax colors in the file view.
     pub bat_theme: &'static str,
+    /// Backgrounds for added and removed text when `bat` colors a diff's code.
+    pub added_bg: Color,
+    pub removed_bg: Color,
 }
 
 pub const THEME_NAMES: [&str; 2] = ["dracula", "terminal"];
@@ -36,6 +39,8 @@ const DRACULA: Theme = Theme {
     danger: Color::Rgb(0xff, 0x55, 0x55),
     fold: Color::Rgb(0xbd, 0x93, 0xf9),
     bat_theme: "Dracula",
+    added_bg: Color::Rgb(0x1f, 0x3d, 0x2b),
+    removed_bg: Color::Rgb(0x4d, 0x1f, 0x29),
 };
 
 /// Uses the terminal's own palette and background.
@@ -51,6 +56,8 @@ const TERMINAL: Theme = Theme {
     danger: Color::Red,
     fold: Color::Magenta,
     bat_theme: "ansi",
+    added_bg: Color::Indexed(22),
+    removed_bg: Color::Indexed(52),
 };
 
 pub fn by_name(name: &str) -> Result<Theme> {

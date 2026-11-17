@@ -1,6 +1,5 @@
 //! Screen state and key handling. It does no I/O: keys that need I/O return an `Action`.
 
-use ansi_to_tui::IntoText;
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Text;
@@ -989,16 +988,11 @@ impl App {
     }
 
     /// Converts the renderer's ANSI colors into styled text once, when it arrives.
-    pub fn set_diff(&mut self, pr: &PrRef, key: DiffKey, result: Result<Vec<u8>, String>) {
+    pub fn set_diff(&mut self, pr: &PrRef, key: DiffKey, result: Result<Text<'static>, String>) {
         let Some(view) = self.view_for(pr) else {
             return;
         };
-        let text = result.and_then(|bytes| {
-            bytes
-                .into_text()
-                .map_err(|error| format!("bad renderer output: {error}"))
-        });
-        view.diffs.insert(key, DiffOutput::Done(text));
+        view.diffs.insert(key, DiffOutput::Done(result));
     }
 
     /// Fills the search results that are still waiting for this query.
@@ -1024,18 +1018,10 @@ impl App {
     }
 
     /// Fills the file views that are still waiting for this path.
-    pub fn set_file(&mut self, pr: &PrRef, path: &str, result: Result<Vec<u8>, String>) {
+    pub fn set_file(&mut self, pr: &PrRef, path: &str, lines: Result<Text<'static>, String>) {
         let Some(view) = self.view_for(pr) else {
             return;
         };
-        // The terminal draws a tab as one cell, so expand it like an editor would.
-        let lines = result.and_then(|bytes| {
-            String::from_utf8_lossy(&bytes)
-                .replace('\t', "    ")
-                .into_bytes()
-                .into_text()
-                .map_err(|error| format!("bad file output: {error}"))
-        });
         for overlay in &mut view.overlays {
             match overlay {
                 Overlay::File {
@@ -2190,7 +2176,11 @@ mod tests {
         app.renderer_names = vec!["word".to_string(), "delta".to_string()];
         ready_repo(&mut app, &pr);
         let first = app.take_diff_request().unwrap();
-        app.set_diff(&pr, first.key, Ok(b"\x1b[32m+added\x1b[0m\n".to_vec()));
+        app.set_diff(
+            &pr,
+            first.key,
+            crate::highlight::to_text(b"\x1b[32m+added\x1b[0m\n", None),
+        );
         assert!(app.take_diff_request().is_none());
         app.handle_key(key(KeyCode::Char('m')));
         assert_eq!(app.take_diff_request().unwrap().key.renderer, 1);
@@ -2347,7 +2337,11 @@ mod tests {
         let text = (1..=50)
             .map(|number| format!("line {number}\n"))
             .collect::<String>();
-        app.set_file(&pr, "y.py", Ok(text.into_bytes()));
+        app.set_file(
+            &pr,
+            "y.py",
+            crate::highlight::to_text(text.as_bytes(), None),
+        );
         let Some(Overlay::File {
             scroll,
             lines: Some(Ok(lines)),
@@ -2378,7 +2372,7 @@ mod tests {
         app.set_diff(
             &pr,
             job.key,
-            Ok(b"one\nNeedle two\nthree\nneedle four\n".to_vec()),
+            crate::highlight::to_text(b"one\nNeedle two\nthree\nneedle four\n", None),
         );
         app.handle_key(key(KeyCode::Char('/')));
         type_text(&mut app, "needle");
