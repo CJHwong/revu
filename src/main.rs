@@ -139,6 +139,7 @@ struct Session {
 
 fn main() -> Result<()> {
     let config_path = config::default_path()?;
+    config::move_old_dir(&config_path)?;
     let config = config::load_or_init(&config_path)?;
     let (sender, receiver) = mpsc::channel();
     let mut session = Session {

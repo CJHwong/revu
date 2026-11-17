@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::theme::{self, Theme};
 
-pub const DEFAULT_CONFIG: &str = r#"# rs-github-inbox config. Press r in the inbox to reload it.
+pub const DEFAULT_CONFIG: &str = r#"# revu config. Press r in the inbox to reload it.
 # Every group query gets "is:pr is:open archived:false" added,
 # plus "updated:>=<date>" when updated_within_days is set, and
 # "sort:updated-desc" unless the query has its own sort:.
@@ -166,7 +166,7 @@ pub fn load_prefs(path: &Path) -> Result<ViewPrefs> {
 
 pub fn save_prefs(path: &Path, prefs: &ViewPrefs) -> Result<()> {
     let text = format!(
-        "# Written by rs-github-inbox when you change a view toggle.\n{}",
+        "# Written by revu when you change a view toggle.\n{}",
         serde_yaml::to_string(prefs)?
     );
     fs::write(path, text).with_context(|| format!("write {}", path.display()))
@@ -197,7 +197,26 @@ pub fn default_path() -> Result<PathBuf> {
             PathBuf::from(home).join(".config")
         }
     };
-    Ok(base.join("rs-github-inbox").join("config.yaml"))
+    Ok(base.join(APP_DIR).join("config.yaml"))
+}
+
+const APP_DIR: &str = "revu";
+/// The folder the app used before it was named revu.
+const OLD_APP_DIR: &str = "rs-github-inbox";
+
+/// Moves the config folder from the app's old name to its new one, once, so the
+/// config and the saved view toggles carry over. Returns true when it moved.
+pub fn move_old_dir(config_path: &Path) -> Result<bool> {
+    let Some(dir) = config_path.parent() else {
+        return Ok(false);
+    };
+    let old = dir.with_file_name(OLD_APP_DIR);
+    if dir.exists() || !old.is_dir() {
+        return Ok(false);
+    }
+    fs::rename(&old, dir)
+        .with_context(|| format!("move {} to {}", old.display(), dir.display()))?;
+    Ok(true)
 }
 
 /// Writes the default config on first run, so the user has a file to edit.
@@ -220,6 +239,27 @@ pub fn parse(text: &str) -> Result<Config> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_old_config_folder_moves_to_the_new_name_once() {
+        let base = std::env::temp_dir().join(format!("revu-move-{}", std::process::id()));
+        let old = base.join(OLD_APP_DIR);
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("view.yaml"), "renderer: difftastic\n").unwrap();
+        let path = base.join(APP_DIR).join("config.yaml");
+        assert!(move_old_dir(&path).unwrap());
+        assert_eq!(
+            fs::read_to_string(base.join(APP_DIR).join("view.yaml")).unwrap(),
+            "renderer: difftastic\n"
+        );
+        assert!(!old.exists());
+        fs::create_dir_all(&old).unwrap();
+        assert!(
+            !move_old_dir(&path).unwrap(),
+            "the new folder wins once it exists"
+        );
+        fs::remove_dir_all(&base).unwrap();
+    }
 
     #[test]
     fn default_config_parses_into_five_groups() {
@@ -252,8 +292,7 @@ mod tests {
 
     #[test]
     fn saving_the_theme_replaces_its_line_or_adds_one() {
-        let dir =
-            std::env::temp_dir().join(format!("rs-github-inbox-theme-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("revu-theme-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.yaml");
         fs::write(&path, "# keep me\nopen_diff: x\ngroups: []").unwrap();
@@ -269,7 +308,7 @@ mod tests {
 
     #[test]
     fn saving_the_workspace_twice_keeps_one_line_and_comments() {
-        let dir = std::env::temp_dir().join(format!("rs-github-inbox-ws-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("revu-ws-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.yaml");
         fs::write(&path, "# keep me\nopen_diff: x\ngroups: []").unwrap();
@@ -287,8 +326,7 @@ mod tests {
 
     #[test]
     fn view_prefs_round_trip_and_default_when_missing() {
-        let dir =
-            std::env::temp_dir().join(format!("rs-github-inbox-prefs-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("revu-prefs-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = prefs_path(&dir.join("config.yaml"));
         assert_eq!(load_prefs(&path).unwrap(), ViewPrefs::default());
@@ -316,7 +354,7 @@ mod tests {
 
     #[test]
     fn first_run_writes_the_default_file() {
-        let dir = std::env::temp_dir().join(format!("rs-github-inbox-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("revu-test-{}", std::process::id()));
         let path = dir.join("nested").join("config.yaml");
         let config = load_or_init(&path).unwrap();
         assert_eq!(config.groups.len(), 5);

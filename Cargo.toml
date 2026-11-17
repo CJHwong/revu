@@ -1,7 +1,10 @@
 [package]
-name = "rs-github-inbox"
+name = "revu"
 version = "0.1.0"
 edition = "2024"
+description = "Your GitHub pull request inbox and review tool, in the terminal"
+license = "MIT"
+repository = "https://github.com/CJHwong/revu"
 
 [dependencies]
 pulldown-cmark = { version = "0.13", default-features = false }

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 /// Where the PR's commits are kept in the user's clone. Nothing else writes here.
-const REF_NAMESPACE: &str = "refs/rs-github-inbox/pr";
+const REF_NAMESPACE: &str = "refs/revu/pr";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CloneLookup {
@@ -719,7 +719,7 @@ mod tests {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         let head = String::from_utf8(git(dir, &["rev-parse", "HEAD"]).unwrap().stdout).unwrap();
         let head = head.trim();
-        let hits = grep(dir, head, "rs-github-inbox").unwrap();
+        let hits = grep(dir, head, "[package]").unwrap();
         assert!(hits.iter().any(|hit| hit.path == "Cargo.toml"));
         // Joined at run time, so the searched text never appears in this file at HEAD.
         let absent = ["zz", "no-such-text", "zz"].join("-");
@@ -733,8 +733,7 @@ mod tests {
 
     #[test]
     fn the_word_renderer_diffs_a_path_with_a_space_and_a_quote() {
-        let dir =
-            std::env::temp_dir().join(format!("rs-github-inbox-quote-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("revu-quote-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = "docs/it's a file.md";
         fs::create_dir_all(dir.join("docs")).unwrap();
