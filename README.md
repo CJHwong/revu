@@ -63,6 +63,7 @@ Press `?` anywhere for this list.
 | Files changed | `]` / `[` | Next or previous unviewed file |
 | Files changed, Commits | `J` / `K`, `Space` / `b` | Scroll the diff |
 | Files changed, Commits | `m` | Switch the diff renderer |
+| Files changed, Commits | `w` | Wrap long lines (the default) or not. Unwrapped, `h` / `l` scroll the diff sideways instead of going back and opening. |
 | Files changed, Commits | `/`, then `n` / `N` | Find text in the diff, next and previous match |
 | Commits, Checks | `Enter` | Open the selected commit or check in the browser |
 | Inbox, pull request | `o` | Open in the browser |
@@ -70,4 +71,4 @@ Press `?` anywhere for this list.
 
 `Cmd+L` works only in terminals that pass Cmd to applications through the kitty keyboard protocol and do not use `Cmd+L` themselves. `Ctrl+L` works everywhere.
 
-The top line shows what is left of GitHub's API budget (`API: 4676/5000 left, resets 19:23`), from the headers of the latest call. It turns yellow under 20% and red under 5%. A click works like the keys on what it hits: it opens a pull request in the inbox, switches a tab, selects a file, commit, check or search hit, folds a folder, and opens or closes a card, thread or folded block on the Overview. The mouse wheel scrolls the pane under the pointer: the diff or the list beside it. On the Overview one tick goes to the next card, or a third of a screen inside a card taller than the screen. The app captures the mouse for this, so selecting text needs the terminal's bypass modifier (Shift in most terminals, Option or Fn in some).
+The top line shows what is left of GitHub's API budget (`API: 4676/5000 left, resets 19:23`), from the headers of the latest call. It turns yellow under 20% and red under 5%. A click works like the keys on what it hits: it opens a pull request in the inbox, switches a tab, selects a file, commit, check or search hit, folds a folder, and opens or closes a card, thread or folded block on the Overview. The mouse wheel scrolls the pane under the pointer: the diff or the list beside it. Over the Files changed list, it scrolls the list and leaves the selected file and its diff alone; `j` or `k` brings the list back to the selection. On the Overview one tick goes to the next card, or a third of a screen inside a card taller than the screen. The app captures the mouse for this, so selecting text needs the terminal's bypass modifier (Shift in most terminals, Option or Fn in some).

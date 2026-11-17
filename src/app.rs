@@ -238,6 +238,10 @@ pub struct DetailView {
     pub repo: RepoState,
     pub renderer: usize,
     pub diff_scroll: u16,
+    /// Long diff lines wrap. Off, they run past the edge and `h`/`l` scroll sideways.
+    pub diff_wrap: bool,
+    /// The columns the diff is scrolled sideways, when it does not wrap.
+    pub diff_shift: u16,
     /// The diff pane's height at the last draw.
     pub diff_height: u16,
     /// The width under the tabs at the last draw; the whole-file view renders to it.
@@ -282,6 +286,8 @@ impl DetailView {
             repo: RepoState::Unknown,
             renderer: 0,
             diff_scroll: 0,
+            diff_wrap: true,
+            diff_shift: 0,
             diff_width: 0,
             diff_left: 0,
             diff_height: 0,
@@ -614,7 +620,7 @@ impl DetailView {
 
     fn show_tab(&mut self, tab: Tab) {
         self.tab = tab;
-        self.diff_scroll = 0;
+        self.reset_diff_position();
     }
 
     /// Flips the selected file's Viewed state at once; the caller syncs it to GitHub.
@@ -745,7 +751,7 @@ impl DetailView {
                     Tab::Overview => return Ok(None),
                 };
                 state.select(Some(index));
-                self.diff_scroll = 0;
+                self.reset_diff_position();
                 if self.tab == Tab::Files {
                     // The clicked row is on screen, so the list stays where the wheel left it.
                     if let Some(top) = self.file_list_top.take() {
@@ -857,7 +863,7 @@ impl DetailView {
         };
         if let Some(target) = target {
             self.file_state.select(Some(target));
-            self.diff_scroll = 0;
+            self.reset_diff_position();
         }
     }
 
@@ -886,7 +892,22 @@ impl DetailView {
             .saturating_add_signed(delta)
             .min(last);
         state.select(Some(next));
+        self.reset_diff_position();
+    }
+
+    /// A new file or commit starts at its top left.
+    fn reset_diff_position(&mut self) {
         self.diff_scroll = 0;
+        self.diff_shift = 0;
+    }
+
+    /// `h` and `l` scroll an unwrapped diff sideways by a quarter of the pane.
+    fn shift_diff(&mut self, right: bool) {
+        let step = (self.diff_width / 4).max(4);
+        self.diff_shift = match right {
+            true => self.diff_shift.saturating_add(step),
+            false => self.diff_shift.saturating_sub(step),
+        };
     }
 }
 
@@ -1539,6 +1560,12 @@ impl App {
                 let result = view.open_whole_diff().map(Some);
                 return self.report(result);
             }
+            KeyCode::Char('w') if diff_pane => {
+                view.diff_wrap = !view.diff_wrap;
+                view.diff_shift = 0;
+            }
+            KeyCode::Char('h') if diff_pane && !view.diff_wrap => view.shift_diff(false),
+            KeyCode::Char('l') if diff_pane && !view.diff_wrap => view.shift_diff(true),
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Left => {
                 self.screen = Screen::Inbox;
                 self.error = None;
@@ -1947,6 +1974,29 @@ mod tests {
             "a key brings the list back to the file"
         );
         assert_eq!(view(&app).selected_file(), Some(1));
+    }
+
+    #[test]
+    fn w_unwraps_the_diff_and_then_h_and_l_scroll_it_sideways() {
+        let (mut app, _) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        if let Screen::Detail(view) = &mut app.screen {
+            view.diff_width = 80;
+        }
+        assert!(view(&app).diff_wrap, "long lines wrap by default");
+        app.handle_key(key(KeyCode::Char('w')));
+        app.handle_key(key(KeyCode::Char('l')));
+        app.handle_key(key(KeyCode::Char('l')));
+        assert_eq!(view(&app).diff_shift, 40);
+        app.handle_key(key(KeyCode::Char('h')));
+        assert_eq!(view(&app).diff_shift, 20);
+        assert!(
+            matches!(app.screen, Screen::Detail(_)),
+            "h scrolls, not back"
+        );
+        app.handle_key(key(KeyCode::Char('w')));
+        assert_eq!(view(&app).diff_shift, 0);
+        app.handle_key(key(KeyCode::Char('h')));
+        assert!(matches!(app.screen, Screen::Inbox), "wrapped, h goes back");
     }
 
     #[test]

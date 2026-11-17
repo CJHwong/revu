@@ -318,6 +318,10 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
         "Files changed, Commits",
         &[
             ("J/K, space/b", "scroll the diff"),
+            (
+                "w",
+                "wrap long lines, or not; unwrapped, h/l scroll sideways",
+            ),
             ("m", "switch the diff renderer"),
             ("/, n/N", "find in the diff, next and previous match"),
         ],
@@ -708,6 +712,7 @@ fn render_diff_pane(
         .border_style(Style::new().fg(theme.muted))
         .title(paint.bold(format!(" {renderer} "), theme.heading))
         .title(paint.span("m switches ", theme.muted))
+        .title(paint.span(wrap_note(view), theme.muted))
         .title(paint.bold(diff_pane_path(view), theme.foreground));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -735,17 +740,37 @@ fn render_diff_pane(
                 theme.muted,
             ),
             Some(DiffOutput::Done(Ok(text))) => {
-                // Clone only the visible lines; a long diff is redrawn every frame.
-                let lines = text
+                // Clone only the visible lines; a long diff is redrawn every frame. A
+                // wrapped line takes more rows, and the paragraph clips the rest.
+                let lines: Vec<Line> = text
                     .lines
                     .iter()
                     .skip(view.diff_scroll as usize)
-                    .take(inner.height as usize);
-                Paragraph::new(Text::from(lines.cloned().collect::<Vec<_>>()))
+                    .take(inner.height as usize)
+                    .cloned()
+                    .collect();
+                if view.diff_wrap {
+                    Paragraph::new(lines).wrap(Wrap { trim: false })
+                } else {
+                    // Stop where the longest visible line ends at the right edge.
+                    let longest = lines.iter().map(Line::width).max().unwrap_or(0);
+                    let last = longest.saturating_sub(inner.width as usize) as u16;
+                    view.diff_shift = view.diff_shift.min(last);
+                    Paragraph::new(lines).scroll((0, view.diff_shift))
+                }
             }
         },
     };
     frame.render_widget(content, inner);
+}
+
+/// "w wraps", or how far an unwrapped diff is scrolled sideways.
+fn wrap_note(view: &DetailView) -> String {
+    match (view.diff_wrap, view.diff_shift) {
+        (true, _) => "w unwraps ".to_string(),
+        (false, 0) => "w wraps  h/l sideways ".to_string(),
+        (false, shift) => format!("w wraps  h/l sideways  → {shift} "),
+    }
 }
 
 /// "✓ src/app/ main.rs  +3 -1", with the directory muted so the file name stands out.
