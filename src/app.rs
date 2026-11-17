@@ -1803,7 +1803,7 @@ impl App {
     /// Keeps the words, and hands them to the find prompt if it is open.
     pub fn set_find_words(&mut self, pr: &PrRef, words: Vec<String>) {
         if let Some(prompt) = &mut self.prompt
-            && prompt.kind == PromptKind::FindInDiff
+            && matches!(prompt.kind, PromptKind::FindInDiff | PromptKind::SearchRepo)
         {
             prompt.words = words.clone();
         }
@@ -2647,8 +2647,10 @@ impl App {
             KeyCode::Char('s') => {
                 self.prompt = Some(Prompt {
                     kind: PromptKind::SearchRepo,
+                    words: view.find_words.clone().unwrap_or_default(),
                     ..Prompt::default()
                 });
+                return view.words_request();
             }
             KeyCode::Char('/') if diff_pane => {
                 self.prompt = Some(Prompt {

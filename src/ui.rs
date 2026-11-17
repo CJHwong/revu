@@ -24,8 +24,6 @@ use crate::repo::{GrepHit, MAX_GREP_HITS};
 use crate::theme::{ON_STATE, PrState, Theme};
 use crate::{markdown, overview};
 
-const INBOX_HELP: &str = "j/k move | l/enter open | space fold | tab next group | o browser | r refresh | ctrl-l link | ? keys";
-
 /// What every render function needs besides the data it draws.
 #[derive(Clone, Copy)]
 struct Paint<'a> {
@@ -271,7 +269,7 @@ fn render_inbox(frame: &mut Frame, app: &mut App, paint: Paint) {
     app.inbox_clicks = list_targets(body, &heights, app.list_state.offset());
 
     frame.render_widget(
-        Paragraph::new(paint.span(INBOX_HELP, paint.theme.muted)),
+        Paragraph::new(hints_line(INBOX_HINTS, usize::from(bottom.width), paint)),
         bottom,
     );
 }
@@ -418,22 +416,119 @@ fn pad_span(span: Span<'static>, width: usize) -> Span<'static> {
 
 // ---- Detail ----
 
-fn detail_help(view: &DetailView) -> &'static str {
+/// A footer's keys, most used first; the footer drops from the end what does not fit.
+type Hints = &'static [(&'static str, &'static str)];
+
+const INBOX_HINTS: Hints = &[
+    ("j/k", "move"),
+    ("enter", "open"),
+    ("space", "fold"),
+    ("tab", "next group"),
+    ("o", "browser"),
+    ("r", "refresh"),
+    ("ctrl-l", "open a link"),
+    (",", "settings"),
+];
+
+fn detail_hints(view: &DetailView) -> Hints {
+    if let Some(overlay) = view.overlays.last() {
+        return match overlay {
+            Overlay::Search { .. } => &[
+                ("j/k", "move"),
+                ("enter", "open at the line"),
+                ("esc", "back"),
+            ],
+            Overlay::File { .. } => &[
+                ("j/k", "scroll"),
+                ("space", "page down"),
+                ("g", "top"),
+                ("G", "bottom"),
+                ("esc", "back"),
+            ],
+        };
+    }
     if view.line_mode.is_some() {
-        return "j/k line | V range | enter comment | R review | esc back to the diff | ? keys";
+        return &[
+            ("j/k", "line"),
+            ("V", "range"),
+            ("enter", "comment"),
+            ("R", "review"),
+            ("esc", "back to the diff"),
+        ];
     }
     match view.tab {
-        Tab::Overview => {
-            "j/k next comment | enter fold | R review | e labels | f/F/n filter, order, bots | o browser | h back | ? keys"
-        }
-        Tab::Checks => "j/k move | enter/o browser | r reload | h back | ? keys",
-        Tab::Commits => {
-            "j/k commit | J/K scroll diff | m renderer | / find | o browser | h back | ? keys"
-        }
-        Tab::Files => {
-            "j/k file | enter whole file | c comment | R review | v viewed | ]/[ unviewed | t tree | z list | m renderer | h back | ? keys"
-        }
+        Tab::Overview => &[
+            ("j/k", "comment"),
+            ("enter", "fold"),
+            ("R", "review"),
+            ("e", "labels"),
+            ("s", "search repo"),
+            ("f", "filter"),
+            ("F", "order"),
+            ("n", "bots"),
+            ("o", "browser"),
+            ("h", "back"),
+        ],
+        Tab::Checks => &[
+            ("j/k", "move"),
+            ("enter", "open the run"),
+            ("r", "reload"),
+            ("s", "search repo"),
+            ("h", "back"),
+        ],
+        Tab::Commits => &[
+            ("j/k", "commit"),
+            ("J", "scroll diff"),
+            ("/", "find"),
+            ("m", "renderer"),
+            ("w", "wrap"),
+            ("s", "search repo"),
+            ("o", "browser"),
+            ("h", "back"),
+        ],
+        Tab::Files => &[
+            ("j/k", "file"),
+            ("enter", "full file"),
+            ("v", "viewed"),
+            ("]", "next unviewed"),
+            ("/", "find"),
+            ("s", "search repo"),
+            ("c", "comment"),
+            ("R", "review"),
+            ("m", "renderer"),
+            ("t", "tree"),
+            ("z", "list"),
+            ("h", "back"),
+        ],
     }
+}
+
+/// The keys that fit in `width`, each key in the accent color, and "? all keys" last
+/// so the dropped ones stay one key away.
+fn hints_line(hints: Hints, width: usize, paint: Paint) -> Line<'static> {
+    let theme = paint.theme;
+    let pair = |key: &str, action: &str| {
+        vec![
+            paint.span(key.to_string(), theme.accent),
+            paint.span(format!(" {action}"), theme.muted),
+        ]
+    };
+    let tail = pair("?", "all keys");
+    let separator = "  ";
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut used = 1 + display_width("? all keys");
+    for (key, action) in hints {
+        let size = display_width(key) + 1 + display_width(action) + separator.len();
+        if used + size > width {
+            break;
+        }
+        used += size;
+        spans.push(Span::raw(if spans.is_empty() { " " } else { separator }));
+        spans.extend(pair(key, action));
+    }
+    spans.push(Span::raw(if spans.is_empty() { " " } else { separator }));
+    spans.extend(tail);
+    Line::from(spans)
 }
 
 /// Every key, by where it works. `?` shows this list.
@@ -623,11 +718,8 @@ fn render_detail(
     .areas(frame.area());
     // An error, a save in progress, or a finished save replaces the help line.
     let footer = match status {
-        Some(status) => status,
-        None => paint.span(
-            overlay_help(view.overlays.last()).unwrap_or(detail_help(view)),
-            theme.muted,
-        ),
+        Some(status) => Line::from(status),
+        None => hints_line(detail_hints(view), usize::from(bottom.width), paint),
     };
     frame.render_widget(Paragraph::new(footer), bottom);
 
@@ -705,13 +797,6 @@ fn render_detail(
                 render_diff_pane(frame, view, diff_area, renderer_names, paint);
             }
         }
-    }
-}
-
-fn overlay_help(overlay: Option<&Overlay>) -> Option<&'static str> {
-    match overlay? {
-        Overlay::Search { .. } => Some("j/k move | enter open the file at the line | esc back"),
-        Overlay::File { .. } => Some("j/k, space/b scroll | g/G top/bottom | esc back"),
     }
 }
 
@@ -1830,7 +1915,7 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
         ),
         PromptKind::SearchRepo => (
             " Search the repo at the PR head ".to_string(),
-            "finds text in every file, not only the changed ones. case-insensitive".to_string(),
+            "tab completes a word or file name from the diff. finds text in every file, ignoring case".to_string(),
         ),
         PromptKind::UpdatedWithin => (
             " Updated within, in days ".to_string(),

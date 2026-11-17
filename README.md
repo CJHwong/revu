@@ -52,7 +52,7 @@ Press `?` anywhere for this list.
 | Pull request | `1`-`4`, `Tab` / `Shift+Tab` | Switch between Overview, Commits, Checks and Files changed. The tabs show GitHub's counts, not the digits. |
 | Pull request | `Esc`, `h`, `q` | Back to the inbox |
 | Pull request | `g` / `G`, `Space` / `b` | Top, bottom, page down, page up |
-| Pull request | `s` | Search every file in the repo at the PR head, not only the changed ones. `Enter` opens the file at the match, with syntax colors from `bat` when it is installed. It needs the local clone, which the Files changed or Commits tab finds first. |
+| Pull request | `s` | Search every file in the repo at the PR head, not only the changed ones. `Tab` completes a word or file name from the PR's changes, as in find. `Enter` opens the file at the match, with syntax colors from `bat` when it is installed. It needs the local clone, which the Files changed or Commits tab finds first. |
 | Pull request | `r` | Fetch the pull request again |
 | Pull request | `R` | Review: `Tab` picks Comment, Approve or Request changes (only Comment on your own PR, as GitHub requires). `ctrl+s` asks to confirm and `y` sends. Your pending line comments go with it. Request changes needs a comment; Comment needs a comment or line comments. |
 | Pull request | `X` | Discard your pending review and every line comment in it, after a `y`. |
