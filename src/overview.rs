@@ -58,36 +58,25 @@ impl CommentFilter {
         let TimelineItem::Comment(comment) = item else {
             return (self == Self::All).then(|| item.clone());
         };
-        let keep_thread: fn(&ThreadLine) -> bool = match self {
-            Self::All => return Some(item.clone()),
-            Self::Unresolved => |thread| !thread.resolved,
-            Self::Mine => |thread| thread.comments.iter().any(|reply| reply.mine),
-        };
-        let threads: Vec<ThreadLine> = comment
-            .threads
-            .iter()
-            .filter(|thread| keep_thread(thread))
-            .cloned()
-            .collect();
-        let mine = self == Self::Mine && comment.mine;
-        if threads.is_empty() && !mine {
-            return None;
+        match self {
+            Self::All => Some(item.clone()),
+            // Your own comments and reviews only, not your replies in others' threads.
+            Self::Mine => comment.mine.then(|| item.clone()),
+            Self::Unresolved => {
+                let threads: Vec<ThreadLine> = comment
+                    .threads
+                    .iter()
+                    .filter(|thread| !thread.resolved)
+                    .cloned()
+                    .collect();
+                (!threads.is_empty()).then(|| {
+                    TimelineItem::Comment(Comment {
+                        threads,
+                        ..comment.clone()
+                    })
+                })
+            }
         }
-        // Under Mine, someone else's review shows only the threads you replied in.
-        let body = if self == Self::Mine && !comment.mine {
-            String::new()
-        } else {
-            comment.body.clone()
-        };
-        Some(TimelineItem::Comment(Comment {
-            threads: if mine {
-                comment.threads.clone()
-            } else {
-                threads
-            },
-            body,
-            ..comment.clone()
-        }))
     }
 
     fn empty_text(self) -> &'static str {
@@ -477,8 +466,7 @@ fn thread_block(context: &Context, thread: &ThreadLine) -> Block {
     Block::Details {
         summary,
         body,
-        // Under Mine the threads are the point, so they start open even when resolved.
-        open: !thread.resolved || context.comments.filter == CommentFilter::Mine,
+        open: !thread.resolved,
     }
 }
 
@@ -568,8 +556,27 @@ mod tests {
         assert!(!shows(&unresolved, "aaa111"), "commits show only under All");
 
         let mine = rendered_with(&[], view(CommentFilter::Mine, false));
-        assert!(shows(&mine, "Because."), "a thread I replied in shows");
-        assert!(!shows(&mine, "Looks fine"));
+        assert_eq!(
+            mine.last().map(|line| line.trim()),
+            Some("Nothing from you here yet."),
+            "a reply in someone else's thread is not Mine"
+        );
+        let activity = sample_activity();
+        let own = activity.timeline.iter().find_map(|item| match item {
+            TimelineItem::Comment(comment) if comment.author.login == "lead" => {
+                Some(TimelineItem::Comment(Comment {
+                    mine: true,
+                    ..comment.clone()
+                }))
+            }
+            _ => None,
+        });
+        let own = own.expect("the lead review");
+        assert_eq!(
+            CommentFilter::Mine.apply(&own),
+            Some(own.clone()),
+            "my own review is Mine, threads and all"
+        );
 
         let humans = rendered_with(
             &[],
