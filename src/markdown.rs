@@ -5,6 +5,7 @@ use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::collections::HashSet;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::theme::Theme;
@@ -38,7 +39,7 @@ pub enum Block {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextRow {
     pub line: Line<'static>,
-    pub fold: Option<usize>,
+    pub fold: Option<FoldId>,
     pub anchor: bool,
 }
 
@@ -69,12 +70,53 @@ impl TextRow {
     }
 }
 
-/// Numbers folds in document order. A fold's number stays the same when an earlier fold
-/// opens or closes, so the toggled set stays valid across layouts.
+/// A fold's identity. It comes from what the fold belongs to, not where it sits on
+/// screen, so a filter or a new order keeps what the user opened or closed.
+pub type FoldId = u64;
+
+/// Hands out fold IDs inside a scope, such as one comment: the scope's key plus the fold's
+/// place in it. A fold keeps its ID when an earlier fold opens or closes.
 pub struct Folds<'a> {
-    pub next: usize,
+    scope: FoldId,
+    next: usize,
     /// Folds the user flipped from their default state.
-    pub toggled: &'a HashSet<usize>,
+    pub toggled: &'a HashSet<FoldId>,
+}
+
+impl<'a> Folds<'a> {
+    pub fn new(toggled: &'a HashSet<FoldId>) -> Self {
+        Folds {
+            scope: 0,
+            next: 0,
+            toggled,
+        }
+    }
+
+    /// Starts numbering the folds of one item, such as a comment or a review thread.
+    pub fn enter(&mut self, key: &str) {
+        self.scope = fold_key(key);
+        self.next = 0;
+    }
+
+    fn take(&mut self) -> FoldId {
+        let id = numbered_fold(self.scope, self.next);
+        self.next += 1;
+        id
+    }
+}
+
+/// The ID of a fold named by a key, such as a comment card.
+pub fn fold_key(key: &str) -> FoldId {
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The ID of the `place`-th fold inside a scope.
+pub fn numbered_fold(scope: FoldId, place: usize) -> FoldId {
+    let mut hasher = DefaultHasher::new();
+    (scope, place).hash(&mut hasher);
+    hasher.finish()
 }
 
 pub fn parse(markdown: &str, theme: &Theme) -> Vec<Block> {
@@ -135,8 +177,7 @@ fn layout_details(
     theme: &Theme,
     rows: &mut Vec<TextRow>,
 ) {
-    let id = folds.next;
-    folds.next += 1;
+    let id = folds.take();
     let open = open_by_default != folds.toggled.contains(&id);
     // The body is laid out even when closed: the bar shows its line count, and the folds
     // inside it use up their numbers either way.
@@ -866,13 +907,11 @@ mod tests {
     use super::*;
     use crate::theme;
 
+    /// `open` lists folds by their place in the document.
     fn render(markdown: &str, width: usize, open: &[usize]) -> Vec<TextRow> {
         let theme = theme::by_name("dracula").unwrap();
-        let open: HashSet<usize> = open.iter().copied().collect();
-        let mut folds = Folds {
-            next: 0,
-            toggled: &open,
-        };
+        let open: HashSet<FoldId> = open.iter().map(|place| numbered_fold(0, *place)).collect();
+        let mut folds = Folds::new(&open);
         layout(&parse(markdown, &theme), width, &mut folds, &theme)
     }
 
@@ -942,11 +981,16 @@ mod tests {
         let markdown = "<details><summary>outer</summary>\n\n<details><summary>inner</summary>\n\nx\n\n</details>\n\n</details>\n\n<details><summary>last</summary>\n\ny\n\n</details>";
         let closed = render(markdown, 40, &[]);
         let folds: Vec<_> = closed.iter().filter_map(|row| row.fold).collect();
-        assert_eq!(folds, [0, 2], "the hidden inner fold still uses number 1");
+        let place = |place| numbered_fold(0, place);
+        assert_eq!(
+            folds,
+            [place(0), place(2)],
+            "the hidden inner fold still uses number 1"
+        );
         let open = render(markdown, 40, &[0]);
         assert_eq!(
             open.iter().filter_map(|row| row.fold).collect::<Vec<_>>(),
-            [0, 1, 2]
+            [place(0), place(1), place(2)]
         );
     }
 

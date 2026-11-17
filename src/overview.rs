@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use std::collections::HashSet;
 use unicode_width::UnicodeWidthStr;
 
-use crate::markdown::{self, Block, Folds, TextRow, line_width, truncate};
+use crate::markdown::{self, Block, FoldId, Folds, TextRow, fold_key, line_width, truncate};
 use crate::model::{
     CheckState, Comment, PrActivity, PrDetail, ReviewState, ThreadLine, TimelineItem,
 };
@@ -92,7 +92,7 @@ pub struct Context<'a> {
     pub detail: &'a PrDetail,
     pub activity: Option<&'a Result<PrActivity, String>>,
     /// Folds the user flipped from their default state.
-    pub toggled: &'a HashSet<usize>,
+    pub toggled: &'a HashSet<FoldId>,
     pub comments: CommentView,
     pub theme: &'a Theme,
     pub now: DateTime<Utc>,
@@ -112,10 +112,8 @@ impl Context<'_> {
 }
 
 pub fn build(context: &Context, width: usize) -> Vec<TextRow> {
-    let mut folds = Folds {
-        next: 0,
-        toggled: context.toggled,
-    };
+    let mut folds = Folds::new(context.toggled);
+    folds.enter("description");
     let mut rows = status_card(context, width);
     rows.push(TextRow::blank());
     rows.extend(description_card(context, width, &mut folds));
@@ -135,14 +133,11 @@ fn card(
     content: Vec<TextRow>,
     width: usize,
     theme: &Theme,
-    folds: Option<&mut Folds>,
+    fold: Option<FoldId>,
+    toggled: &HashSet<FoldId>,
 ) -> Vec<TextRow> {
     let border = Style::new().fg(theme.muted);
-    let fold = folds.map(|folds| {
-        let id = folds.next;
-        folds.next += 1;
-        (id, !folds.toggled.contains(&id))
-    });
+    let fold = fold.map(|id| (id, !toggled.contains(&id)));
     let open = fold.is_none_or(|(_, open)| open);
     let (start, end) = if open {
         ("╭─ ", "╮")
@@ -243,6 +238,7 @@ fn status_card(context: &Context, width: usize) -> Vec<TextRow> {
         width,
         theme,
         None,
+        context.toggled,
     )
 }
 
@@ -270,7 +266,14 @@ fn description_card(context: &Context, width: usize, folds: &mut Folds) -> Vec<T
         folds,
         "No description provided.",
     );
-    card(title, body, width, context.theme, Some(folds))
+    card(
+        title,
+        body,
+        width,
+        context.theme,
+        Some(fold_key("description:card")),
+        context.toggled,
+    )
 }
 
 fn body_rows(
@@ -389,12 +392,24 @@ fn item_rows(
     }
     let inner = width.saturating_sub(4);
     let mut content = Vec::new();
+    let key = format!(
+        "comment:{}:{}",
+        comment.author.login,
+        comment.at.timestamp()
+    );
     // A review made only of inline comments has no text of its own to show.
     if !comment.body.trim().is_empty() || comment.threads.is_empty() {
+        folds.enter(&key);
         content = body_rows(context, &comment.body, inner, folds, "No text.");
         content.push(TextRow::blank());
     }
     for thread in &comment.threads {
+        // Its own scope, so a filter that hides other threads leaves its ID alone.
+        let first = thread
+            .comments
+            .first()
+            .map_or(0, |reply| reply.at.timestamp());
+        folds.enter(&format!("thread:{}:{}:{first}", thread.path, thread.lines));
         let block = thread_block(context, thread);
         content.extend(markdown::layout(&[block], inner, folds, context.theme));
     }
@@ -404,7 +419,8 @@ fn item_rows(
         content,
         width,
         context.theme,
-        Some(folds),
+        Some(fold_key(&format!("{key}:card"))),
+        context.toggled,
     );
     rows.push(TextRow::blank());
     rows
@@ -504,15 +520,15 @@ mod tests {
     use crate::model::tests::{sample_activity, sample_detail};
     use crate::theme;
 
-    fn rendered(open: &[usize]) -> Vec<String> {
+    fn rendered(open: &[FoldId]) -> Vec<String> {
         rendered_with(open, CommentView::default())
     }
 
-    fn rendered_with(open: &[usize], comments: CommentView) -> Vec<String> {
+    fn rendered_with(open: &[FoldId], comments: CommentView) -> Vec<String> {
         let theme = theme::by_name("dracula").unwrap();
         let detail = sample_detail();
         let activity = Ok(sample_activity());
-        let open: HashSet<usize> = open.iter().copied().collect();
+        let open: HashSet<FoldId> = open.iter().copied().collect();
         let now = detail.created_at + chrono::Duration::days(3);
         let context = Context {
             detail: &detail,
@@ -594,6 +610,45 @@ mod tests {
         };
         assert!(position(&newest, "lead requested") < position(&newest, "Looks fine"));
         assert!(shows(&newest, "Newest first"));
+    }
+
+    #[test]
+    fn a_closed_card_and_thread_stay_closed_under_another_filter() {
+        let theme = theme::by_name("dracula").unwrap();
+        let detail = sample_detail();
+        let activity = Ok(sample_activity());
+        let none = HashSet::new();
+        let context = Context {
+            detail: &detail,
+            activity: Some(&activity),
+            toggled: &none,
+            comments: CommentView::default(),
+            theme: &theme,
+            now: detail.created_at,
+        };
+        let rows = build(&context, 60);
+        let fold_of = |text: &str| {
+            rows.iter()
+                .find(|row| {
+                    row.line
+                        .spans
+                        .iter()
+                        .any(|span| span.content.contains(text))
+                })
+                .and_then(|row| row.fold)
+                .unwrap()
+        };
+        let thread = fold_of("● Unresolved");
+        let shows = |lines: &[String], text: &str| lines.iter().any(|line| line.contains(text));
+        let unresolved = CommentView {
+            filter: CommentFilter::Unresolved,
+            ..CommentView::default()
+        };
+        assert!(shows(&rendered_with(&[], unresolved), "Why here?"));
+        assert!(
+            !shows(&rendered_with(&[thread], unresolved), "Why here?"),
+            "the thread closed under All is still closed under Unresolved"
+        );
     }
 
     #[test]

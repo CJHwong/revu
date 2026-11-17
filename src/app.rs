@@ -191,7 +191,7 @@ pub struct DetailView {
     pub cursor: usize,
     pub scroll: usize,
     /// Folds the user opened or closed, away from their default state.
-    pub toggled_folds: HashSet<usize>,
+    pub toggled_folds: HashSet<crate::markdown::FoldId>,
     pub comments: crate::overview::CommentView,
     /// The Overview laid out at the last drawn width. Cleared when its content changes.
     pub overview: Option<OverviewLayout>,
@@ -727,11 +727,9 @@ impl DetailView {
         }
     }
 
-    /// Fold numbers follow the order on screen, so a new filter or order starts every fold
-    /// at its default state.
+    /// Folds keep their IDs across filters, so what you opened stays open.
     fn set_comments(&mut self, comments: crate::overview::CommentView) {
         self.comments = comments;
-        self.toggled_folds.clear();
         self.overview = None;
     }
 
