@@ -24,23 +24,24 @@ pub struct Theme {
     pub removed_bg: Color,
 }
 
-/// The built-in themes in menu order: the two originals, then dark, then light ones.
+/// The built-in themes in menu order: the terminal's own colors, then dark and light
+/// themes, each A to Z.
 const THEMES: [(&str, Theme); 15] = [
-    ("dracula", DRACULA),
     ("terminal", TERMINAL),
-    ("catppuccin_mocha", CATPPUCCIN_MOCHA),
-    ("catppuccin_macchiato", CATPPUCCIN_MACCHIATO),
     ("catppuccin_frappe", CATPPUCCIN_FRAPPE),
-    ("nord", NORD),
+    ("catppuccin_macchiato", CATPPUCCIN_MACCHIATO),
+    ("catppuccin_mocha", CATPPUCCIN_MOCHA),
+    ("dracula", DRACULA),
     ("gruvbox_dark", GRUVBOX_DARK),
-    ("solarized_dark", SOLARIZED_DARK),
-    ("one_half_dark", ONE_HALF_DARK),
     ("monokai", MONOKAI),
+    ("nord", NORD),
+    ("one_half_dark", ONE_HALF_DARK),
+    ("solarized_dark", SOLARIZED_DARK),
     ("catppuccin_latte", CATPPUCCIN_LATTE),
-    ("gruvbox_light", GRUVBOX_LIGHT),
-    ("solarized_light", SOLARIZED_LIGHT),
-    ("one_half_light", ONE_HALF_LIGHT),
     ("github", GITHUB),
+    ("gruvbox_light", GRUVBOX_LIGHT),
+    ("one_half_light", ONE_HALF_LIGHT),
+    ("solarized_light", SOLARIZED_LIGHT),
 ];
 
 pub const THEME_NAMES: [&str; THEMES.len()] = theme_names();
@@ -138,19 +139,19 @@ const CATPPUCCIN_FRAPPE: Theme = Theme {
 };
 
 const CATPPUCCIN_LATTE: Theme = Theme {
-    background: Color::Rgb(0xef, 0xf1, 0xf5),
+    background: Color::Rgb(0xdc, 0xe0, 0xe8),
     foreground: Color::Rgb(0x4c, 0x4f, 0x69),
-    muted: Color::Rgb(0x8c, 0x8f, 0xa1),
-    selection: Color::Rgb(0xcc, 0xd0, 0xda),
-    heading: Color::Rgb(0x88, 0x39, 0xef),
-    accent: Color::Rgb(0x04, 0xa5, 0xe5),
-    success: Color::Rgb(0x40, 0xa0, 0x2b),
-    warning: Color::Rgb(0xdf, 0x8e, 0x1d),
-    danger: Color::Rgb(0xd2, 0x0f, 0x39),
-    fold: Color::Rgb(0x88, 0x39, 0xef),
+    muted: Color::Rgb(0x70, 0x73, 0x85),
+    selection: Color::Rgb(0xbc, 0xc0, 0xcc),
+    heading: Color::Rgb(0x81, 0x36, 0xe3),
+    accent: Color::Rgb(0x1b, 0x5c, 0xdd),
+    success: Color::Rgb(0x2f, 0x76, 0x1f),
+    warning: Color::Rgb(0x8c, 0x59, 0x14),
+    danger: Color::Rgb(0xc8, 0x0e, 0x36),
+    fold: Color::Rgb(0x81, 0x36, 0xe3),
     bat_theme: "Catppuccin Latte",
-    added_bg: Color::Rgb(0xc8, 0xdf, 0xc9),
-    removed_bg: Color::Rgb(0xe9, 0xbf, 0xcc),
+    added_bg: Color::Rgb(0xba, 0xd2, 0xbe),
+    removed_bg: Color::Rgb(0xda, 0xb2, 0xc2),
 };
 
 const NORD: Theme = Theme {
@@ -186,19 +187,19 @@ const GRUVBOX_DARK: Theme = Theme {
 };
 
 const GRUVBOX_LIGHT: Theme = Theme {
-    background: Color::Rgb(0xfb, 0xf1, 0xc7),
+    background: Color::Rgb(0xeb, 0xdb, 0xb2),
     foreground: Color::Rgb(0x3c, 0x38, 0x36),
-    muted: Color::Rgb(0x92, 0x83, 0x74),
+    muted: Color::Rgb(0x7c, 0x6f, 0x64),
     selection: Color::Rgb(0xd5, 0xc4, 0xa1),
     heading: Color::Rgb(0x8f, 0x3f, 0x71),
     accent: Color::Rgb(0x07, 0x66, 0x78),
-    success: Color::Rgb(0x79, 0x74, 0x0e),
-    warning: Color::Rgb(0xb5, 0x76, 0x14),
+    success: Color::Rgb(0x73, 0x6e, 0x0d),
+    warning: Color::Rgb(0x93, 0x60, 0x10),
     danger: Color::Rgb(0x9d, 0x00, 0x06),
     fold: Color::Rgb(0x8f, 0x3f, 0x71),
     bat_theme: "gruvbox-light",
-    added_bg: Color::Rgb(0xde, 0xd6, 0x9e),
-    removed_bg: Color::Rgb(0xe6, 0xbc, 0x9d),
+    added_bg: Color::Rgb(0xd2, 0xc4, 0x8e),
+    removed_bg: Color::Rgb(0xda, 0xab, 0x8c),
 };
 
 const SOLARIZED_DARK: Theme = Theme {
@@ -218,19 +219,19 @@ const SOLARIZED_DARK: Theme = Theme {
 };
 
 const SOLARIZED_LIGHT: Theme = Theme {
-    background: Color::Rgb(0xfd, 0xf6, 0xe3),
+    background: Color::Rgb(0xee, 0xe8, 0xd5),
     foreground: Color::Rgb(0x58, 0x6e, 0x75),
-    muted: Color::Rgb(0x93, 0xa1, 0xa1),
-    selection: Color::Rgb(0xee, 0xe8, 0xd5),
+    muted: Color::Rgb(0x76, 0x86, 0x87),
+    selection: Color::Rgb(0xdd, 0xd6, 0xc1),
     heading: Color::Rgb(0x6c, 0x71, 0xc4),
-    accent: Color::Rgb(0x26, 0x8b, 0xd2),
-    success: Color::Rgb(0x85, 0x99, 0x00),
-    warning: Color::Rgb(0xb5, 0x89, 0x00),
+    accent: Color::Rgb(0x22, 0x7d, 0xbe),
+    success: Color::Rgb(0x6c, 0x7c, 0x00),
+    warning: Color::Rgb(0x93, 0x70, 0x00),
     danger: Color::Rgb(0xdc, 0x32, 0x2f),
     fold: Color::Rgb(0xd3, 0x36, 0x82),
     bat_theme: "Solarized (light)",
-    added_bg: Color::Rgb(0xe3, 0xe2, 0xb1),
-    removed_bg: Color::Rgb(0xf6, 0xcb, 0xbb),
+    added_bg: Color::Rgb(0xd7, 0xd7, 0xa6),
+    removed_bg: Color::Rgb(0xea, 0xc0, 0xb0),
 };
 
 const ONE_HALF_DARK: Theme = Theme {
@@ -250,19 +251,19 @@ const ONE_HALF_DARK: Theme = Theme {
 };
 
 const ONE_HALF_LIGHT: Theme = Theme {
-    background: Color::Rgb(0xfa, 0xfa, 0xfa),
+    background: Color::Rgb(0xe5, 0xe5, 0xe6),
     foreground: Color::Rgb(0x38, 0x3a, 0x42),
-    muted: Color::Rgb(0xa0, 0xa1, 0xa7),
-    selection: Color::Rgb(0xe5, 0xe5, 0xe6),
+    muted: Color::Rgb(0x79, 0x7a, 0x81),
+    selection: Color::Rgb(0xca, 0xcb, 0xce),
     heading: Color::Rgb(0xa6, 0x26, 0xa4),
-    accent: Color::Rgb(0x01, 0x84, 0xbc),
-    success: Color::Rgb(0x50, 0xa1, 0x4f),
-    warning: Color::Rgb(0xc1, 0x84, 0x01),
-    danger: Color::Rgb(0xe4, 0x56, 0x49),
+    accent: Color::Rgb(0x01, 0x77, 0xaa),
+    success: Color::Rgb(0x3e, 0x7c, 0x3d),
+    warning: Color::Rgb(0x95, 0x66, 0x01),
+    danger: Color::Rgb(0xba, 0x46, 0x3c),
     fold: Color::Rgb(0xa6, 0x26, 0xa4),
     bat_theme: "OneHalfLight",
-    added_bg: Color::Rgb(0xd5, 0xe6, 0xd4),
-    removed_bg: Color::Rgb(0xf5, 0xd6, 0xd3),
+    added_bg: Color::Rgb(0xc4, 0xd6, 0xc5),
+    removed_bg: Color::Rgb(0xe5, 0xc6, 0xc3),
 };
 
 const MONOKAI: Theme = Theme {
@@ -282,10 +283,10 @@ const MONOKAI: Theme = Theme {
 };
 
 const GITHUB: Theme = Theme {
-    background: Color::Rgb(0xff, 0xff, 0xff),
+    background: Color::Rgb(0xe4, 0xe8, 0xec),
     foreground: Color::Rgb(0x24, 0x29, 0x2f),
     muted: Color::Rgb(0x6e, 0x77, 0x81),
-    selection: Color::Rgb(0xd0, 0xd7, 0xde),
+    selection: Color::Rgb(0xc8, 0xd1, 0xda),
     heading: Color::Rgb(0x82, 0x50, 0xdf),
     accent: Color::Rgb(0x09, 0x69, 0xda),
     success: Color::Rgb(0x1a, 0x7f, 0x37),
@@ -293,9 +294,22 @@ const GITHUB: Theme = Theme {
     danger: Color::Rgb(0xcf, 0x22, 0x2e),
     fold: Color::Rgb(0x82, 0x50, 0xdf),
     bat_theme: "GitHub",
-    added_bg: Color::Rgb(0xcd, 0xe3, 0xd3),
-    removed_bg: Color::Rgb(0xf4, 0xce, 0xd1),
+    added_bg: Color::Rgb(0xb8, 0xd1, 0xc4),
+    removed_bg: Color::Rgb(0xdf, 0xbc, 0xc2),
 };
+
+/// The menu group a theme belongs to.
+pub fn group_of(theme: &Theme) -> &'static str {
+    match theme.background {
+        Color::Rgb(red, green, blue)
+            if u32::from(red) + u32::from(green) + u32::from(blue) > 384 =>
+        {
+            "Light"
+        }
+        Color::Rgb(..) => "Dark",
+        _ => "Your terminal",
+    }
+}
 
 /// A color as delta and git write it: "#rrggbb" or a 256-color number.
 pub fn color_name(color: Color) -> String {
@@ -348,6 +362,26 @@ mod tests {
     }
 
     #[test]
+    fn the_menu_lists_terminal_then_dark_then_light_each_a_to_z() {
+        let groups: Vec<&str> = THEMES.iter().map(|(_, theme)| group_of(theme)).collect();
+        let mut sorted = groups.clone();
+        sorted.sort_by_key(|group| {
+            ["Your terminal", "Dark", "Light"]
+                .iter()
+                .position(|g| g == group)
+        });
+        assert_eq!(groups, sorted, "groups stay together in order");
+        for group in ["Dark", "Light"] {
+            let names: Vec<&str> = THEMES
+                .iter()
+                .filter(|(_, theme)| group_of(theme) == group)
+                .map(|(name, _)| *name)
+                .collect();
+            assert!(names.is_sorted(), "{group}: {names:?}");
+        }
+    }
+
+    #[test]
     fn tints_are_named_the_way_delta_reads_them() {
         assert_eq!(color_name(DRACULA.added_bg), "#1f3d2b");
         assert_eq!(color_name(TERMINAL.removed_bg), "52");
@@ -365,6 +399,6 @@ mod tests {
     #[test]
     fn unknown_name_lists_the_choices() {
         let error = by_name("solarized").unwrap_err().to_string();
-        assert!(error.contains("dracula, terminal"));
+        assert!(error.contains("terminal, catppuccin_frappe"));
     }
 }

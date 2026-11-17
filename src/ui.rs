@@ -1380,18 +1380,21 @@ fn reviewer_symbol(state: &str, theme: &Theme) -> (&'static str, Color) {
 /// selected one.
 fn render_theme_menu(frame: &mut Frame, selected: usize, current: &str, paint: Paint) {
     let theme = paint.theme;
-    let lines: Vec<Line> = crate::theme::THEME_NAMES
-        .iter()
-        .enumerate()
-        .map(|(index, name)| {
-            let mark = if *name == current { "●" } else { " " };
-            let line = Line::from(paint.span(format!(" {mark} {name} "), theme.foreground));
-            match index == selected {
-                true => line.style(Style::new().bg(theme.selection)),
-                false => line,
-            }
-        })
-        .collect();
+    let mut lines: Vec<Line> = Vec::new();
+    let mut last_group = "";
+    for (index, name) in crate::theme::THEME_NAMES.iter().enumerate() {
+        let group = crate::theme::by_name(name).map_or("", |named| crate::theme::group_of(&named));
+        if group != last_group {
+            lines.push(Line::from(paint.bold(format!(" {group}"), theme.heading)));
+            last_group = group;
+        }
+        let mark = if *name == current { "●" } else { " " };
+        let line = Line::from(paint.span(format!("  {mark} {name} "), theme.foreground));
+        lines.push(match index == selected {
+            true => line.style(Style::new().bg(theme.selection)),
+            false => line,
+        });
+    }
     let area = frame.area();
     let width = 36.min(area.width);
     let height = (lines.len() as u16 + 2).min(area.height);

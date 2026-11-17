@@ -1156,11 +1156,14 @@ impl App {
     }
 
     /// The open PR's view, unless the user has already left that PR.
-    /// Drops the drawn diffs, whose colors came from the old theme; the next draw asks
-    /// for them again.
-    pub fn forget_diffs(&mut self) {
+    /// Drops everything drawn in the old theme's colors: the diffs, the Overview and an
+    /// open file view. The next draw builds them again in the new colors.
+    pub fn forget_colors(&mut self) {
         if let Screen::Detail(view) = &mut self.screen {
             view.diffs.clear();
+            view.overview = None;
+            view.overlays
+                .retain(|overlay| !matches!(overlay, Overlay::File { .. }));
         }
     }
 
@@ -1996,7 +1999,7 @@ mod tests {
     }
 
     #[test]
-    fn forgetting_diffs_asks_for_them_again() {
+    fn forgetting_colors_rebuilds_the_diff_and_the_overview() {
         let files = vec![file("a.md", ViewedState::Unviewed)];
         let (mut app, pr) = files_tab(files);
         ready_repo(&mut app, &pr);
@@ -2005,7 +2008,15 @@ mod tests {
             .expect("the open file asks for its diff");
         app.set_diff(&pr, job.key, crate::highlight::to_text(b"x\n", None));
         assert!(app.take_diff_request().is_none());
-        app.forget_diffs();
+        view_mut(&mut app).overview = Some(OverviewLayout {
+            width: 60,
+            rows: Vec::new(),
+        });
+        app.forget_colors();
+        assert!(
+            view(&app).overview.is_none(),
+            "a new theme lays out the Overview again"
+        );
         assert!(
             app.take_diff_request().is_some(),
             "a new theme renders the diff again"
@@ -2015,12 +2026,12 @@ mod tests {
     #[test]
     fn the_theme_menu_opens_on_the_current_theme_and_applies_the_pick() {
         let mut app = app_with(vec![group("A", &[7], false)]);
-        app.theme_name = "terminal";
+        app.theme_name = "dracula";
         app.handle_key(key(KeyCode::Char('T')));
-        assert_eq!(app.theme_menu, Some(1));
+        assert_eq!(app.theme_menu, Some(4));
         app.handle_key(key(KeyCode::Char('j')));
         let action = app.handle_key(key(KeyCode::Enter));
-        assert!(matches!(action, Some(Action::SetTheme("catppuccin_mocha"))));
+        assert!(matches!(action, Some(Action::SetTheme("gruvbox_dark"))));
         assert!(app.theme_menu.is_none());
         app.handle_key(key(KeyCode::Char('T')));
         app.handle_key(key(KeyCode::Esc));

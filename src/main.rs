@@ -393,7 +393,7 @@ fn set_theme(app: &mut App, session: &mut Session, name: &'static str) {
     };
     if theme != session.config.theme {
         session.config.theme = theme;
-        app.forget_diffs();
+        app.forget_colors();
     }
     app.theme_name = name;
     if let Err(error) = config::save_theme(&session.config_path, name) {
@@ -517,7 +517,7 @@ fn refresh(app: &mut App, session: &mut Session) {
         Ok(config) => {
             app.renderer_names = renderer_names(&config);
             if config.theme != session.config.theme {
-                app.forget_diffs();
+                app.forget_colors();
             }
             app.theme_name = theme::name_of(&config.theme).unwrap_or(app.theme_name);
             session.config = config;
