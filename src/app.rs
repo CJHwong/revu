@@ -886,6 +886,8 @@ pub struct App {
     pub show_help: bool,
     /// What a mouse click can hit on the inbox, from the last draw.
     pub inbox_clicks: Vec<ClickTarget>,
+    /// GitHub's API budget after the latest call.
+    pub rate_limit: Option<crate::model::RateLimit>,
     /// One flag per group: true while its search is running.
     pub group_loading: Vec<bool>,
     inbox_generation: u64,
@@ -913,6 +915,7 @@ impl App {
             fetched_at: None,
             show_help: false,
             inbox_clicks: Vec::new(),
+            rate_limit: None,
             group_loading: Vec::new(),
             inbox_generation: 0,
             renderer_names: Vec::new(),

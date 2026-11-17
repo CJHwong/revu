@@ -151,6 +151,7 @@ fn disable_input_modes(enhanced_keys: bool) -> Result<()> {
 
 fn run(terminal: &mut DefaultTerminal, app: &mut App, session: &mut Session) -> Result<()> {
     loop {
+        app.rate_limit = github::rate_limit();
         terminal.draw(|frame| ui::render(frame, app, &session.config.theme, Utc::now()))?;
         apply_messages(app, &session.receiver);
         dispatch_requests(app, session);

@@ -28,6 +28,14 @@ pub struct CheckSummary {
     pub state: CheckState,
 }
 
+/// GitHub's GraphQL budget after the latest call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RateLimit {
+    pub remaining: u64,
+    pub limit: u64,
+    pub reset_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Enough to fetch and link a pull request, from an inbox row or a pasted link.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrRef {

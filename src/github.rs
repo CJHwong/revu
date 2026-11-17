@@ -4,9 +4,19 @@ use anyhow::{Context, Result, bail};
 use chrono::NaiveDate;
 use serde_json::Value;
 use std::process::Command;
+use std::sync::Mutex;
 
 use crate::config::GroupConfig;
-use crate::model::{self, ChangedFile, Group, PrActivity, PrDetail, TIMELINE_LIMIT};
+use crate::model::{self, ChangedFile, Group, PrActivity, PrDetail, RateLimit, TIMELINE_LIMIT};
+
+/// The budget from the latest GraphQL response. Calls run on worker threads; the UI reads
+/// this before each draw.
+static RATE_LIMIT: Mutex<Option<RateLimit>> = Mutex::new(None);
+
+/// The budget after the latest call, or None before the first one.
+pub fn rate_limit() -> Option<RateLimit> {
+    RATE_LIMIT.lock().map_or(None, |limit| *limit)
+}
 
 /// GitHub's maximum page size for a search connection.
 const PAGE_SIZE: u32 = 100;
@@ -180,6 +190,35 @@ pub fn set_viewed(pull_request_id: &str, path: &str, viewed: bool) -> Result<()>
     Ok(())
 }
 
+/// Splits `gh api -i` output into the header block and the body. Output without a status
+/// line is all body.
+fn split_headers(response: &str) -> (&str, &str) {
+    if !response.starts_with("HTTP/") {
+        return ("", response);
+    }
+    response
+        .split_once("\r\n\r\n")
+        .or_else(|| response.split_once("\n\n"))
+        .unwrap_or((response, ""))
+}
+
+fn parse_rate_limit(headers: &str) -> Option<RateLimit> {
+    let value = |name: &str| {
+        headers.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.trim()
+                .eq_ignore_ascii_case(name)
+                .then(|| value.trim().parse::<u64>().ok())?
+        })
+    };
+    let reset = i64::try_from(value("x-ratelimit-reset")?).ok()?;
+    Some(RateLimit {
+        remaining: value("x-ratelimit-remaining")?,
+        limit: value("x-ratelimit-limit")?,
+        reset_at: chrono::DateTime::from_timestamp(reset, 0)?,
+    })
+}
+
 fn split_repo(repo: &str) -> Result<(&str, &str)> {
     repo.split_once('/')
         .with_context(|| format!("repo \"{repo}\" is not owner/name"))
@@ -187,12 +226,19 @@ fn split_repo(repo: &str) -> Result<(&str, &str)> {
 
 /// Returns the GraphQL `data` object. A GraphQL error fails the call even when gh exits 0.
 fn run_graphql(args: &[String]) -> Result<Value> {
+    // -i adds the response headers, which carry the rate limit.
     let output = Command::new("gh")
-        .args(["api", "graphql"])
+        .args(["api", "graphql", "-i"])
         .args(args)
         .output()
         .context("run gh; is the GitHub CLI installed and on PATH?")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let response = String::from_utf8_lossy(&output.stdout);
+    let (headers, stdout) = split_headers(&response);
+    if let Some(limit) = parse_rate_limit(headers)
+        && let Ok(mut latest) = RATE_LIMIT.lock()
+    {
+        *latest = Some(limit);
+    }
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!(
@@ -202,7 +248,7 @@ fn run_graphql(args: &[String]) -> Result<Value> {
             stdout.trim()
         );
     }
-    let response: Value = serde_json::from_str(&stdout).context("gh returned invalid JSON")?;
+    let response: Value = serde_json::from_str(stdout).context("gh returned invalid JSON")?;
     if let Some(errors) = response.get("errors") {
         bail!("GitHub GraphQL errors: {errors}");
     }
@@ -215,6 +261,17 @@ fn run_graphql(args: &[String]) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_rate_limit_comes_from_the_response_headers() {
+        let response = "HTTP/2.0 200 OK\nX-Ratelimit-Limit: 5000\nX-Ratelimit-Remaining: 4073\nX-Ratelimit-Reset: 1794914863\n\n{\"data\":{}}";
+        let (headers, body) = split_headers(response);
+        assert_eq!(body, "{\"data\":{}}");
+        let limit = parse_rate_limit(headers).unwrap();
+        assert_eq!((limit.remaining, limit.limit), (4073, 5000));
+        assert_eq!(limit.reset_at.timestamp(), 1794914863);
+        assert_eq!(split_headers("{}"), ("", "{}"), "a body alone stays whole");
+    }
 
     #[test]
     fn search_query_scopes_to_open_prs_and_adds_the_date() {

@@ -15,7 +15,7 @@ use crate::app::{
 use crate::file_tree::FileRow;
 use crate::model::{
     ChangedFile, CheckLine, CheckState, CheckSummary, CommitLine, Group, Label, PrActivity,
-    PrDetail, PrRef, PrSummary, ReviewState, ViewedState,
+    PrDetail, PrRef, PrSummary, RateLimit, ReviewState, ViewedState,
 };
 use crate::repo::{GrepHit, MAX_GREP_HITS};
 use crate::theme::Theme;
@@ -61,6 +61,9 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: &Theme, now: DateTime<Utc
         );
     } else {
         render_inbox(frame, app, paint);
+    }
+    if let Some(limit) = app.rate_limit {
+        render_rate_limit(frame, limit, paint);
     }
     if app.show_help {
         render_help(frame, paint);
@@ -1368,6 +1371,31 @@ fn reviewer_symbol(state: &str, theme: &Theme) -> (&'static str, Color) {
 }
 
 // ---- Text helpers ----
+
+/// The API budget at the right end of the top line, on every screen. It turns yellow under
+/// a fifth left and red under a twentieth.
+fn render_rate_limit(frame: &mut Frame, limit: RateLimit, paint: Paint) {
+    let theme = paint.theme;
+    let left = limit.remaining * 100 / limit.limit.max(1);
+    let color = match left {
+        0..5 => theme.danger,
+        5..20 => theme.warning,
+        _ => theme.muted,
+    };
+    let reset = limit.reset_at.with_timezone(&chrono::Local).format("%H:%M");
+    let text = format!(
+        " API: {}/{} left, resets {reset} ",
+        limit.remaining, limit.limit
+    );
+    let width = (text.chars().count() as u16).min(frame.area().width);
+    let area = frame.area();
+    let spot = Rect::new(area.right() - width, area.y, width, 1);
+    frame.render_widget(Clear, spot);
+    frame.render_widget(
+        Paragraph::new(paint.span(text, color)).style(Style::new().bg(theme.background)),
+        spot,
+    );
+}
 
 pub fn relative_time(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
     let seconds = (now - then).num_seconds().max(0);
