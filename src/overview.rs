@@ -7,10 +7,8 @@ use ratatui::text::{Line, Span};
 use std::collections::HashSet;
 use unicode_width::UnicodeWidthStr;
 
-use crate::markdown::{
-    self, Block, FoldId, Folds, RowAction, TextRow, fold_key, line_width, truncate,
-};
-use crate::model::{Comment, PrActivity, PrDetail, ReviewState, ThreadLine, TimelineItem};
+use crate::markdown::{self, Block, FoldId, Folds, RowAction, TextRow, fold_key, line_width};
+use crate::model::{Comment, PrActivity, PrDetail, ReviewState, ThreadLine};
 use crate::theme::Theme;
 use crate::ui::relative_time;
 
@@ -52,16 +50,12 @@ impl CommentFilter {
         }
     }
 
-    /// The item as this filter shows it, or None when the filter hides it. Commits show
-    /// only under All, as on GitHub.
-    fn apply(self, item: &TimelineItem) -> Option<TimelineItem> {
-        let TimelineItem::Comment(comment) = item else {
-            return (self == Self::All).then(|| item.clone());
-        };
+    /// The comment as this filter shows it, or None when the filter hides it.
+    fn apply(self, comment: &Comment) -> Option<Comment> {
         match self {
-            Self::All => Some(item.clone()),
+            Self::All => Some(comment.clone()),
             // Your own comments and reviews only, not your replies in others' threads.
-            Self::Mine => comment.mine.then(|| item.clone()),
+            Self::Mine => comment.mine.then(|| comment.clone()),
             Self::Unresolved => {
                 let threads: Vec<ThreadLine> = comment
                     .threads
@@ -69,11 +63,9 @@ impl CommentFilter {
                     .filter(|thread| !thread.resolved)
                     .cloned()
                     .collect();
-                (!threads.is_empty()).then(|| {
-                    TimelineItem::Comment(Comment {
-                        threads,
-                        ..comment.clone()
-                    })
+                (!threads.is_empty()).then(|| Comment {
+                    threads,
+                    ..comment.clone()
                 })
             }
         }
@@ -488,7 +480,7 @@ fn timeline_rows(context: &Context, width: usize, folds: &mut Folds) -> Vec<Text
         Some(Ok(activity)) => activity,
     };
     let filter = context.comments.filter;
-    let mut items: Vec<TimelineItem> = activity
+    let mut items: Vec<Comment> = activity
         .timeline
         .iter()
         .filter(|item| !(context.comments.no_bots && is_bot(item)))
@@ -506,76 +498,18 @@ fn timeline_rows(context: &Context, width: usize, folds: &mut Folds) -> Vec<Text
         rows.extend(notice(text.to_string(), theme.muted));
         rows.push(TextRow::blank());
     }
-    let mut rest = items.as_slice();
-    while let Some(item) = rest.first() {
-        let run = rest
-            .iter()
-            .take_while(|item| matches!(item, TimelineItem::Commit { .. }))
-            .count();
-        if run == 0 {
-            rows.extend(item_rows(context, item, width, folds));
-            rest = &rest[1..];
-            continue;
-        }
-        rows.extend(commit_group(context, &rest[..run], width));
-        rest = &rest[run..];
+    for item in &items {
+        rows.extend(item_rows(context, item, width, folds));
     }
     rows
 }
 
-/// A run of commits as one folded row, "▶ 5 commits  pushed 5h ago", as GitHub groups a
-/// push. Enter opens it to one row per commit.
-fn commit_group(context: &Context, commits: &[TimelineItem], width: usize) -> Vec<TextRow> {
-    let theme = context.theme;
-    let mut oids: Vec<&str> = Vec::new();
-    let mut latest: Option<DateTime<Utc>> = None;
-    for item in commits {
-        if let TimelineItem::Commit { oid, committed, .. } = item {
-            oids.push(oid);
-            latest = latest.max(Some(*committed));
-        }
-    }
-    // The lowest SHA names the group in either order, so the fold survives F.
-    let id = fold_key(&format!("commits:{}", oids.iter().min().unwrap_or(&"")));
-    let open = context.toggled.contains(&id);
-    let count = match commits.len() {
-        1 => "1 commit".to_string(),
-        many => format!("{many} commits"),
-    };
-    let mut spans = vec![
-        context.span(if open { "  ▼ " } else { "  ▶ " }, theme.fold),
-        context.span(count, theme.foreground),
-    ];
-    if let Some(latest) = latest {
-        let pushed = format!("  pushed {}", relative_time(latest, context.now));
-        spans.push(context.span(pushed, theme.muted));
-    }
-    let mut rows = vec![TextRow {
-        line: Line::from(spans),
-        fold: Some(id),
-        anchor: true,
-        action: None,
-    }];
-    if open {
-        for item in commits {
-            if let TimelineItem::Commit {
-                oid, headline, at, ..
-            } = item
-            {
-                rows.push(commit_row(context, oid, headline, *at, width));
-            }
-        }
-    }
-    rows.push(TextRow::blank());
-    rows
+fn is_bot(comment: &Comment) -> bool {
+    comment.author.bot
 }
 
 /// " Comments   All  Unresolved  Mine    Oldest first      f filter  F order", with the
 /// current filter as a chip.
-fn is_bot(item: &TimelineItem) -> bool {
-    matches!(item, TimelineItem::Comment(comment) if comment.author.bot)
-}
-
 fn comments_header(context: &Context) -> Line<'static> {
     let theme = context.theme;
     let mut spans = vec![context.bold(" Comments   ", theme.heading)];
@@ -608,18 +542,10 @@ fn comments_header(context: &Context) -> Line<'static> {
 
 fn item_rows(
     context: &Context,
-    item: &TimelineItem,
+    comment: &Comment,
     width: usize,
     folds: &mut Folds,
 ) -> Vec<TextRow> {
-    let comment = match item {
-        TimelineItem::Commit {
-            oid, headline, at, ..
-        } => {
-            return vec![commit_row(context, oid, headline, *at, width)];
-        }
-        TimelineItem::Comment(comment) => comment,
-    };
     // An approval with no text is one line on GitHub, not a card.
     if comment.body.trim().is_empty() && comment.threads.is_empty() {
         return vec![
@@ -732,25 +658,6 @@ fn trim_blank_rows(rows: &mut Vec<TextRow>) {
     }
 }
 
-fn commit_row(
-    context: &Context,
-    oid: &str,
-    headline: &str,
-    at: DateTime<Utc>,
-    width: usize,
-) -> TextRow {
-    let theme = context.theme;
-    let short: String = oid.chars().take(7).collect();
-    let tail = format!("  {short}  {}", relative_time(at, context.now));
-    let headline = truncate(headline, width.saturating_sub(tail.width() + 4));
-    TextRow::plain(Line::from(vec![
-        context.span("  ○ ", theme.muted),
-        context.span(headline, theme.foreground),
-        context.span(format!("  {short}"), theme.accent),
-        context.span(format!("  {}", relative_time(at, context.now)), theme.muted),
-    ]))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -806,7 +713,6 @@ mod tests {
             !shows(&unresolved, "Looks fine"),
             "a comment with no open thread is hidden"
         );
-        assert!(!shows(&unresolved, "aaa111"), "commits show only under All");
 
         let mine = rendered_with(&[], view(CommentFilter::Mine, false));
         assert_eq!(
@@ -815,15 +721,14 @@ mod tests {
             "a reply in someone else's thread is not Mine"
         );
         let activity = sample_activity();
-        let own = activity.timeline.iter().find_map(|item| match item {
-            TimelineItem::Comment(comment) if comment.author.login == "lead" => {
-                Some(TimelineItem::Comment(Comment {
-                    mine: true,
-                    ..comment.clone()
-                }))
-            }
-            _ => None,
-        });
+        let own = activity
+            .timeline
+            .iter()
+            .find(|comment| comment.author.login == "lead")
+            .map(|comment| Comment {
+                mine: true,
+                ..comment.clone()
+            });
         let own = own.expect("the lead review");
         assert_eq!(
             CommentFilter::Mine.apply(&own),
@@ -996,21 +901,8 @@ mod tests {
     }
 
     #[test]
-    fn the_timeline_shows_commits_bot_comments_and_review_threads() {
+    fn the_timeline_shows_bot_comments_and_review_threads() {
         let lines = rendered(&[]);
-        assert!(
-            lines
-                .iter()
-                .any(|line| line.starts_with("  ▶ 1 commit  pushed ")),
-            "a push is one folded row: {lines:?}"
-        );
-        assert!(!lines.iter().any(|line| line.contains("aaa111")));
-        let open = rendered(&[fold_key("commits:aaa111")]);
-        assert!(open.iter().any(|line| line.starts_with("  ▼ 1 commit")));
-        assert!(
-            open.iter()
-                .any(|line| line.starts_with("  ○ first  aaa111"))
-        );
         assert!(
             lines
                 .iter()

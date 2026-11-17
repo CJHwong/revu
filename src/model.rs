@@ -246,20 +246,6 @@ pub struct Comment {
     pub mine: bool,
 }
 
-/// The Overview conversation in GitHub's order, oldest first.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TimelineItem {
-    Comment(Comment),
-    Commit {
-        oid: String,
-        headline: String,
-        at: DateTime<Utc>,
-        /// When the commit was made on this branch; a rebase or push moves it. GitHub's
-        /// API has no push time, so this stands in for it.
-        committed: DateTime<Utc>,
-    },
-}
-
 /// The slower half of a pull request, fetched next to `PrDetail`.
 #[derive(Debug, Clone)]
 pub struct PrActivity {
@@ -267,7 +253,9 @@ pub struct PrActivity {
     pub checks: Vec<CheckLine>,
     /// Oldest first, like GitHub's Commits tab. At most 100.
     pub commits: Vec<CommitLine>,
-    pub timeline: Vec<TimelineItem>,
+    /// The comments and reviews of the Overview, in GitHub's order, oldest first. The
+    /// Commits tab lists the commits.
+    pub timeline: Vec<Comment>,
     /// GitHub returned its limit of timeline items, so older ones are missing.
     pub timeline_cut: bool,
     pub threads_total: u64,
@@ -547,9 +535,6 @@ enum RawTimelineItem {
         created_at: DateTime<Utc>,
         body: String,
     },
-    PullRequestCommit {
-        commit: RawTimelineCommit,
-    },
 }
 
 #[derive(Deserialize)]
@@ -557,15 +542,6 @@ struct RawActor {
     #[serde(rename = "__typename")]
     kind: String,
     login: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RawTimelineCommit {
-    oid: String,
-    message_headline: String,
-    authored_date: DateTime<Utc>,
-    committed_date: Option<DateTime<Utc>>,
 }
 
 #[derive(Deserialize)]
@@ -1095,7 +1071,7 @@ fn review_author(author: &Option<Login>) -> &str {
 
 /// Comments, reviews and commits in GitHub's order. A review with no text and no
 /// threads is a reply to a thread, which GitHub's Overview does not show on its own.
-fn timeline_from(items: Vec<RawTimelineItem>, threads: Vec<RawThread>) -> Vec<TimelineItem> {
+fn timeline_from(items: Vec<RawTimelineItem>, threads: Vec<RawThread>) -> Vec<Comment> {
     let mut threads_by_review: std::collections::HashMap<String, Vec<ThreadLine>> =
         std::collections::HashMap::new();
     for thread in threads {
@@ -1121,16 +1097,8 @@ fn timeline_from(items: Vec<RawTimelineItem>, threads: Vec<RawThread>) -> Vec<Ti
 fn timeline_item(
     item: RawTimelineItem,
     threads_by_review: &mut std::collections::HashMap<String, Vec<ThreadLine>>,
-) -> Option<TimelineItem> {
+) -> Option<Comment> {
     let comment = match item {
-        RawTimelineItem::PullRequestCommit { commit } => {
-            return Some(TimelineItem::Commit {
-                oid: commit.oid,
-                headline: commit.message_headline,
-                at: commit.authored_date,
-                committed: commit.committed_date.unwrap_or(commit.authored_date),
-            });
-        }
         RawTimelineItem::IssueComment {
             author,
             created_at,
@@ -1167,7 +1135,7 @@ fn timeline_item(
             }
         }
     };
-    Some(TimelineItem::Comment(comment))
+    Some(comment)
 }
 
 fn author_from(actor: Option<RawActor>) -> Author {
@@ -1389,8 +1357,6 @@ pub mod tests {
                     "statusCheckRollup": null } },
             ]},
             "timelineItems": { "nodes": [
-                { "__typename": "PullRequestCommit", "commit": {
-                    "oid": "aaa111", "messageHeadline": "first", "authoredDate": "2026-11-12T10:00:00Z" } },
                 { "__typename": "IssueComment", "author": { "__typename": "Bot", "login": "coderabbitai" },
                   "createdAt": "2026-11-13T10:00:00Z", "body": "<!-- bot -->\n\nLooks fine" },
                 { "__typename": "PullRequestReview", "id": "R1", "author": { "__typename": "User", "login": "lead" },
@@ -1562,13 +1528,10 @@ pub mod tests {
         let timeline = sample_activity().timeline;
         assert_eq!(
             timeline.len(),
-            3,
+            2,
             "the empty COMMENTED review is a thread reply"
         );
-        assert!(matches!(&timeline[0], TimelineItem::Commit { oid, .. } if oid == "aaa111"));
-        let TimelineItem::Comment(bot) = &timeline[1] else {
-            panic!("expected a comment")
-        };
+        let bot = &timeline[0];
         assert_eq!(
             bot.author,
             Author {
@@ -1576,9 +1539,7 @@ pub mod tests {
                 bot: true
             }
         );
-        let TimelineItem::Comment(review) = &timeline[2] else {
-            panic!("expected a review")
-        };
+        let review = &timeline[1];
         assert_eq!(review.verb, "requested changes");
         assert_eq!(
             review.at.to_rfc3339(),
