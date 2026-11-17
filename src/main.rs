@@ -79,6 +79,10 @@ enum Message {
         query: String,
         result: Result<Vec<(String, usize)>, String>,
     },
+    FindWords {
+        pr: PrRef,
+        result: Result<Vec<String>, String>,
+    },
     File {
         pr: PrRef,
         path: String,
@@ -277,6 +281,10 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
             Message::Diff { pr, key, result } => app.set_diff(&pr, key, result),
             Message::Grep { pr, query, result } => app.set_grep(&pr, &query, result),
             Message::FindFiles { pr, query, result } => app.set_find_files(&pr, &query, result),
+            // Without the words the prompt only loses its completion.
+            Message::FindWords { pr, result } => {
+                app.set_find_words(&pr, result.unwrap_or_default())
+            }
             Message::File { pr, path, result } => app.set_file(&pr, &path, result),
         }
     }
@@ -309,6 +317,19 @@ fn perform(
                 let result =
                     repo::grep(&dir, &commit, &query).map_err(|error| format!("{error:#}"));
                 let _ = sender.send(Message::Grep { pr, query, result });
+            });
+        }
+        Action::FindWords {
+            pr,
+            dir,
+            base,
+            head,
+        } => {
+            let sender = session.sender.clone();
+            thread::spawn(move || {
+                let result =
+                    repo::diff_words(&dir, &base, &head).map_err(|error| format!("{error:#}"));
+                let _ = sender.send(Message::FindWords { pr, result });
             });
         }
         Action::FindFiles {

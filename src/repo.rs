@@ -361,6 +361,37 @@ pub fn files_with_text(
     Ok(count_lines_with(&diff, &query.to_lowercase()))
 }
 
+/// The words of the PR's changed lines, the most used first, for the find prompt to
+/// complete. Words shorter than four characters are left out; they type faster than
+/// they complete.
+pub fn diff_words(dir: &Path, base: &str, head: &str) -> Result<Vec<String>> {
+    let range = format!("{base}...{head}");
+    let output = git(dir, &["diff", "--no-color", "--no-ext-diff", &range])?;
+    ensure_success(&output, "git diff")?;
+    Ok(changed_words(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn changed_words(diff: &str) -> Vec<String> {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    let changed = diff.lines().filter(|line| {
+        let header = line.starts_with("+++") || line.starts_with("---");
+        !header && (line.starts_with('+') || line.starts_with('-'))
+    });
+    for line in changed {
+        let words =
+            line[1..].split(|character: char| !(character.is_alphanumeric() || character == '_'));
+        for word in words.filter(|word| word.chars().count() >= 4) {
+            *counts.entry(word).or_default() += 1;
+        }
+    }
+    let mut words: Vec<(&str, usize)> = counts.into_iter().collect();
+    words.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(right.0)));
+    words
+        .into_iter()
+        .map(|(word, _)| word.to_string())
+        .collect()
+}
+
 fn count_lines_with(diff: &str, query: &str) -> Vec<(String, usize)> {
     let mut found: Vec<(String, usize)> = Vec::new();
     for line in diff.lines() {
@@ -397,6 +428,13 @@ fn ensure_success(output: &Output, what: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changed_words_come_from_changed_lines_most_used_first() {
+        let diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@ header_word\n\
+                    +invoice = make_invoice(invoice)\n-old_name\n unchanged_context\n";
+        assert_eq!(changed_words(diff), ["invoice", "make_invoice", "old_name"]);
+    }
 
     #[test]
     fn diff_matches_count_per_file_by_the_new_path() {

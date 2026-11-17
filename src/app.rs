@@ -36,6 +36,13 @@ pub enum Action {
         commit: String,
         query: String,
     },
+    /// The words of the PR's changed lines, for the find prompt to complete.
+    FindWords {
+        pr: PrRef,
+        dir: PathBuf,
+        base: String,
+        head: String,
+    },
     /// Which changed files hold the find text.
     FindFiles {
         pr: PrRef,
@@ -282,6 +289,9 @@ pub struct DetailView {
     /// On Files changed, the files that hold the find text and how many lines in each,
     /// in the list's order; None while git looks.
     pub find_files: Option<Result<Vec<(String, usize)>, String>>,
+    /// The PR's changed words for the find prompt to complete; None until git returns.
+    pub find_words: Option<Vec<String>>,
+    find_words_requested: bool,
     /// n or N moved to another file; the find runs there once its diff is drawn. True
     /// goes to its first match, false to its last.
     find_pending: Option<bool>,
@@ -336,6 +346,8 @@ impl DetailView {
             find_hit: None,
             find_files: None,
             find_pending: None,
+            find_words: None,
+            find_words_requested: false,
         }
     }
 
@@ -578,6 +590,22 @@ impl DetailView {
             head,
             query: query.to_lowercase(),
         }))
+    }
+
+    /// Asks git once for the words the find prompt completes.
+    fn words_request(&mut self) -> Option<Action> {
+        if self.find_words_requested {
+            return None;
+        }
+        let (dir, head) = self.head_in_clone().ok()?;
+        let base = self.loaded()?.base_oid.clone();
+        self.find_words_requested = true;
+        Some(Action::FindWords {
+            pr: self.pr.clone(),
+            dir,
+            base,
+            head,
+        })
     }
 
     /// n and N: the next or previous match. On Files changed, past this file's last match
@@ -1099,6 +1127,25 @@ pub struct Prompt {
     pub kind: PromptKind,
     pub text: String,
     pub error: Option<String>,
+    /// Words that Tab completes the text to, the most likely first.
+    pub words: Vec<String>,
+}
+
+impl Prompt {
+    /// The rest of the first word that starts with the typed text, ignoring case.
+    pub fn suggestion(&self) -> Option<String> {
+        let typed = self.text.to_lowercase();
+        if typed.is_empty() || typed.contains(char::is_whitespace) {
+            return None;
+        }
+        let typed_chars = typed.chars().count();
+        self.words
+            .iter()
+            .find(|word| {
+                word.chars().count() > typed_chars && word.to_lowercase().starts_with(&typed)
+            })
+            .map(|word| word.chars().skip(typed_chars).collect())
+    }
 }
 
 pub struct App {
@@ -1272,6 +1319,18 @@ impl App {
         }
     }
 
+    /// Keeps the words, and hands them to the find prompt if it is open.
+    pub fn set_find_words(&mut self, pr: &PrRef, words: Vec<String>) {
+        if let Some(prompt) = &mut self.prompt
+            && prompt.kind == PromptKind::FindInDiff
+        {
+            prompt.words = words.clone();
+        }
+        if let Some(view) = self.view_for(pr) {
+            view.find_words = Some(words);
+        }
+    }
+
     /// Runs a find that waited for a diff, now that messages may have brought it.
     pub fn settle_find(&mut self) {
         if let Some(view) = self.open_view() {
@@ -1325,6 +1384,7 @@ impl App {
             kind,
             text: text.to_string(),
             error: None,
+            words: Vec::new(),
         });
     }
 
@@ -1333,6 +1393,7 @@ impl App {
             kind,
             text: text.to_string(),
             error: Some(error),
+            words: Vec::new(),
         });
     }
 
@@ -1633,6 +1694,11 @@ impl App {
             KeyCode::Backspace => {
                 prompt.text.pop();
             }
+            KeyCode::Tab => {
+                if let Some(rest) = prompt.suggestion() {
+                    prompt.text.push_str(&rest);
+                }
+            }
             KeyCode::Char(character) => prompt.text.push(character),
             KeyCode::Enter => return self.submit_prompt(),
             _ => {}
@@ -1751,8 +1817,10 @@ impl App {
             KeyCode::Char('/') if diff_pane => {
                 self.prompt = Some(Prompt {
                     kind: PromptKind::FindInDiff,
+                    words: view.find_words.clone().unwrap_or_default(),
                     ..Prompt::default()
                 });
+                return view.words_request();
             }
             KeyCode::Enter if view.tab == Tab::Files && view.toggle_folder() => {
                 view.clamp_file_selection()
@@ -2903,6 +2971,29 @@ mod tests {
         assert_eq!(
             view(&app).current_find_hit().map(|hit| hit.ordinal),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn tab_completes_the_find_to_a_word_from_the_diff() {
+        let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        ready_repo(&mut app, &pr);
+        app.handle_key(key(KeyCode::Char('/')));
+        app.set_find_words(
+            &pr,
+            vec!["invoice".to_string(), "consolidation".to_string()],
+        );
+        type_text(&mut app, "CONS");
+        assert_eq!(
+            app.prompt.as_ref().unwrap().suggestion().as_deref(),
+            Some("olidation")
+        );
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.prompt.as_ref().unwrap().text, "CONSolidation");
+        assert_eq!(
+            app.prompt.as_ref().unwrap().suggestion(),
+            None,
+            "nothing longer"
         );
     }
 

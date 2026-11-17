@@ -1449,7 +1449,8 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
         ),
         PromptKind::FindInDiff => (
             " Find in the diff ".to_string(),
-            "jumps to the first line with this text. n next, N previous".to_string(),
+            "tab completes a word from the diff. enter finds it in every changed file; n next, N previous"
+                .to_string(),
         ),
         PromptKind::ConfirmClone { pr, dir } => (
             format!(" Clone {}? ", pr.repo),
@@ -1468,6 +1469,7 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
             paint.span("> ", theme.accent),
             Span::from(prompt.text.clone()),
             paint.span("▏", theme.accent),
+            paint.span(prompt.suggestion().unwrap_or_default(), theme.muted),
         ]),
         Line::from(hint),
     ]);
