@@ -355,9 +355,8 @@ struct RawCommitNode {
 #[serde(rename_all = "camelCase")]
 struct RawCommitInfo {
     oid: String,
-    message_headline: String,
-    #[serde(default)]
-    message_body: String,
+    /// The raw message. GitHub's messageHeadline cuts a long subject with "…".
+    message: String,
     authored_date: DateTime<Utc>,
     url: String,
     author: Option<RawGitActor>,
@@ -767,13 +766,17 @@ fn check_line(check: &RawCheck) -> CheckLine {
 }
 
 fn commit_line(commit: RawCommitInfo) -> CommitLine {
+    let (headline, body) = commit
+        .message
+        .split_once('\n')
+        .unwrap_or((&commit.message, ""));
     let author = commit
         .author
         .and_then(|actor| actor.user.map(|user| user.login).or(actor.name));
     CommitLine {
         oid: commit.oid,
-        headline: commit.message_headline,
-        body: commit.message_body.trim().to_string(),
+        headline: headline.to_string(),
+        body: body.trim().to_string(),
         author: author.unwrap_or_else(|| "unknown".to_string()),
         authored_at: commit.authored_date,
         url: commit.url,
@@ -1106,12 +1109,12 @@ pub mod tests {
             }}}]},
             "commitList": { "nodes": [
                 { "commit": {
-                    "oid": "aaa111", "messageHeadline": "first", "messageBody": "[why] a reason\n", "authoredDate": "2026-11-12T10:00:00Z",
+                    "oid": "aaa111", "message": "first\n\n[why] a reason\n", "authoredDate": "2026-11-12T10:00:00Z",
                     "url": "https://github.com/acme/app/commit/aaa111",
                     "author": { "name": "Octo Cat", "user": { "login": "octo" } },
                     "statusCheckRollup": { "state": "SUCCESS" } } },
                 { "commit": {
-                    "oid": "bbb222", "messageHeadline": "second", "authoredDate": "2026-11-13T10:00:00Z",
+                    "oid": "bbb222", "message": "second", "authoredDate": "2026-11-13T10:00:00Z",
                     "url": "https://github.com/acme/app/commit/bbb222",
                     "author": { "name": "No Account", "user": null },
                     "statusCheckRollup": null } },
@@ -1226,6 +1229,11 @@ pub mod tests {
     #[test]
     fn activity_carries_commits_and_check_metadata() {
         let activity = sample_activity();
+        assert_eq!(activity.commits[0].headline, "first");
+        assert_eq!(
+            activity.commits[0].body, "[why] a reason",
+            "the body comes from the raw message"
+        );
         assert_eq!(activity.commits[0].author, "octo");
         assert_eq!(activity.commits[0].checks, Some(CheckState::Passing));
         assert_eq!(activity.commits[1].author, "No Account");
