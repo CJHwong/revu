@@ -88,7 +88,7 @@ pub fn activity_document() -> String {
          timelineItems(last: {TIMELINE_LIMIT}, itemTypes: [ISSUE_COMMENT, PULL_REQUEST_REVIEW, PULL_REQUEST_COMMIT]) {{ nodes {{ __typename \
            ... on IssueComment {{ author {{ __typename login }} createdAt body viewerDidAuthor }} \
            ... on PullRequestReview {{ id viewerDidAuthor author {{ __typename login }} state submittedAt createdAt body }} \
-           ... on PullRequestCommit {{ commit {{ oid messageHeadline authoredDate }} }} }} }} \
+           ... on PullRequestCommit {{ commit {{ oid messageHeadline authoredDate committedDate }} }} }} }} \
          events: timelineItems(last: {TIMELINE_LIMIT}, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT, BASE_REF_CHANGED_EVENT, BASE_REF_FORCE_PUSHED_EVENT, REVIEW_REQUESTED_EVENT]) {{ nodes {{ __typename \
            ... on HeadRefForcePushedEvent {{ createdAt }} ... on BaseRefChangedEvent {{ createdAt }} \
            ... on BaseRefForcePushedEvent {{ createdAt }} ... on ReviewRequestedEvent {{ createdAt }} }} }} \

@@ -506,9 +506,67 @@ fn timeline_rows(context: &Context, width: usize, folds: &mut Folds) -> Vec<Text
         rows.extend(notice(text.to_string(), theme.muted));
         rows.push(TextRow::blank());
     }
-    for item in &items {
-        rows.extend(item_rows(context, item, width, folds));
+    let mut rest = items.as_slice();
+    while let Some(item) = rest.first() {
+        let run = rest
+            .iter()
+            .take_while(|item| matches!(item, TimelineItem::Commit { .. }))
+            .count();
+        if run == 0 {
+            rows.extend(item_rows(context, item, width, folds));
+            rest = &rest[1..];
+            continue;
+        }
+        rows.extend(commit_group(context, &rest[..run], width));
+        rest = &rest[run..];
     }
+    rows
+}
+
+/// A run of commits as one folded row, "▶ 5 commits  pushed 5h ago", as GitHub groups a
+/// push. Enter opens it to one row per commit.
+fn commit_group(context: &Context, commits: &[TimelineItem], width: usize) -> Vec<TextRow> {
+    let theme = context.theme;
+    let mut oids: Vec<&str> = Vec::new();
+    let mut latest: Option<DateTime<Utc>> = None;
+    for item in commits {
+        if let TimelineItem::Commit { oid, committed, .. } = item {
+            oids.push(oid);
+            latest = latest.max(Some(*committed));
+        }
+    }
+    // The lowest SHA names the group in either order, so the fold survives F.
+    let id = fold_key(&format!("commits:{}", oids.iter().min().unwrap_or(&"")));
+    let open = context.toggled.contains(&id);
+    let count = match commits.len() {
+        1 => "1 commit".to_string(),
+        many => format!("{many} commits"),
+    };
+    let mut spans = vec![
+        context.span(if open { "  ▼ " } else { "  ▶ " }, theme.fold),
+        context.span(count, theme.foreground),
+    ];
+    if let Some(latest) = latest {
+        let pushed = format!("  pushed {}", relative_time(latest, context.now));
+        spans.push(context.span(pushed, theme.muted));
+    }
+    let mut rows = vec![TextRow {
+        line: Line::from(spans),
+        fold: Some(id),
+        anchor: true,
+        action: None,
+    }];
+    if open {
+        for item in commits {
+            if let TimelineItem::Commit {
+                oid, headline, at, ..
+            } = item
+            {
+                rows.push(commit_row(context, oid, headline, *at, width));
+            }
+        }
+    }
+    rows.push(TextRow::blank());
     rows
 }
 
@@ -555,7 +613,9 @@ fn item_rows(
     folds: &mut Folds,
 ) -> Vec<TextRow> {
     let comment = match item {
-        TimelineItem::Commit { oid, headline, at } => {
+        TimelineItem::Commit {
+            oid, headline, at, ..
+        } => {
             return vec![commit_row(context, oid, headline, *at, width)];
         }
         TimelineItem::Comment(comment) => comment,
@@ -941,6 +1001,14 @@ mod tests {
         assert!(
             lines
                 .iter()
+                .any(|line| line.starts_with("  ▶ 1 commit  pushed ")),
+            "a push is one folded row: {lines:?}"
+        );
+        assert!(!lines.iter().any(|line| line.contains("aaa111")));
+        let open = rendered(&[fold_key("commits:aaa111")]);
+        assert!(open.iter().any(|line| line.starts_with("  ▼ 1 commit")));
+        assert!(
+            open.iter()
                 .any(|line| line.starts_with("  ○ first  aaa111"))
         );
         assert!(

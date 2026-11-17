@@ -254,6 +254,9 @@ pub enum TimelineItem {
         oid: String,
         headline: String,
         at: DateTime<Utc>,
+        /// When the commit was made on this branch; a rebase or push moves it. GitHub's
+        /// API has no push time, so this stands in for it.
+        committed: DateTime<Utc>,
     },
 }
 
@@ -562,6 +565,7 @@ struct RawTimelineCommit {
     oid: String,
     message_headline: String,
     authored_date: DateTime<Utc>,
+    committed_date: Option<DateTime<Utc>>,
 }
 
 #[derive(Deserialize)]
@@ -1124,6 +1128,7 @@ fn timeline_item(
                 oid: commit.oid,
                 headline: commit.message_headline,
                 at: commit.authored_date,
+                committed: commit.committed_date.unwrap_or(commit.authored_date),
             });
         }
         RawTimelineItem::IssueComment {
