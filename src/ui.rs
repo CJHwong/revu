@@ -4,7 +4,7 @@ use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap,
+    Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap,
 };
 use unicode_width::UnicodeWidthChar;
 
@@ -73,7 +73,7 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: &Theme, now: DateTime<Utc
         render_theme_menu(frame, selected, app.theme_name, paint);
     }
     if app.show_help {
-        render_help(frame, paint);
+        app.help_scroll = render_help(frame, app.help_scroll, paint);
     }
     if let Some(prompt) = &app.prompt {
         render_prompt(frame, prompt, paint);
@@ -88,14 +88,17 @@ fn render_composer(frame: &mut Frame, composer: &Composer, paint: Paint) {
     let theme = paint.theme;
     let area = frame.area();
     let width = area.width.saturating_sub(4).min(100);
-    let height = (area.height * 3 / 5).max(10).min(area.height);
+    let (title, header) = composer_header(composer, paint);
+    // The box fits the text: at least 3 text rows, growing to three fifths of the screen.
+    let (_, _, text_rows) = editor_lines(&composer.editor, width.saturating_sub(2), paint);
+    let wanted = header.len() as u16 + 1 + text_rows.max(3) + 1 + 2;
+    let height = wanted.min((area.height * 3 / 5).max(8)).min(area.height);
     let box_area = Rect {
         x: area.x + (area.width - width) / 2,
         y: area.y + (area.height - height) / 2,
         width,
         height,
     };
-    let (title, header) = composer_header(composer, paint);
     let footer = match (&composer.error, composer.sending, composer.confirming) {
         (Some(error), ..) => paint.span(format!(" {error}"), theme.danger),
         (None, true, _) => paint.span(" sending to GitHub...", theme.warning),
@@ -111,6 +114,7 @@ fn render_composer(frame: &mut Frame, composer: &Composer, paint: Paint) {
     };
     let block = Block::new()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(theme.heading))
         .title(paint.bold(title, theme.heading))
         .style(Style::new().bg(theme.background).fg(theme.foreground));
@@ -124,7 +128,7 @@ fn render_composer(frame: &mut Frame, composer: &Composer, paint: Paint) {
     ])
     .areas(inner);
     frame.render_widget(Paragraph::new(header), header_area);
-    let (lines, cursor_row) = editor_lines(&composer.editor, text_area.width, paint);
+    let (lines, cursor_row, _) = editor_lines(&composer.editor, text_area.width, paint);
     let scroll = cursor_row.saturating_sub(text_area.height.saturating_sub(1));
     let text = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
@@ -193,9 +197,9 @@ fn composer_header(composer: &Composer, paint: Paint) -> (String, Vec<Line<'stat
     }
 }
 
-/// The editor's text with the selection and the cursor marked, and the row the cursor
-/// is on once wrapped to `width`, so the box can scroll to it.
-fn editor_lines(editor: &Editor, width: u16, paint: Paint) -> (Vec<Line<'static>>, u16) {
+/// The editor's text with the selection and the cursor marked, the row the cursor is
+/// on once wrapped to `width` so the box can scroll to it, and the rows in all.
+fn editor_lines(editor: &Editor, width: u16, paint: Paint) -> (Vec<Line<'static>>, u16, u16) {
     let theme = paint.theme;
     let selected = Style::new().bg(theme.selection).fg(theme.foreground);
     let cursor = Style::new().fg(theme.background).bg(theme.accent);
@@ -230,7 +234,7 @@ fn editor_lines(editor: &Editor, width: u16, paint: Paint) -> (Vec<Line<'static>
         lines.push(Line::from(spans));
         offset = end + 1;
     }
-    (lines, cursor_row as u16)
+    (lines, cursor_row as u16, rows_before as u16)
 }
 
 /// Adds a character to the last span when it has the same style, so a line stays a
@@ -370,8 +374,14 @@ fn badge_spans(pr: &PrSummary, secondary: Color, paint: Paint) -> Vec<Span<'stat
     };
     vec![
         pad_span(review, 18),
-        pad_span(checks_span(pr.checks.as_ref(), secondary, paint), 9),
-        paint.span(format!("{:>5} comments", pr.comments), secondary),
+        pad_span(checks_span(pr.checks.as_ref(), paint), 9),
+        // No comments and no checks leave their cells blank, so the rows that have them
+        // stand out.
+        match pr.comments {
+            0 => Span::raw(""),
+            1 => paint.span("    1 comment", secondary),
+            count => paint.span(format!("{count:>5} comments"), secondary),
+        },
     ]
 }
 
@@ -384,9 +394,9 @@ fn review_span(review: ReviewState, paint: Paint) -> Span<'static> {
     }
 }
 
-fn checks_span(checks: Option<&CheckSummary>, secondary: Color, paint: Paint) -> Span<'static> {
+fn checks_span(checks: Option<&CheckSummary>, paint: Paint) -> Span<'static> {
     let Some(checks) = checks else {
-        return paint.span("-", secondary);
+        return Span::raw("");
     };
     let (symbol, color) = check_symbol(checks.state, paint.theme);
     paint.span(
@@ -410,17 +420,20 @@ fn pad_span(span: Span<'static>, width: usize) -> Span<'static> {
 
 // ---- Detail ----
 
-fn detail_help(tab: Tab) -> &'static str {
-    match tab {
+fn detail_help(view: &DetailView) -> &'static str {
+    if view.line_mode.is_some() {
+        return "j/k line | V range | enter comment | R review | esc back to the diff | ? keys";
+    }
+    match view.tab {
         Tab::Overview => {
-            "j/k next comment | enter fold | e labels | f/F/n filter, order, bots | o browser | h back | ? keys"
+            "j/k next comment | enter fold | R review | e labels | f/F/n filter, order, bots | o browser | h back | ? keys"
         }
         Tab::Checks => "j/k move | enter/o browser | r reload | h back | ? keys",
         Tab::Commits => {
             "j/k commit | J/K scroll diff | m renderer | / find | o browser | h back | ? keys"
         }
         Tab::Files => {
-            "j/k file | enter whole file | c comment | v viewed | ]/[ unviewed | t tree | z list | m renderer | h back | ? keys"
+            "j/k file | enter whole file | c comment | R review | v viewed | ]/[ unviewed | t tree | z list | m renderer | h back | ? keys"
         }
     }
 }
@@ -438,7 +451,7 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
                 ",",
                 "settings: theme, workspace folder, how far back the inbox looks",
             ),
-            ("?", "this list; any key closes it"),
+            ("?", "this list; j/k scroll it, any other key closes it"),
         ],
     ),
     (
@@ -521,50 +534,74 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
     ),
 ];
 
-fn render_help(frame: &mut Frame, paint: Paint) {
+/// The key list, as wide as the screen allows, with long descriptions wrapped under
+/// their own column. Returns the scroll kept within the list.
+fn render_help(frame: &mut Frame, scroll: u16, paint: Paint) -> u16 {
     let theme = paint.theme;
+    let area = frame.area();
+    let width = area.width.saturating_sub(4).min(120);
     let key_width = KEY_LIST
         .iter()
         .flat_map(|(_, keys)| keys.iter())
         .map(|(keys, _)| display_width(keys))
         .max()
         .unwrap_or(0);
+    let indent = key_width + 4;
     let mut lines = Vec::new();
     for (section, keys) in KEY_LIST {
         lines.push(Line::from(paint.bold(section.to_string(), theme.heading)));
-        lines.extend(keys.iter().map(|(keys, action)| {
-            Line::from(vec![
+        for (keys, action) in keys.iter() {
+            let spans = [
                 paint.span(
                     format!("  {}", pad_to_width(keys, key_width + 2)),
                     theme.accent,
                 ),
                 paint.span(action.to_string(), theme.foreground),
-            ])
-        }));
+            ];
+            lines.extend(markdown::wrap(
+                &spans,
+                usize::from(width.saturating_sub(2)),
+                indent,
+            ));
+        }
         lines.push(Line::from(""));
     }
     lines.pop();
-    let area = frame.area();
-    // A short terminal gets the list without the blank lines between sections.
-    if lines.len() as u16 + 2 > area.height {
-        lines.retain(|line| line.width() > 0);
-    }
-    let width = area.width.saturating_sub(4).min(84);
     let height = (lines.len() as u16 + 2).min(area.height);
+    let last = (lines.len() as u16 + 2).saturating_sub(height);
+    let scroll = scroll.min(last);
     let box_area = Rect {
         x: area.x + (area.width - width) / 2,
         y: area.y + (area.height - height) / 2,
         width,
         height,
     };
-    let block = Block::new()
-        .borders(Borders::ALL)
-        .border_style(Style::new().fg(theme.heading))
-        .title(paint.bold(" Keys ", theme.heading))
-        .title_bottom(paint.span(" any key closes ", theme.muted))
-        .style(Style::new().bg(theme.background).fg(theme.foreground));
+    let hint = match last {
+        0 => " any other key closes ".to_string(),
+        _ => format!(
+            " j/k, space/b scroll ({}/{}), any other key closes ",
+            scroll, last
+        ),
+    };
+    let block = popup_block(" Keys ", paint).title_bottom(paint.span(hint, theme.muted));
     frame.render_widget(Clear, box_area);
-    frame.render_widget(Paragraph::new(lines).block(block), box_area);
+    frame.render_widget(
+        Paragraph::new(lines).block(block).scroll((scroll, 0)),
+        box_area,
+    );
+    scroll
+}
+
+/// Every popup's frame: rounded like the Overview cards, titled in the heading color.
+fn popup_block(title: &str, paint: Paint) -> Block<'static> {
+    let theme = paint.theme;
+    Block::new()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme.heading))
+        .title(paint.bold(title.to_string(), theme.heading))
+        .style(Style::new().bg(theme.background).fg(theme.foreground))
 }
 
 fn render_detail(
@@ -590,7 +627,7 @@ fn render_detail(
     let footer = match status {
         Some(status) => status,
         None => paint.span(
-            overlay_help(view.overlays.last()).unwrap_or(detail_help(view.tab)),
+            overlay_help(view.overlays.last()).unwrap_or(detail_help(view)),
             theme.muted,
         ),
     };
@@ -1027,15 +1064,13 @@ fn render_line_mode(frame: &mut Frame, view: &mut DetailView, area: Rect, paint:
         .borders(Borders::LEFT)
         .border_style(Style::new().fg(theme.accent))
         .title(paint.bold(" comment mode ", theme.accent))
-        .title(paint.span(
-            "j/k move, V range, enter comment, R review, esc back ",
-            theme.muted,
-        ))
-        .title(
-            paint
-                .bold(format!(" {} ", mode.path), theme.foreground)
-                .into_right_aligned_line(),
-        );
+        .title(paint.bold(
+            format!(
+                " {} ",
+                truncate_start(&mode.path, usize::from(area.width).saturating_sub(18))
+            ),
+            theme.foreground,
+        ));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let rows = match &mode.rows {
@@ -1238,10 +1273,12 @@ fn file_row_line(
             ..
         } => {
             let chevron = if *folded { "▸" } else { "▾" };
+            let used = 1 + depth * 2 + 2;
+            let label = truncate_to_width(&format!("{label}/"), width.saturating_sub(used));
             Line::from(vec![
                 Span::raw(format!(" {}", "  ".repeat(*depth))),
                 paint.span(format!("{chevron} "), theme.fold),
-                paint.span(format!("{label}/"), theme.accent),
+                paint.span(label, theme.accent),
             ])
         }
         FileRow::File { index, depth } => {
@@ -1317,14 +1354,31 @@ fn detail_header(detail: &PrDetail, width: usize, paint: Paint) -> Vec<Line<'sta
         .bg(state_color)
         .add_modifier(Modifier::BOLD);
     let branch = Style::new().fg(theme.accent).bg(theme.selection);
+    // Long branch names get cut so the line stays on one row; the base keeps up to a
+    // third of the room, the head the rest.
+    let stats = format!(
+        "   +{} -{}, {} files",
+        detail.additions, detail.deletions, detail.changed_files
+    );
+    let fixed =
+        1 + state.len() + 1 + display_width(&pr.author) + verb.len() + 2 + 6 + 2 + stats.len();
+    let room = width.saturating_sub(fixed);
+    let base = truncate_to_width(
+        &detail.base,
+        (room / 3).max(display_width(&detail.base).min(room / 2)),
+    );
+    let head = truncate_to_width(
+        &detail.head,
+        room.saturating_sub(display_width(&base)).max(8),
+    );
     let merge = [
         Span::raw(" "),
         Span::styled(state, pill),
         paint.bold(format!(" {}", pr.author), theme.foreground),
         paint.span(verb, theme.muted),
-        Span::styled(format!(" {} ", detail.base), branch),
+        Span::styled(format!(" {base} "), branch),
         paint.span(" from ", theme.muted),
-        Span::styled(format!(" {} ", detail.head), branch),
+        Span::styled(format!(" {head} "), branch),
         paint.span(format!("   +{}", detail.additions), theme.success),
         paint.span(format!(" -{}", detail.deletions), theme.danger),
         paint.span(format!(", {} files", detail.changed_files), theme.muted),
@@ -1608,7 +1662,11 @@ fn render_commits(
             let first = Line::from(vec![
                 paint.span(format!(" {} ", symbol.0), symbol.1),
                 paint.span(format!("{short_oid}  "), theme.accent),
-                paint.bold(commit.headline.clone(), theme.foreground),
+                // The mark and the hash take 12 columns.
+                paint.bold(
+                    truncate_to_width(&commit.headline, usize::from(area.width).saturating_sub(12)),
+                    theme.foreground,
+                ),
             ]);
             let second = paint.span(
                 format!(
@@ -1805,6 +1863,7 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
     ]);
     let block = Block::new()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(theme.heading))
         .title(paint.bold(title, theme.heading))
         .style(Style::new().bg(theme.background).fg(theme.foreground));
@@ -2051,6 +2110,7 @@ fn render_label_menu(frame: &mut Frame, menu: &LabelMenu, paint: Paint) {
     }
     let block = Block::new()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(theme.heading))
         .title(paint.bold(" Labels ", theme.heading))
         .title_bottom(paint.span(
@@ -2094,6 +2154,7 @@ fn render_settings(frame: &mut Frame, app: &App, selected: usize, paint: Paint) 
     };
     let block = Block::new()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(theme.heading))
         .title(paint.bold(" Settings ", theme.heading))
         .title_bottom(paint.span(" j/k move, enter edit, esc ", theme.muted))
@@ -2130,6 +2191,7 @@ fn render_theme_menu(frame: &mut Frame, selected: usize, current: &str, paint: P
     };
     let block = Block::new()
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(theme.heading))
         .title(paint.bold(" Theme ", theme.heading))
         .title_bottom(paint.span(" j/k move, enter apply, esc ", theme.muted))
@@ -2149,10 +2211,7 @@ fn render_rate_limit(frame: &mut Frame, limit: RateLimit, paint: Paint) {
         _ => theme.muted,
     };
     let reset = limit.reset_at.with_timezone(&chrono::Local).format("%H:%M");
-    let text = format!(
-        " API: {}/{} left, resets {reset} ",
-        limit.remaining, limit.limit
-    );
+    let text = format!(" API {} left, resets {reset} ", limit.remaining);
     let width = (text.chars().count() as u16).min(frame.area().width);
     let area = frame.area();
     let spot = Rect::new(area.right() - width, area.y, width, 1);
@@ -2172,6 +2231,23 @@ pub fn relative_time(then: DateTime<Utc>, now: DateTime<Utc>) -> String {
         86_400..2_592_000 => format!("{}d ago", seconds / 86_400),
         _ => then.format("%Y-%m-%d").to_string(),
     }
+}
+
+/// Cuts the start instead of the end, so a long path keeps its file name.
+pub fn truncate_start(text: &str, width: usize) -> String {
+    if display_width(text) <= width {
+        return text.to_string();
+    }
+    let mut kept: Vec<char> = Vec::new();
+    let mut used = 1;
+    for character in text.chars().rev() {
+        used += character.width().unwrap_or(0);
+        if used > width {
+            break;
+        }
+        kept.push(character);
+    }
+    std::iter::once('…').chain(kept.into_iter().rev()).collect()
 }
 
 /// Cuts by display width, so CJK titles stay aligned with the badge columns.
@@ -2306,6 +2382,12 @@ mod tests {
             relative_time(now - chrono::Duration::days(60), now),
             "2026-09-18"
         );
+    }
+
+    #[test]
+    fn a_path_cut_from_the_start_keeps_its_file_name() {
+        assert_eq!(truncate_start("src/app/main.rs", 9), "…/main.rs");
+        assert_eq!(truncate_start("a.rs", 9), "a.rs");
     }
 
     #[test]

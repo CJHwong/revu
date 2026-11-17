@@ -1585,6 +1585,8 @@ pub struct App {
     pub fetched_at: Option<DateTime<Utc>>,
     /// The full key list shows over the screen; any key closes it.
     pub show_help: bool,
+    /// The help's first visible line; j/k scroll it.
+    pub help_scroll: u16,
     /// What a mouse click can hit on the inbox, from the last draw.
     pub inbox_clicks: Vec<ClickTarget>,
     /// GitHub's API budget after the latest call.
@@ -1636,6 +1638,7 @@ impl App {
             error: None,
             fetched_at: None,
             show_help: false,
+            help_scroll: 0,
             inbox_clicks: Vec::new(),
             rate_limit: None,
             theme_menu: None,
@@ -2085,7 +2088,17 @@ impl App {
             return self.prompt_key(key.code);
         }
         if self.show_help {
-            self.show_help = false;
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => self.help_scroll += 1,
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.help_scroll = self.help_scroll.saturating_sub(1)
+                }
+                KeyCode::Char(' ') | KeyCode::PageDown => self.help_scroll += 10,
+                KeyCode::Char('b') | KeyCode::PageUp => {
+                    self.help_scroll = self.help_scroll.saturating_sub(10)
+                }
+                _ => self.show_help = false,
+            }
             return None;
         }
         if self.theme_menu.is_some() {
@@ -2100,6 +2113,7 @@ impl App {
         }
         if key.code == KeyCode::Char('?') {
             self.show_help = true;
+            self.help_scroll = 0;
             return None;
         }
         if is_open_link_shortcut(&key) {
