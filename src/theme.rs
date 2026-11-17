@@ -298,6 +298,20 @@ const GITHUB: Theme = Theme {
     removed_bg: Color::Rgb(0xdf, 0xbc, 0xc2),
 };
 
+impl Theme {
+    /// Bold text: the text color pushed halfway to white on a dark page, or to black on
+    /// a light one, so bold stands out even in a font with no bold weight.
+    pub fn strong(&self) -> Color {
+        let (Color::Rgb(red, green, blue), Color::Rgb(..)) = (self.foreground, self.background)
+        else {
+            return self.foreground;
+        };
+        let target = if group_of(self) == "Light" { 0 } else { 255 };
+        let toward = |value: u8| ((u16::from(value) + target) / 2) as u8;
+        Color::Rgb(toward(red), toward(green), toward(blue))
+    }
+}
+
 /// The menu group a theme belongs to.
 pub fn group_of(theme: &Theme) -> &'static str {
     match theme.background {

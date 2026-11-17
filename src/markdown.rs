@@ -32,6 +32,13 @@ pub enum Block {
         header: Vec<Spans>,
         rows: Vec<Vec<Spans>>,
     },
+    /// A heading and everything under it, up to the next heading of its level or higher.
+    /// It folds like a `<details>` block, and starts open.
+    Section {
+        level: u8,
+        title: Spans,
+        body: Vec<Block>,
+    },
 }
 
 /// One screen line. `fold` marks the summary bar of a `<details>` block; `anchor` marks
@@ -138,7 +145,55 @@ pub fn parse(markdown: &str, theme: &Theme) -> Vec<Block> {
     for event in Parser::new_ext(markdown, options) {
         builder.event(event);
     }
-    builder.finish()
+    group_sections(builder.finish())
+}
+
+/// Moves the blocks after each heading into its section. A deeper heading nests inside;
+/// a heading of the same level or higher closes the open ones.
+fn group_sections(blocks: Vec<Block>) -> Vec<Block> {
+    let mut done: Vec<Block> = Vec::new();
+    let mut open: Vec<Block> = Vec::new();
+    for block in blocks {
+        let block = match block {
+            Block::Details {
+                summary,
+                body,
+                open,
+            } => Block::Details {
+                summary,
+                body: group_sections(body),
+                open,
+            },
+            other => other,
+        };
+        if let Block::Section { level, .. } = &block {
+            close_sections(&mut open, &mut done, *level);
+            open.push(block);
+            continue;
+        }
+        match open.last_mut() {
+            Some(Block::Section { body, .. }) => body.push(block),
+            _ => done.push(block),
+        }
+    }
+    close_sections(&mut open, &mut done, 0);
+    done
+}
+
+/// Closes the open sections at `level` or deeper; level 0 closes them all.
+fn close_sections(open: &mut Vec<Block>, done: &mut Vec<Block>, level: u8) {
+    while let Some(Block::Section { level: top, .. }) = open.last() {
+        if *top < level {
+            break;
+        }
+        let Some(section) = open.pop() else {
+            break;
+        };
+        match open.last_mut() {
+            Some(Block::Section { body, .. }) => body.push(section),
+            _ => done.push(section),
+        }
+    }
 }
 
 pub fn layout(blocks: &[Block], width: usize, folds: &mut Folds, theme: &Theme) -> Vec<TextRow> {
@@ -177,6 +232,47 @@ fn layout_block(
             body,
             open,
         } => layout_details(summary, body, *open, width, folds, theme, rows),
+        Block::Section { level, title, body } => {
+            layout_section(*level, title, body, width, folds, theme, rows)
+        }
+    }
+}
+
+/// The heading row folds the section. H1 and H2 keep their rule, as on GitHub.
+fn layout_section(
+    level: u8,
+    title: &Spans,
+    body: &[Block],
+    width: usize,
+    folds: &mut Folds,
+    theme: &Theme,
+    rows: &mut Vec<TextRow>,
+) {
+    let id = folds.take();
+    let open = !folds.toggled.contains(&id);
+    let mut body_rows = layout(body, width, folds, theme);
+    if level <= 2 {
+        let rule = Line::styled("─".repeat(width), Style::new().fg(theme.muted));
+        body_rows.insert(0, TextRow::plain(rule));
+    }
+    let chevron = Span::styled(
+        if open { "▼ " } else { "▶ " },
+        Style::new().fg(theme.fold).add_modifier(Modifier::BOLD),
+    );
+    let mut heading = vec![chevron];
+    heading.extend(title.iter().cloned());
+    if !open {
+        let hint = format!("  {} lines, enter opens", body_rows.len());
+        heading.push(Span::styled(hint, Style::new().fg(theme.fold)));
+    }
+    rows.push(TextRow {
+        line: Line::from(heading),
+        fold: Some(id),
+        anchor: true,
+        action: None,
+    });
+    if open {
+        rows.extend(body_rows);
     }
 }
 
@@ -339,7 +435,8 @@ pub fn line_width(line: &Line) -> usize {
 const COLUMN_GAP: &str = " │ ";
 
 /// Columns as wide as their widest cell. When the table is wider than the space, the
-/// widest column shrinks first and its cells end in "…".
+/// widest column shrinks first, down to `MIN_COLUMN`, and its cells wrap. A rule then
+/// separates the rows, so a wrapped row reads as one.
 fn table(header: &[Spans], body: &[Vec<Spans>], width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let columns = body
         .iter()
@@ -352,13 +449,26 @@ fn table(header: &[Spans], body: &[Vec<Spans>], width: usize, theme: &Theme) -> 
     }
     let widths = column_widths(header, body, columns, width);
     let gap = Span::styled(COLUMN_GAP, Style::new().fg(theme.muted));
-    let bold = Style::new().add_modifier(Modifier::BOLD);
-    let mut lines = vec![table_row(header, &widths, &gap, Some(bold))];
     let rule: Vec<String> = widths.iter().map(|width| "─".repeat(*width)).collect();
-    lines.push(Line::styled(rule.join("─┼─"), Style::new().fg(theme.muted)));
-    lines.extend(body.iter().map(|row| table_row(row, &widths, &gap, None)));
+    let rule = Line::styled(rule.join("─┼─"), Style::new().fg(theme.muted));
+    let mut lines = table_row(header, &widths, &gap, Some(Modifier::BOLD));
+    lines.push(rule.clone());
+    let body_rows: Vec<Vec<Line<'static>>> = body
+        .iter()
+        .map(|row| table_row(row, &widths, &gap, None))
+        .collect();
+    let wrapped = body_rows.iter().any(|row| row.len() > 1);
+    for (index, row) in body_rows.into_iter().enumerate() {
+        if wrapped && index > 0 {
+            lines.push(rule.clone());
+        }
+        lines.extend(row);
+    }
     lines
 }
+
+/// A column shrinks no narrower than this; narrower ones already fit their text.
+const MIN_COLUMN: usize = 10;
 
 fn column_widths(
     header: &[Spans],
@@ -375,7 +485,11 @@ fn column_widths(
     }
     let room = width.saturating_sub(COLUMN_GAP.width() * (columns - 1));
     while widths.iter().sum::<usize>() > room {
-        let Some(widest) = widths.iter_mut().max().filter(|widest| **widest > 3) else {
+        let Some(widest) = widths
+            .iter_mut()
+            .max()
+            .filter(|widest| **widest > MIN_COLUMN)
+        else {
             break;
         };
         *widest -= 1;
@@ -383,32 +497,48 @@ fn column_widths(
     widths
 }
 
+/// One table row as screen lines. Each cell wraps to its column and keeps the styles of
+/// its text; `extra` adds a modifier, such as bold for the header.
 fn table_row(
     cells: &[Spans],
     widths: &[usize],
     gap: &Span<'static>,
-    style: Option<Style>,
-) -> Line<'static> {
-    let mut spans = Vec::new();
-    for (index, width) in widths.iter().enumerate() {
-        if index > 0 {
-            spans.push(gap.clone());
-        }
-        let text: String = cells
-            .get(index)
-            .map(|cell| cell.iter().map(|span| span.content.as_ref()).collect())
-            .unwrap_or_default();
-        let text = truncate(&text, *width);
-        let padding = width.saturating_sub(text.width());
-        let cell_style = style
-            .or_else(|| cells.get(index)?.first().map(|span| span.style))
-            .unwrap_or_default();
-        spans.push(Span::styled(
-            format!("{text}{}", " ".repeat(padding)),
-            cell_style,
-        ));
-    }
-    Line::from(spans)
+    extra: Option<Modifier>,
+) -> Vec<Line<'static>> {
+    let wrapped: Vec<Vec<Line<'static>>> = widths
+        .iter()
+        .enumerate()
+        .map(|(index, width)| {
+            let cell = cells.get(index).cloned().unwrap_or_default();
+            let cell: Spans = match extra {
+                Some(modifier) => cell
+                    .into_iter()
+                    .map(|span| {
+                        let style = span.style.add_modifier(modifier);
+                        span.style(style)
+                    })
+                    .collect(),
+                None => cell,
+            };
+            wrap(&cell, *width, 0)
+        })
+        .collect();
+    let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
+    (0..height)
+        .map(|line_index| {
+            let mut spans = Vec::new();
+            for (index, width) in widths.iter().enumerate() {
+                if index > 0 {
+                    spans.push(gap.clone());
+                }
+                let line = wrapped[index].get(line_index).cloned().unwrap_or_default();
+                let padding = width.saturating_sub(line_width(&line));
+                spans.extend(line.spans);
+                spans.push(Span::raw(" ".repeat(padding)));
+            }
+            Line::from(spans)
+        })
+        .collect()
 }
 
 // ---- Parsing ----
@@ -495,6 +625,21 @@ impl<'t> Builder<'t> {
         self.styles.push(self.style().add_modifier(modifier));
     }
 
+    /// Bold in the theme's strong color, unless the text already has its own color, such
+    /// as a link or a heading.
+    fn push_strong(&mut self) {
+        let style = self.strong_style();
+        self.styles.push(style);
+    }
+
+    fn strong_style(&self) -> Style {
+        let style = self.style().add_modifier(Modifier::BOLD);
+        match style.fg {
+            Some(color) if color != self.theme.foreground => style,
+            _ => style.fg(self.theme.strong()),
+        }
+    }
+
     fn event(&mut self, event: Event) {
         match event {
             Event::Start(tag) => self.start(tag),
@@ -537,7 +682,7 @@ impl<'t> Builder<'t> {
             }
             Tag::Item => self.start_item(),
             Tag::Emphasis => self.push_modifier(Modifier::ITALIC),
-            Tag::Strong => self.push_modifier(Modifier::BOLD),
+            Tag::Strong => self.push_strong(),
             Tag::Strikethrough => self.push_modifier(Modifier::CROSSED_OUT),
             Tag::Link { .. } => self.styles.push(
                 self.style()
@@ -563,9 +708,7 @@ impl<'t> Builder<'t> {
             TagEnd::Heading(level) => {
                 self.styles.pop();
                 self.flush();
-                if level <= HeadingLevel::H2 {
-                    self.add(Block::Rule);
-                }
+                self.heading_to_section(level);
                 self.add(Block::Blank);
             }
             TagEnd::BlockQuote(_) => {
@@ -708,6 +851,22 @@ impl<'t> Builder<'t> {
         self.add(Block::Line { spans, indent });
     }
 
+    /// Turns the heading line just emitted into an empty section; `group_sections` fills
+    /// it with the blocks that follow.
+    fn heading_to_section(&mut self, level: HeadingLevel) {
+        let Some(container) = self.containers.last_mut() else {
+            return;
+        };
+        let Some(Block::Line { spans, .. }) = container.blocks.pop() else {
+            return;
+        };
+        container.blocks.push(Block::Section {
+            level: level as u8,
+            title: spans,
+            body: Vec::new(),
+        });
+    }
+
     fn add(&mut self, block: Block) {
         let Some(container) = self.containers.last_mut() else {
             return;
@@ -818,7 +977,7 @@ impl<'t> Builder<'t> {
             "a" => style
                 .fg(self.theme.accent)
                 .add_modifier(Modifier::UNDERLINED),
-            "b" | "strong" => style.add_modifier(Modifier::BOLD),
+            "b" | "strong" => self.strong_style(),
             "i" | "em" => style.add_modifier(Modifier::ITALIC),
             "code" | "kbd" => self.code_style(),
             "sub" | "sup" | "small" => style.fg(self.theme.muted),
@@ -949,7 +1108,7 @@ mod tests {
             40,
             &[],
         ));
-        assert_eq!(rows[0], "Reason");
+        assert_eq!(rows[0], "▼ Reason");
         assert!(rows[1].starts_with("───"), "an h2 gets a rule under it");
         assert_eq!(rows[3], "Because it is slow.");
         assert!(
@@ -1041,12 +1200,49 @@ mod tests {
     }
 
     #[test]
-    fn a_wide_table_shrinks_its_widest_column() {
+    fn a_wide_table_wraps_its_widest_column() {
         let markdown = "| Name | Notes |\n|---|---|\n| a | a very long note that cannot fit |";
         let rows = text(&render(markdown, 24, &[]));
-        assert_eq!(rows[0], "Name │ Notes");
-        assert!(rows[2].ends_with('…'));
+        assert_eq!(rows[0].trim_end(), "Name │ Notes");
+        let notes: Vec<&str> = rows[2..]
+            .iter()
+            .map(|row| row.split(" │ ").nth(1).unwrap_or("").trim_end())
+            .collect();
+        assert_eq!(
+            notes.join(" "),
+            "a very long note that cannot fit",
+            "nothing is cut: {rows:?}"
+        );
         assert!(rows.iter().all(|row| row.width() <= 24), "{rows:?}");
+    }
+
+    #[test]
+    fn a_heading_folds_its_section_up_to_the_next_heading_of_its_level() {
+        let markdown = "## One\n\nfirst\n\n### Deep\n\ndeeper\n\n## Two\n\nsecond";
+        let open = text(&render(markdown, 30, &[]));
+        assert!(open.contains(&"deeper".to_string()), "{open:?}");
+        let closed = text(&render(markdown, 30, &[0]));
+        assert!(closed[0].starts_with("▶ One"), "{closed:?}");
+        assert!(
+            !closed.iter().any(|row| row == "first" || row == "deeper"),
+            "{closed:?}"
+        );
+        assert!(
+            closed.contains(&"▼ Two".to_string()),
+            "the next h2 stays out: {closed:?}"
+        );
+    }
+
+    #[test]
+    fn bold_text_takes_the_strong_color() {
+        let theme = crate::theme::by_name("dracula").unwrap();
+        let blocks = parse("plain **bold**", &theme);
+        let Block::Line { spans, .. } = &blocks[0] else {
+            panic!("{blocks:?}")
+        };
+        let bold = spans.iter().find(|span| span.content == "bold").unwrap();
+        assert_eq!(bold.style.fg, Some(theme.strong()));
+        assert!(bold.style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]
