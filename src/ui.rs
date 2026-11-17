@@ -269,7 +269,6 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
                 "ctrl-l, cmd-l, paste",
                 "open a pull request by link or owner/repo#123",
             ),
-            ("T", "pick a color theme; it is saved to the config"),
             (
                 ",",
                 "settings: theme, workspace folder, how far back the inbox looks",

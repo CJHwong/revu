@@ -1724,14 +1724,6 @@ impl App {
             self.settings_menu = Some(0);
             return None;
         }
-        if key.code == KeyCode::Char('T') {
-            let names = crate::theme::THEME_NAMES;
-            self.theme_menu = names
-                .iter()
-                .position(|name| *name == self.theme_name)
-                .or(Some(0));
-            return None;
-        }
         if key.code == KeyCode::Char('?') {
             self.show_help = true;
             return None;
@@ -1826,7 +1818,7 @@ impl App {
                 self.theme_menu = None;
                 return Some(Action::SetTheme(names[selected]));
             }
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('T') => self.theme_menu = None,
+            KeyCode::Esc | KeyCode::Char('q') => self.theme_menu = None,
             _ => {}
         }
         None
@@ -2619,16 +2611,18 @@ mod tests {
     }
 
     #[test]
-    fn the_theme_menu_opens_on_the_current_theme_and_applies_the_pick() {
+    fn the_theme_menu_opens_from_settings_on_the_current_theme_and_applies_the_pick() {
         let mut app = app_with(vec![group("A", &[7], false)]);
         app.theme_name = "dracula";
-        app.handle_key(key(KeyCode::Char('T')));
+        app.handle_key(key(KeyCode::Char(',')));
+        app.handle_key(key(KeyCode::Enter));
         assert_eq!(app.theme_menu, Some(4));
         app.handle_key(key(KeyCode::Char('j')));
         let action = app.handle_key(key(KeyCode::Enter));
         assert!(matches!(action, Some(Action::SetTheme("gruvbox_dark"))));
         assert!(app.theme_menu.is_none());
-        app.handle_key(key(KeyCode::Char('T')));
+        app.handle_key(key(KeyCode::Char(',')));
+        app.handle_key(key(KeyCode::Enter));
         app.handle_key(key(KeyCode::Esc));
         assert!(app.theme_menu.is_none(), "esc closes without a change");
     }
