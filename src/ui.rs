@@ -21,7 +21,7 @@ use crate::repo::{GrepHit, MAX_GREP_HITS};
 use crate::theme::Theme;
 use crate::{markdown, overview};
 
-const INBOX_HELP: &str = "j/k move | enter open | space fold | tab next group | o browser | r refresh | ctrl-l link | ? keys";
+const INBOX_HELP: &str = "j/k move | l/enter open | space fold | tab next group | o browser | r refresh | ctrl-l link | ? keys";
 
 /// What every render function needs besides the data it draws.
 #[derive(Clone, Copy)]
@@ -244,14 +244,14 @@ fn pad_span(span: Span<'static>, width: usize) -> Span<'static> {
 fn detail_help(tab: Tab) -> &'static str {
     match tab {
         Tab::Overview => {
-            "j/k next comment | enter fold | f/F/n filter, order, bots | o browser | ? keys"
+            "j/k next comment | enter fold | f/F/n filter, order, bots | o browser | h back | ? keys"
         }
-        Tab::Checks => "j/k move | enter/o browser | r reload | esc back | ? keys",
+        Tab::Checks => "j/k move | enter/o browser | r reload | h back | ? keys",
         Tab::Commits => {
-            "j/k commit | J/K scroll diff | m renderer | / find | o browser | esc back | ? keys"
+            "j/k commit | J/K scroll diff | m renderer | / find | o browser | h back | ? keys"
         }
         Tab::Files => {
-            "j/k file | enter whole file | v viewed | ]/[ unviewed | t tree | z list | m renderer | ? keys"
+            "j/k file | enter whole file | v viewed | ]/[ unviewed | t tree | z list | m renderer | h back | ? keys"
         }
     }
 }
