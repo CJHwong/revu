@@ -66,7 +66,7 @@ pub fn detail_document() -> String {
            ... on User {{ login }} ... on Bot {{ login }} ... on Mannequin {{ login }} ... on Team {{ name }} }} }} }} \
          latestOpinionatedReviews(first: 20) {{ nodes {{ author {{ login }} state }} }} \
          latestReviews(first: 30) {{ nodes {{ author {{ login }} state onBehalfOf(first: 5) {{ nodes {{ name }} }} }} }} \
-         mergeStateStatus milestone {{ title }} \
+         mergeStateStatus milestone {{ title }} state mergedAt closedAt mergedBy {{ login }} \
          closingIssuesReferences(first: 10) {{ nodes {{ number title url }} }} \
          }} }} }}"
     )
@@ -138,11 +138,16 @@ pub fn fetch_activity(repo: &str, number: u64) -> Result<PrActivity> {
 
 const FILES_DOCUMENT: &str = "query($owner: String!, $name: String!, $number: Int!, $cursor: String) { \
     repository(owner: $owner, name: $name) { pullRequest(number: $number) { \
-    files(first: 100, after: $cursor) { pageInfo { hasNextPage endCursor } \
+    files(first: 100, after: $cursor) { totalCount pageInfo { hasNextPage endCursor } \
     nodes { path additions deletions changeType viewerViewedState } } } } }";
 
-/// Follows the cursor until GitHub reports no next page.
-pub fn fetch_files(repo: &str, number: u64) -> Result<Vec<ChangedFile>> {
+/// Follows the cursor until GitHub reports no next page. After each page, `progress` gets
+/// the files fetched so far and the PR's total.
+pub fn fetch_files(
+    repo: &str,
+    number: u64,
+    mut progress: impl FnMut(usize, usize),
+) -> Result<Vec<ChangedFile>> {
     let (owner, name) = split_repo(repo)?;
     let mut files = Vec::new();
     let mut cursor: Option<String> = None;
@@ -166,6 +171,7 @@ pub fn fetch_files(repo: &str, number: u64) -> Result<Vec<ChangedFile>> {
             .with_context(|| format!("{repo}#{number} has no files field"))?;
         let page = model::parse_files_page(raw)?;
         files.extend(page.files);
+        progress(files.len(), page.total);
         match page.next_cursor {
             Some(next) => cursor = Some(next),
             None => return Ok(files),

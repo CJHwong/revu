@@ -54,6 +54,12 @@ enum Message {
         pr: PrRef,
         result: Result<Vec<ChangedFile>, String>,
     },
+    /// A page of the file list arrived: the files so far and the PR's total.
+    FilesProgress {
+        pr: PrRef,
+        loaded: usize,
+        total: usize,
+    },
     Viewed {
         pr: PrRef,
         path: String,
@@ -271,6 +277,9 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
             }
             Message::Detail { pr, result } => app.set_detail(&pr, result.map(|detail| *detail)),
             Message::Files { pr, result } => app.set_files(&pr, result),
+            Message::FilesProgress { pr, loaded, total } => {
+                app.set_files_progress(&pr, loaded, total)
+            }
             Message::Viewed {
                 pr,
                 path,
@@ -658,7 +667,15 @@ fn start_detail_fetch(session: &Session, pr: PrRef) {
 fn start_files_fetch(session: &Session, pr: PrRef) {
     let sender = session.sender.clone();
     thread::spawn(move || {
-        let result = github::fetch_files(&pr.repo, pr.number).map_err(|error| format!("{error:#}"));
+        let progress = |loaded, total| {
+            let _ = sender.send(Message::FilesProgress {
+                pr: pr.clone(),
+                loaded,
+                total,
+            });
+        };
+        let result = github::fetch_files(&pr.repo, pr.number, progress)
+            .map_err(|error| format!("{error:#}"));
         let _ = sender.send(Message::Files { pr, result });
     });
 }

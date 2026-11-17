@@ -249,6 +249,8 @@ pub struct DetailView {
     /// `None` until the Files tab is first shown and its request returns.
     pub files: Option<Result<Vec<ChangedFile>, String>>,
     files_requested: bool,
+    /// While the file list loads: the files fetched so far and the PR's total.
+    pub files_progress: Option<(usize, usize)>,
     /// Indexes into the visible files, not into `files`.
     pub file_state: ListState,
     pub hide_viewed: bool,
@@ -323,6 +325,7 @@ impl DetailView {
             checks: ListState::default().with_selected(Some(0)),
             files: None,
             files_requested: false,
+            files_progress: None,
             file_state: ListState::default().with_selected(Some(0)),
             tree_view: prefs.tree_view,
             folded_dirs: HashSet::new(),
@@ -1573,6 +1576,12 @@ impl App {
         if let Some(view) = self.view_for(pr) {
             view.activity = Some(result);
             view.overview = None;
+        }
+    }
+
+    pub fn set_files_progress(&mut self, pr: &PrRef, loaded: usize, total: usize) {
+        if let Some(view) = self.view_for(pr) {
+            view.files_progress = Some((loaded, total));
         }
     }
 

@@ -14,8 +14,9 @@ use crate::app::{
 };
 use crate::file_tree::FileRow;
 use crate::model::{
-    ChangedFile, CheckLine, CheckState, CheckSummary, CommitLine, Group, Label, PrActivity,
-    PrDetail, PrRef, PrSummary, RateLimit, ReviewState, Reviewer, SinceCounts, ViewedState,
+    ChangedFile, CheckLine, CheckState, CheckSummary, CommitLine, Group, Label, Lifecycle,
+    PrActivity, PrDetail, PrRef, PrSummary, RateLimit, ReviewState, Reviewer, SinceCounts,
+    ViewedState,
 };
 use crate::repo::{GrepHit, MAX_GREP_HITS};
 use crate::theme::Theme;
@@ -601,7 +602,8 @@ fn render_file_list(frame: &mut Frame, view: &mut DetailView, area: Rect, paint:
     let files = match &view.files {
         None => {
             frame.render_widget(
-                Paragraph::new(paint.span(" loading files...", theme.warning)),
+                Paragraph::new(paint.span(files_loading_text(view), theme.warning))
+                    .wrap(Wrap { trim: false }),
                 area,
             );
             return false;
@@ -696,6 +698,14 @@ fn rows_beyond(heights: &[usize], offset: usize, space: usize) -> (usize, usize)
         })
         .count();
     (offset, heights.len().saturating_sub(offset + shown))
+}
+
+/// What the file list waits for: GitHub sends it 100 files at a time.
+fn files_loading_text(view: &DetailView) -> String {
+    match view.files_progress {
+        None => " fetching the file list from GitHub...".to_string(),
+        Some((loaded, total)) => format!(" fetching the file list: {loaded} of {total} files"),
+    }
 }
 
 /// The rendered diff for the selected file or commit, or what is still missing for it.
@@ -987,10 +997,11 @@ fn detail_header(detail: &PrDetail, width: usize, paint: Paint) -> Vec<Line<'sta
     ])];
     let title = [paint.bold(format!(" {}", pr.title), theme.foreground)];
     lines.extend(markdown::wrap(&title, width, 1));
-    let (state, state_color) = if pr.is_draft {
-        (" Draft ", theme.muted)
-    } else {
-        (" Open ", theme.success)
+    let (state, state_color, verb) = match &detail.lifecycle {
+        Lifecycle::Merged { .. } => (" Merged ", theme.heading, " merged into "),
+        Lifecycle::Closed { .. } => (" Closed ", theme.danger, " wanted to merge into "),
+        Lifecycle::Draft => (" Draft ", theme.muted, " wants to merge into "),
+        Lifecycle::Open => (" Open ", theme.success, " wants to merge into "),
     };
     let pill = Style::new()
         .fg(theme.background)
@@ -1001,7 +1012,7 @@ fn detail_header(detail: &PrDetail, width: usize, paint: Paint) -> Vec<Line<'sta
         Span::raw(" "),
         Span::styled(state, pill),
         paint.bold(format!(" {}", pr.author), theme.foreground),
-        paint.span(" wants to merge into ", theme.muted),
+        paint.span(verb, theme.muted),
         Span::styled(format!(" {} ", detail.base), branch),
         paint.span(" from ", theme.muted),
         Span::styled(format!(" {} ", detail.head), branch),

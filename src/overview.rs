@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use unicode_width::UnicodeWidthStr;
 
 use crate::markdown::{self, Block, FoldId, Folds, RowAction, TextRow, fold_key, line_width};
-use crate::model::{Comment, PrActivity, PrDetail, ReviewState, ThreadLine};
+use crate::model::{Comment, Lifecycle, PrActivity, PrDetail, ReviewState, ThreadLine};
 use crate::theme::Theme;
 use crate::ui::relative_time;
 
@@ -194,6 +194,9 @@ fn card(
 /// approvals, each with a bar.
 fn merge_box(context: &Context, width: usize) -> Vec<TextRow> {
     let theme = context.theme;
+    if let Some(rows) = finished_box(context, width) {
+        return rows;
+    }
     let (title, color, note) = merge_headline(context.detail, theme);
     let inner = width.saturating_sub(4);
     let mut content = Vec::new();
@@ -232,6 +235,40 @@ fn merge_box(context: &Context, width: usize) -> Vec<TextRow> {
 }
 
 /// The headline, its color, and a line on what blocks the merge.
+/// A merged or closed PR gets GitHub's closing line in place of the merge checks, which
+/// no longer apply.
+fn finished_box(context: &Context, width: usize) -> Option<Vec<TextRow>> {
+    let theme = context.theme;
+    let when = |at: &Option<DateTime<Utc>>| {
+        at.map(|at| format!(" {}", relative_time(at, context.now)))
+            .unwrap_or_default()
+    };
+    let (title, color, note) = match &context.detail.lifecycle {
+        Lifecycle::Merged { by, at } => {
+            let by = by
+                .as_deref()
+                .map(|login| format!(" by {login}"))
+                .unwrap_or_default();
+            ("⇄ Merged", theme.heading, format!("Merged{by}{}", when(at)))
+        }
+        Lifecycle::Closed { at } => (
+            "✗ Closed",
+            theme.danger,
+            format!("Closed without merging{}", when(at)),
+        ),
+        Lifecycle::Open | Lifecycle::Draft => return None,
+    };
+    let content = vec![TextRow::plain(Line::from(context.span(note, theme.muted)))];
+    Some(card(
+        vec![context.bold(title, color)],
+        content,
+        width,
+        theme,
+        None,
+        context.toggled,
+    ))
+}
+
 fn merge_headline(detail: &PrDetail, theme: &Theme) -> (&'static str, Color, Option<&'static str>) {
     if detail.summary.is_draft || detail.merge_state == "DRAFT" {
         let note = "Mark it ready for review before it can merge";
@@ -820,6 +857,45 @@ mod tests {
         assert!(closed[border].contains("lines, enter opens"));
         assert!(closed.len() < open.len());
         assert_eq!(closed[border].chars().count(), 60);
+    }
+
+    #[test]
+    fn a_merged_or_closed_pull_request_says_so_instead_of_its_checks() {
+        let theme = theme::by_name("dracula").unwrap();
+        let mut detail = sample_detail();
+        let activity = Ok(sample_activity());
+        let now = detail.created_at + chrono::Duration::days(3);
+        let shown = |detail: &PrDetail| {
+            let context = Context {
+                detail,
+                activity: Some(&activity),
+                toggled: &HashSet::new(),
+                comments: CommentView::default(),
+                theme: &theme,
+                now,
+            };
+            let rows = merge_box(&context, 60);
+            let text = |row: &TextRow| -> String {
+                row.line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            };
+            rows.iter().map(text).collect::<Vec<_>>().join("\n")
+        };
+        detail.lifecycle = Lifecycle::Merged {
+            by: Some("lead".to_string()),
+            at: Some(detail.created_at + chrono::Duration::days(1)),
+        };
+        let merged = shown(&detail);
+        assert!(
+            merged.contains("⇄ Merged") && merged.contains("Merged by lead 2d ago"),
+            "{merged}"
+        );
+        assert!(!merged.contains("Checks"), "{merged}");
+        detail.lifecycle = Lifecycle::Closed { at: None };
+        assert!(shown(&detail).contains("Closed without merging"));
     }
 
     #[test]

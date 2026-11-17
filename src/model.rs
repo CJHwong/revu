@@ -146,6 +146,8 @@ pub struct ChangedFile {
 pub struct FilesPage {
     pub files: Vec<ChangedFile>,
     pub next_cursor: Option<String>,
+    /// All the PR's changed files, across pages.
+    pub total: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -286,6 +288,21 @@ pub struct PrDetail {
     pub check_counts: Option<CheckCounts>,
     pub milestone: Option<String>,
     pub linked_issues: Vec<LinkedIssue>,
+    pub lifecycle: Lifecycle,
+}
+
+/// Where the PR is in its life, as GitHub's state pill shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Lifecycle {
+    Open,
+    Draft,
+    Merged {
+        by: Option<String>,
+        at: Option<DateTime<Utc>>,
+    },
+    Closed {
+        at: Option<DateTime<Utc>>,
+    },
 }
 
 // ---- GitHub GraphQL shapes ----
@@ -464,6 +481,10 @@ struct RawDetail {
     merge_state_status: Option<String>,
     milestone: Option<RawTitle>,
     closing_issues_references: Option<Nodes<RawIssue>>,
+    state: Option<String>,
+    merged_at: Option<DateTime<Utc>>,
+    merged_by: Option<Login>,
+    closed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Deserialize)]
@@ -597,6 +618,8 @@ struct RawReview {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawFiles {
+    #[serde(default)]
+    total_count: usize,
     page_info: RawPageInfo,
     nodes: Vec<RawFile>,
 }
@@ -623,6 +646,7 @@ struct RawFile {
 /// `files` is `data.repository.pullRequest.files`.
 pub fn parse_files_page(files: &Value) -> Result<FilesPage> {
     let raw: RawFiles = serde_json::from_value(files.clone()).context("parse changed files")?;
+    let total = raw.total_count;
     let next_cursor = raw
         .page_info
         .end_cursor
@@ -642,7 +666,11 @@ pub fn parse_files_page(files: &Value) -> Result<FilesPage> {
             deletions: file.deletions,
         })
         .collect();
-    Ok(FilesPage { files, next_cursor })
+    Ok(FilesPage {
+        files,
+        next_cursor,
+        total,
+    })
 }
 
 /// `search` is one group's `data.search` object.
@@ -678,7 +706,17 @@ pub fn parse_detail(pull_request: &Value) -> Result<PrDetail> {
             });
             linked.collect()
         });
+    let lifecycle = match raw.state.as_deref() {
+        Some("MERGED") => Lifecycle::Merged {
+            by: raw.merged_by.map(|actor| actor.login),
+            at: raw.merged_at,
+        },
+        Some("CLOSED") => Lifecycle::Closed { at: raw.closed_at },
+        _ if raw.row.is_draft => Lifecycle::Draft,
+        _ => Lifecycle::Open,
+    };
     Ok(PrDetail {
+        lifecycle,
         merge_state: raw.merge_state_status.unwrap_or_default(),
         check_counts,
         milestone: raw.milestone.map(|milestone| milestone.title),
