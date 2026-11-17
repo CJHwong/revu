@@ -18,7 +18,7 @@ use crate::repo::{GrepHit, MAX_GREP_HITS};
 use crate::theme::Theme;
 use crate::{markdown, overview};
 
-const INBOX_HELP: &str = "j/k move | enter open | space fold | o browser | d diff | r refresh | ctrl-l open link | q quit";
+const INBOX_HELP: &str = "j/k move | enter open | space fold | tab next group | o browser | r refresh | ctrl-l link | ? keys";
 
 /// What every render function needs besides the data it draws.
 #[derive(Clone, Copy)]
@@ -54,6 +54,9 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: &Theme, now: DateTime<Utc
         );
     } else {
         render_inbox(frame, app, paint);
+    }
+    if app.show_help {
+        render_help(frame, paint);
     }
     if let Some(prompt) = &app.prompt {
         render_prompt(frame, prompt, paint);
@@ -226,18 +229,129 @@ fn pad_span(span: Span<'static>, width: usize) -> Span<'static> {
 fn detail_help(tab: Tab) -> &'static str {
     match tab {
         Tab::Overview => {
-            "j/k move | enter fold | ]/[ next/prev card | space/b page | o browser | r reload | esc back"
+            "j/k move | enter fold | ]/[ next card | space/b page | o browser | esc back | ? keys"
         }
-        Tab::Checks => {
-            "tab/1-4 switch | j/k move | enter/o browser | d diff | r reload | ctrl-l open link | esc back"
-        }
+        Tab::Checks => "j/k move | enter/o browser | r reload | esc back | ? keys",
         Tab::Commits => {
-            "j/k commit | J/K, space/b scroll | m renderer | / find, n/N | s search repo | o browser | esc back"
+            "j/k commit | J/K scroll diff | m renderer | / find | o browser | esc back | ? keys"
         }
         Tab::Files => {
-            "j/k file | J/K, space/b scroll | m renderer | / find, n/N | v viewed | H hide | e file | s search | esc"
+            "j/k file | enter whole file | v viewed | ]/[ unviewed | J/K scroll | m renderer | ? keys"
         }
     }
+}
+
+/// Every key, by where it works. `?` shows this list.
+const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
+    (
+        "Anywhere",
+        &[
+            (
+                "ctrl-l, cmd-l, paste",
+                "open a pull request by link or owner/repo#123",
+            ),
+            ("?", "this list; any key closes it"),
+        ],
+    ),
+    (
+        "Inbox",
+        &[
+            ("j/k, g/G", "move, top, bottom"),
+            ("enter, l", "open the pull request, or fold a group header"),
+            ("space", "fold the current group"),
+            ("tab, shift-tab", "next or previous group"),
+            ("o, d", "open in the browser, run the open_diff command"),
+            ("r, q", "reload the config and refresh, quit"),
+        ],
+    ),
+    (
+        "Pull request",
+        &[
+            ("1-4, tab, shift-tab", "switch tab"),
+            ("esc, h, q", "back to the inbox"),
+            ("g/G, space/b", "top, bottom, page down, page up"),
+            ("s", "search every file in the repo at the PR head"),
+            ("o, d, r", "open in the browser, run open_diff, fetch again"),
+        ],
+    ),
+    (
+        "Overview",
+        &[
+            ("j/k", "move the cursor"),
+            ("enter", "open or close the folded block under the cursor"),
+            ("], [", "next or previous card or folded block"),
+        ],
+    ),
+    (
+        "Files changed",
+        &[
+            ("enter", "show the whole file at the PR head"),
+            ("v, H", "toggle Viewed (syncs to GitHub), hide viewed files"),
+            ("], [", "next or previous unviewed file"),
+        ],
+    ),
+    (
+        "Files changed, Commits",
+        &[
+            ("J/K, space/b", "scroll the diff"),
+            ("m", "switch the diff renderer"),
+            ("/, n/N", "find in the diff, next and previous match"),
+        ],
+    ),
+    (
+        "Commits, Checks",
+        &[("enter", "open the selected item in the browser")],
+    ),
+    (
+        "Search results, file view",
+        &[("enter, esc", "open the file at the match, go back")],
+    ),
+];
+
+fn render_help(frame: &mut Frame, paint: Paint) {
+    let theme = paint.theme;
+    let key_width = KEY_LIST
+        .iter()
+        .flat_map(|(_, keys)| keys.iter())
+        .map(|(keys, _)| display_width(keys))
+        .max()
+        .unwrap_or(0);
+    let mut lines = Vec::new();
+    for (section, keys) in KEY_LIST {
+        lines.push(Line::from(paint.bold(section.to_string(), theme.heading)));
+        lines.extend(keys.iter().map(|(keys, action)| {
+            Line::from(vec![
+                paint.span(
+                    format!("  {}", pad_to_width(keys, key_width + 2)),
+                    theme.accent,
+                ),
+                paint.span(action.to_string(), theme.foreground),
+            ])
+        }));
+        lines.push(Line::from(""));
+    }
+    lines.pop();
+    let area = frame.area();
+    // A short terminal gets the list without the blank lines between sections.
+    if lines.len() as u16 + 2 > area.height {
+        lines.retain(|line| line.width() > 0);
+    }
+    let width = area.width.saturating_sub(4).min(84);
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let box_area = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    };
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(theme.heading))
+        .title(paint.bold(" Keys ", theme.heading))
+        .title_bottom(paint.span(" any key closes ", theme.muted))
+        .style(Style::new().bg(theme.background).fg(theme.foreground));
+    frame.render_widget(Clear, box_area);
+    frame.render_widget(Paragraph::new(lines).block(block), box_area);
 }
 
 fn render_detail(

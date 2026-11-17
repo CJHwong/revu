@@ -1,6 +1,6 @@
 # rs-github-inbox
 
-A terminal version of GitHub's pull request inbox. It shows the pull requests you care about across every repository, grouped like the web inbox, and opens each one with its rendered description, reviewers, labels, checks and activity. It writes one thing to GitHub: the Viewed checkbox on a file, when you press `v`.
+A terminal version of GitHub's pull request inbox. It shows the pull requests you care about across every repository, grouped like the web inbox, and opens each one like GitHub's Overview: the description, the comments and reviews with their threads, folded `<details>` blocks, reviewers and labels. It writes one thing to GitHub: the Viewed checkbox on a file, when you press `v`.
 
 ## Requirements
 
@@ -33,29 +33,35 @@ A search shows at most 100 pull requests. A group with more matches shows a coun
 
 ## Keys
 
-| Screen | Key | Action |
+Press `?` anywhere for this list.
+
+| Where | Key | Action |
 |---|---|---|
-| Anywhere | `Ctrl+L` (or `Cmd+L`, see below) | Open a pull request by link or `owner/repo#123` |
-| Anywhere | paste | Opens the same link box with the pasted text |
-| Inbox | `j` / `k` | Move |
-| Inbox | `Enter` | Open the pull request, or fold a group header |
+| Anywhere | `Ctrl+L` (or `Cmd+L`, see below), or paste | Open a pull request by link or `owner/repo#123` |
+| Anywhere | `?` | Show every key. Any key closes the list. |
+| Inbox | `j` / `k`, `g` / `G` | Move, top, bottom |
+| Inbox | `Enter`, `l` | Open the pull request, or fold a group header |
 | Inbox | `Space` | Fold the current group |
-| Inbox | `g` / `G` | Top / bottom |
+| Inbox | `Tab` / `Shift+Tab` | Next or previous group |
 | Inbox | `r` | Reload the config and fetch again |
-| Pull request | `Tab` / `Shift+Tab`, `1`-`4` | Switch between Overview, Commits, Checks and Files changed |
+| Inbox | `q` | Quit |
+| Pull request | `1`-`4`, `Tab` / `Shift+Tab` | Switch between Overview, Commits, Checks and Files changed |
+| Pull request | `Esc`, `h`, `q` | Back to the inbox |
+| Pull request | `g` / `G`, `Space` / `b` | Top, bottom, page down, page up |
+| Pull request | `s` | Search every file in the repo at the PR head, not only the changed ones. `Enter` opens the file at the match. It needs the local clone, which the Files changed or Commits tab finds first. |
+| Pull request | `r` | Fetch the pull request again |
+| Overview | `j` / `k` | Move the cursor |
+| Overview | `Enter` | Open or close the folded `<details>` block under the cursor |
+| Overview | `]` / `[` | Next or previous card or folded block |
+| Files changed | `Enter` | Show the whole file at the PR head |
 | Files changed | `v` | Toggle Viewed. It syncs to GitHub's Viewed checkbox at once. |
 | Files changed | `H` | Hide viewed files |
+| Files changed | `]` / `[` | Next or previous unviewed file |
 | Files changed, Commits | `J` / `K`, `Space` / `b` | Scroll the diff |
 | Files changed, Commits | `m` | Switch the diff renderer |
 | Files changed, Commits | `/`, then `n` / `N` | Find text in the diff, next and previous match |
-| Files changed | `e` | Show the whole file at the PR head |
-| Pull request | `s` | Search every file in the repo at the PR head, not only the changed ones. `Enter` opens the file at the match. It needs the local clone, which the Files changed or Commits tab finds first. |
-| Pull request | `j` / `k`, `Space` / `b` | Scroll the description, or move in a list |
-| Pull request | `Enter` | Open the selected commit or check in the browser |
-| Pull request | `r` | Fetch the pull request again |
-| Pull request | `Esc` | Back to the inbox |
-| Both | `o` | Open in the browser |
-| Both | `d` | Run the `open_diff` command |
-| Both | `q` | Quit from the inbox, back from a pull request |
+| Commits, Checks | `Enter` | Open the selected commit or check in the browser |
+| Inbox, pull request | `o` | Open in the browser |
+| Inbox, pull request | `d` | Run the `open_diff` command |
 
 `Cmd+L` works only in terminals that pass Cmd to applications through the kitty keyboard protocol and do not use `Cmd+L` themselves. `Ctrl+L` works everywhere.

@@ -533,6 +533,25 @@ impl DetailView {
         }
     }
 
+    /// Moves to the next or previous file in the list that is not marked Viewed.
+    fn jump_unviewed(&mut self, forward: bool) {
+        let Some(files) = self.loaded_files() else {
+            return;
+        };
+        let visible = self.visible_files();
+        let current = self.file_state.selected().unwrap_or(0);
+        let unviewed = |position: &usize| files[visible[*position]].viewed != ViewedState::Viewed;
+        let target = if forward {
+            (current + 1..visible.len()).find(unviewed)
+        } else {
+            (0..current).rev().find(unviewed)
+        };
+        if let Some(target) = target {
+            self.file_state.select(Some(target));
+            self.diff_scroll = 0;
+        }
+    }
+
     /// How far Space and b move: a screen on the Overview, 20 rows in a list.
     fn page_step(&self) -> isize {
         match self.tab {
@@ -601,6 +620,8 @@ pub struct App {
     pub loading: bool,
     pub error: Option<String>,
     pub fetched_at: Option<DateTime<Utc>>,
+    /// The full key list shows over the screen; any key closes it.
+    pub show_help: bool,
     /// One flag per group: true while its search is running.
     pub group_loading: Vec<bool>,
     inbox_generation: u64,
@@ -626,6 +647,7 @@ impl App {
             loading: false,
             error: None,
             fetched_at: None,
+            show_help: false,
             group_loading: Vec::new(),
             inbox_generation: 0,
             renderer_names: Vec::new(),
@@ -943,6 +965,14 @@ impl App {
         if self.prompt.is_some() {
             return self.prompt_key(key.code);
         }
+        if self.show_help {
+            self.show_help = false;
+            return None;
+        }
+        if key.code == KeyCode::Char('?') {
+            self.show_help = true;
+            return None;
+        }
         if is_open_link_shortcut(&key) {
             self.prompt = Some(Prompt::default());
             return None;
@@ -1048,8 +1078,10 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
             KeyCode::Char('g') | KeyCode::Home => self.list_state.select(Some(0)),
             KeyCode::Char('G') | KeyCode::End => self.select_last(),
-            KeyCode::Char(' ') | KeyCode::Tab => self.toggle_selected_group(),
-            KeyCode::Enter => return self.open_selected(),
+            KeyCode::Char(' ') => self.toggle_selected_group(),
+            KeyCode::Tab => self.jump_group(true),
+            KeyCode::BackTab => self.jump_group(false),
+            KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => return self.open_selected(),
             KeyCode::Char('o') => {
                 return self
                     .selected_pr()
@@ -1097,7 +1129,7 @@ impl App {
                     ..Prompt::default()
                 });
             }
-            KeyCode::Char('e') if view.tab == Tab::Files => {
+            KeyCode::Enter if view.tab == Tab::Files => {
                 let path = view
                     .loaded_files()
                     .and_then(|files| Some(files.get(view.selected_file()?)?.path.clone()));
@@ -1136,6 +1168,8 @@ impl App {
             KeyCode::Enter if view.tab == Tab::Overview => view.toggle_fold(),
             KeyCode::Char(']') if view.tab == Tab::Overview => view.jump_anchor(true),
             KeyCode::Char('[') if view.tab == Tab::Overview => view.jump_anchor(false),
+            KeyCode::Char(']') if view.tab == Tab::Files => view.jump_unviewed(true),
+            KeyCode::Char('[') if view.tab == Tab::Files => view.jump_unviewed(false),
             KeyCode::Char('o') => return Some(Action::OpenBrowser(view.link())),
             KeyCode::Enter if matches!(view.tab, Tab::Commits | Tab::Checks) => {
                 return Some(Action::OpenBrowser(view.link()));
@@ -1156,6 +1190,25 @@ impl App {
         view.tab = tab;
         view.renderer = renderer;
         Action::FetchDetail(view.pr.clone())
+    }
+
+    /// Moves to the next or previous group header.
+    fn jump_group(&mut self, forward: bool) {
+        let rows = self.rows();
+        let current = self.list_state.selected().unwrap_or(0);
+        let mut headers = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| matches!(row, Row::Header(_)))
+            .map(|(index, _)| index);
+        let target = if forward {
+            headers.find(|index| *index > current)
+        } else {
+            headers.rev().find(|index| *index < current)
+        };
+        if let Some(target) = target {
+            self.list_state.select(Some(target));
+        }
     }
 
     fn open_selected(&mut self) -> Option<Action> {
@@ -1370,6 +1423,54 @@ mod tests {
         let generation = app.start_inbox(&configs);
         app.set_group(generation, 0, Ok(group("A", &[1, 2, 3], false)), Utc::now());
         assert_eq!(app.selected_pr().unwrap().number, 6);
+    }
+
+    #[test]
+    fn question_mark_shows_the_key_list_and_any_key_closes_it() {
+        let mut app = app_with(vec![group("A", &[1], false)]);
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.show_help);
+        assert!(
+            app.handle_key(key(KeyCode::Char('q'))).is_none(),
+            "q closes the list, it does not quit"
+        );
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn tab_jumps_between_group_headers() {
+        let mut app = app_with(vec![group("A", &[1, 2], false), group("B", &[3], false)]);
+        app.list_state.select(Some(1));
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.selected_row(), Some(Row::Header(1)));
+        app.handle_key(key(KeyCode::BackTab));
+        assert_eq!(app.selected_row(), Some(Row::Header(0)));
+        assert!(!app.groups[0].collapsed, "Tab no longer folds");
+    }
+
+    #[test]
+    fn brackets_jump_to_unviewed_files() {
+        let files = vec![
+            file("a.md", ViewedState::Unviewed),
+            file("b.md", ViewedState::Viewed),
+            file("c.md", ViewedState::Viewed),
+            file("d.md", ViewedState::Dismissed),
+        ];
+        let (mut app, _) = files_tab(files);
+        app.handle_key(key(KeyCode::Char(']')));
+        assert_eq!(view(&app).selected_file(), Some(3));
+        app.handle_key(key(KeyCode::Char('[')));
+        assert_eq!(view(&app).selected_file(), Some(0));
+    }
+
+    #[test]
+    fn enter_on_a_file_shows_the_whole_file() {
+        let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        ready_repo(&mut app, &pr);
+        let Some(Action::ShowFile { path, .. }) = app.handle_key(key(KeyCode::Enter)) else {
+            panic!("expected the file view");
+        };
+        assert_eq!(path, "a.md");
     }
 
     #[test]
