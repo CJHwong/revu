@@ -108,6 +108,19 @@ pub enum DiffTarget {
     Commit(String),
 }
 
+/// Where the last find landed: the diff it ran in, the line, and its place among the
+/// lines that match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindHit {
+    pub key: DiffKey,
+    pub line: usize,
+    pub ordinal: usize,
+    pub total: usize,
+}
+
+/// Lines a find keeps above the match, so the match does not sit on the pane's edge.
+const FIND_CONTEXT: usize = 3;
+
 /// One rendered diff: a target drawn by one renderer at one pane width.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DiffKey {
@@ -257,6 +270,7 @@ pub struct DetailView {
     pub overlays: Vec<Overlay>,
     /// The lowercased text that `n` and `N` look for in the diff.
     pub find: Option<String>,
+    pub find_hit: Option<FindHit>,
 }
 
 impl DetailView {
@@ -305,6 +319,7 @@ impl DetailView {
             diffs: HashMap::new(),
             overlays: Vec::new(),
             find: None,
+            find_hit: None,
         }
     }
 
@@ -522,12 +537,14 @@ impl DetailView {
 
     fn start_find(&mut self, query: &str) -> Result<(), String> {
         self.find = Some(query.to_lowercase());
+        self.find_hit = None;
         self.find_in_diff(true, false)
     }
 
-    /// Scrolls the diff so the next (or previous) line holding the find text is on top.
-    /// The search wraps around the end.
-    fn find_in_diff(&mut self, forward: bool, skip_top_line: bool) -> Result<(), String> {
+    /// Scrolls the diff to the next (or previous) line holding the find text, a few lines
+    /// below the top. It goes on from the last match in this diff, else from the top line,
+    /// and wraps around the end. It searches only the diff on screen.
+    fn find_in_diff(&mut self, forward: bool, skip_current: bool) -> Result<(), String> {
         let query = self
             .find
             .clone()
@@ -543,20 +560,36 @@ impl DetailView {
             .filter(|(_, line)| line_text(line).to_lowercase().contains(&query))
             .map(|(index, _)| index)
             .collect();
-        let top = self.diff_scroll as usize;
-        let next = if forward {
-            let after = |index: &&usize| **index > top || (!skip_top_line && **index == top);
-            matches.iter().find(after).or(matches.first())
-        } else {
-            matches
-                .iter()
-                .rev()
-                .find(|index| **index < top)
-                .or(matches.last())
+        if matches.is_empty() {
+            self.find_hit = None;
+            return Err(format!("\"{query}\" is not in this file's diff"));
+        }
+        let (from, skip) = match &self.find_hit {
+            Some(hit) if hit.key == key && skip_current => (hit.line, true),
+            _ => (self.diff_scroll as usize, false),
         };
-        let line = next.ok_or_else(|| format!("\"{query}\" is not in this diff"))?;
-        self.diff_scroll = u16::try_from(*line).unwrap_or(u16::MAX);
+        let position = if forward {
+            let after = |line: &usize| *line > from || (!skip && *line == from);
+            matches.iter().position(after).unwrap_or(0)
+        } else {
+            let before = matches.iter().rposition(|line| *line < from);
+            before.unwrap_or(matches.len() - 1)
+        };
+        let line = matches[position];
+        self.diff_scroll = u16::try_from(line.saturating_sub(FIND_CONTEXT)).unwrap_or(u16::MAX);
+        self.find_hit = Some(FindHit {
+            key,
+            line,
+            ordinal: position + 1,
+            total: matches.len(),
+        });
         Ok(())
+    }
+
+    /// The find's hit in the diff on screen, if the last find ran in it.
+    pub fn current_find_hit(&self) -> Option<&FindHit> {
+        let hit = self.find_hit.as_ref()?;
+        (Some(&hit.key) == self.current_diff_key().as_ref()).then_some(hit)
     }
 
     pub fn loaded_activity(&self) -> Option<&PrActivity> {
@@ -2658,17 +2691,45 @@ mod tests {
         app.set_diff(
             &pr,
             job.key,
-            crate::highlight::to_text(b"one\nNeedle two\nthree\nneedle four\n", None),
+            crate::highlight::to_text(
+                b"one\nNeedle two\nthree\nfour\nfive\nsix\nneedle seven\n",
+                None,
+            ),
         );
+        let place = |app: &App| {
+            let view = view(app);
+            let hit = view.current_find_hit().expect("a hit");
+            (view.diff_scroll, hit.line, hit.ordinal, hit.total)
+        };
         app.handle_key(key(KeyCode::Char('/')));
         type_text(&mut app, "needle");
         app.handle_key(key(KeyCode::Enter));
-        assert_eq!(view(&app).diff_scroll, 1);
+        assert_eq!(place(&app), (0, 1, 1, 2));
         app.handle_key(key(KeyCode::Char('n')));
-        assert_eq!(view(&app).diff_scroll, 3);
+        assert_eq!(
+            place(&app),
+            (3, 6, 2, 2),
+            "three lines stay above the match"
+        );
         app.handle_key(key(KeyCode::Char('n')));
-        assert_eq!(view(&app).diff_scroll, 1, "wraps to the first match");
+        assert_eq!(place(&app), (0, 1, 1, 2), "wraps to the first match");
         app.handle_key(key(KeyCode::Char('N')));
-        assert_eq!(view(&app).diff_scroll, 3, "wraps back to the last match");
+        assert_eq!(place(&app), (3, 6, 2, 2), "wraps back to the last match");
+    }
+
+    #[test]
+    fn a_find_marks_every_match_in_a_line_ignoring_case() {
+        use ratatui::style::{Color, Style};
+        use ratatui::text::{Line, Span};
+        let line = Line::from(vec![Span::raw("a Needle and "), Span::raw("NEEDLE")]);
+        let mark = Style::new().bg(Color::Yellow);
+        let marked = crate::ui::mark_matches(line, "needle", mark);
+        let hits: Vec<&str> = marked
+            .spans
+            .iter()
+            .filter(|span| span.style == mark)
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(hits, ["Needle", "NEEDLE"]);
     }
 }

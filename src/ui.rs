@@ -717,6 +717,7 @@ fn render_diff_pane(
         .title(paint.bold(format!(" {renderer} "), theme.heading))
         .title(paint.span("m switches ", theme.muted))
         .title(paint.span(wrap_note(view), theme.muted))
+        .title(find_note(view, paint))
         .title(paint.bold(diff_pane_path(view), theme.foreground));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -746,12 +747,25 @@ fn render_diff_pane(
             Some(DiffOutput::Done(Ok(text))) => {
                 // Clone only the visible lines; a long diff is redrawn every frame. A
                 // wrapped line takes more rows, and the paragraph clips the rest.
+                let current = view.current_find_hit().map(|hit| hit.line);
+                let marks = |index: usize| {
+                    let strong = Some(index) == current;
+                    match strong {
+                        true => Style::new().fg(theme.background).bg(theme.warning),
+                        false => Style::new().fg(theme.warning).bg(theme.selection),
+                    }
+                };
+                let first = view.diff_scroll as usize;
                 let lines: Vec<Line> = text
                     .lines
                     .iter()
-                    .skip(view.diff_scroll as usize)
+                    .enumerate()
+                    .skip(first)
                     .take(inner.height as usize)
-                    .cloned()
+                    .map(|(index, line)| match &view.find {
+                        Some(query) => mark_matches(line.clone(), query, marks(index)),
+                        None => line.clone(),
+                    })
                     .collect();
                 if view.diff_wrap {
                     Paragraph::new(lines).wrap(Wrap { trim: false })
@@ -766,6 +780,65 @@ fn render_diff_pane(
         },
     };
     frame.render_widget(content, inner);
+}
+
+/// " /query  2 of 5 lines ", at the right of the diff pane's title, so the find text and
+/// the place among its matches stay in view. In another file it says n finds there.
+fn find_note(view: &DetailView, paint: Paint) -> Line<'static> {
+    let Some(query) = &view.find else {
+        return Line::default();
+    };
+    let place = match view.current_find_hit() {
+        Some(hit) => format!("{} of {} lines in this file", hit.ordinal, hit.total),
+        None => "n finds it in this file".to_string(),
+    };
+    Line::from(vec![
+        paint.bold(format!(" /{query} "), paint.theme.warning),
+        paint.span(format!(" {place}  n/N next/previous "), paint.theme.muted),
+    ])
+    .right_aligned()
+}
+
+/// Marks every place the find text appears in a line, ignoring case. The line of the
+/// current match gets the stronger mark.
+pub fn mark_matches(line: Line<'static>, query: &str, mark: Style) -> Line<'static> {
+    let cells: Vec<(char, Style)> = line
+        .spans
+        .iter()
+        .flat_map(|span| {
+            let style = line.style.patch(span.style);
+            span.content
+                .chars()
+                .map(move |character| (character, style))
+        })
+        .collect();
+    let lower: Vec<char> = cells
+        .iter()
+        .map(|(character, _)| character.to_lowercase().next().unwrap_or(*character))
+        .collect();
+    let query: Vec<char> = query.chars().collect();
+    let mut marked = vec![false; cells.len()];
+    let mut start = 0;
+    while !query.is_empty() && start + query.len() <= lower.len() {
+        if lower[start..start + query.len()] == query[..] {
+            marked[start..start + query.len()].fill(true);
+            start += query.len();
+        } else {
+            start += 1;
+        }
+    }
+    if !marked.contains(&true) {
+        return line;
+    }
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for ((character, style), is_match) in cells.into_iter().zip(marked) {
+        let style = if is_match { style.patch(mark) } else { style };
+        match spans.last_mut() {
+            Some(span) if span.style == style => span.content.to_mut().push(character),
+            _ => spans.push(Span::styled(character.to_string(), style)),
+        }
+    }
+    Line::from(spans)
 }
 
 /// "w wraps", or how far an unwrapped diff is scrolled sideways.
