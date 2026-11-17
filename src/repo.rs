@@ -411,7 +411,14 @@ pub fn diff_words(dir: &Path, base: &str, head: &str) -> Result<Vec<String>> {
     let range = format!("{base}...{head}");
     let output = git(dir, &["diff", "--no-color", "--no-ext-diff", &range])?;
     ensure_success(&output, "git diff")?;
-    Ok(changed_words(&String::from_utf8_lossy(&output.stdout)))
+    let diff = String::from_utf8_lossy(&output.stdout);
+    let mut words = changed_words(&diff);
+    for name in file_names(&diff) {
+        if !words.contains(&name) {
+            words.push(name);
+        }
+    }
+    Ok(words)
 }
 
 fn changed_words(diff: &str) -> Vec<String> {
@@ -433,6 +440,26 @@ fn changed_words(diff: &str) -> Vec<String> {
         .into_iter()
         .map(|(word, _)| word.to_string())
         .collect()
+}
+
+/// Each changed file's path, file name and folder names, so find completes them too.
+/// They come after the code words: those hold no dot or slash, so typing one picks a
+/// file name.
+fn file_names(diff: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let paths = diff.lines().filter_map(|line| {
+        let paths = line.strip_prefix("diff --git ")?;
+        Some(paths.rsplit_once(" b/").map_or(paths, |(_, path)| path))
+    });
+    for path in paths {
+        let pieces = std::iter::once(path).chain(path.split('/'));
+        for piece in pieces.filter(|piece| piece.chars().count() >= 3) {
+            if !names.iter().any(|name| name == piece) {
+                names.push(piece.to_string());
+            }
+        }
+    }
+    names
 }
 
 fn count_lines_with(diff: &str, pattern: &crate::find::Pattern) -> Vec<(String, usize)> {
@@ -471,6 +498,22 @@ fn ensure_success(output: &Output, what: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_names_give_the_path_the_name_and_each_folder() {
+        let diff = "diff --git a/src/app/main.rs b/src/app/main.rs\n+x\ndiff --git a/src/lib.rs b/src/lib.rs\n";
+        assert_eq!(
+            file_names(diff),
+            [
+                "src/app/main.rs",
+                "src",
+                "app",
+                "main.rs",
+                "src/lib.rs",
+                "lib.rs"
+            ]
+        );
+    }
 
     #[test]
     fn changed_words_come_from_changed_lines_most_used_first() {

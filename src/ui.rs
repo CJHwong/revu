@@ -1147,7 +1147,11 @@ fn find_note(view: &DetailView, paint: Paint) -> Line<'static> {
         (_, _, tab) if tab != Tab::Files => format!("{here} in this commit"),
         (Some((Some(at), files)), _, _) => format!("{here} in file {at} of {files}"),
         (Some((None, files)), _, _) => {
-            format!("not in this file; {files} files have it, n goes to the next")
+            let have = match files {
+                1 => "1 file has it".to_string(),
+                count => format!("{count} files have it"),
+            };
+            format!("not in this file; {have}, n goes to the next")
         }
         (None, None, _) => format!("{here} in this file, looking in the others..."),
         (None, _, _) => format!("{here} in this file, other files not searched"),
