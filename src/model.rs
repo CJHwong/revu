@@ -185,6 +185,8 @@ pub struct ThreadLine {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadComment {
+    /// You wrote it.
+    pub mine: bool,
     pub author: Author,
     pub at: DateTime<Utc>,
     pub body: String,
@@ -198,6 +200,8 @@ pub struct Comment {
     pub verb: String,
     pub body: String,
     pub threads: Vec<ThreadLine>,
+    /// You wrote it.
+    pub mine: bool,
 }
 
 /// The Overview conversation in GitHub's order, oldest first.
@@ -444,9 +448,13 @@ enum RawTimelineItem {
         author: Option<RawActor>,
         created_at: DateTime<Utc>,
         body: String,
+        #[serde(default)]
+        viewer_did_author: bool,
     },
     PullRequestReview {
         id: String,
+        #[serde(default)]
+        viewer_did_author: bool,
         author: Option<RawActor>,
         state: String,
         submitted_at: Option<DateTime<Utc>>,
@@ -489,6 +497,8 @@ struct RawThread {
 #[serde(rename_all = "camelCase")]
 struct RawThreadComment {
     pull_request_review: Option<RawId>,
+    #[serde(default)]
+    viewer_did_author: bool,
     author: Option<RawActor>,
     created_at: DateTime<Utc>,
     body: String,
@@ -853,15 +863,18 @@ fn timeline_item(
             author,
             created_at,
             body,
+            viewer_did_author,
         } => Comment {
             author: author_from(author),
             at: created_at,
             verb: "commented".to_string(),
             body,
             threads: Vec::new(),
+            mine: viewer_did_author,
         },
         RawTimelineItem::PullRequestReview {
             id,
+            viewer_did_author,
             author,
             state,
             submitted_at,
@@ -878,6 +891,7 @@ fn timeline_item(
                 verb: review_verb(&state).to_string(),
                 body,
                 threads,
+                mine: viewer_did_author,
             }
         }
     };
@@ -919,6 +933,7 @@ fn thread_line(thread: RawThread) -> ThreadLine {
         .nodes
         .into_iter()
         .map(|comment| ThreadComment {
+            mine: comment.viewer_did_author,
             author: author_from(comment.author),
             at: comment.created_at,
             body: comment.body,
@@ -1124,7 +1139,7 @@ pub mod tests {
                       { "pullRequestReview": { "id": "R1" }, "author": { "__typename": "User", "login": "lead" },
                         "createdAt": "2026-11-14T10:00:00Z", "body": "Why **here**?" },
                       { "pullRequestReview": { "id": "R9" }, "author": { "__typename": "User", "login": "octo" },
-                        "createdAt": "2026-11-14T11:00:00Z", "body": "Because." },
+                        "createdAt": "2026-11-14T11:00:00Z", "body": "Because.", "viewerDidAuthor": true },
                   ]} },
             ]},
         })

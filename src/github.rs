@@ -69,11 +69,11 @@ pub fn activity_document() -> String {
            oid messageHeadline messageBody authoredDate url author {{ name user {{ login }} }} \
            statusCheckRollup {{ state }} }} }} }} \
          timelineItems(last: {TIMELINE_LIMIT}, itemTypes: [ISSUE_COMMENT, PULL_REQUEST_REVIEW, PULL_REQUEST_COMMIT]) {{ nodes {{ __typename \
-           ... on IssueComment {{ author {{ __typename login }} createdAt body }} \
-           ... on PullRequestReview {{ id author {{ __typename login }} state submittedAt createdAt body }} \
+           ... on IssueComment {{ author {{ __typename login }} createdAt body viewerDidAuthor }} \
+           ... on PullRequestReview {{ id viewerDidAuthor author {{ __typename login }} state submittedAt createdAt body }} \
            ... on PullRequestCommit {{ commit {{ oid messageHeadline authoredDate }} }} }} }} \
          reviewThreads(first: 100) {{ nodes {{ isResolved path line originalLine startLine originalStartLine \
-           comments(first: 50) {{ nodes {{ pullRequestReview {{ id }} author {{ __typename login }} createdAt body }} }} }} }} \
+           comments(first: 50) {{ nodes {{ pullRequestReview {{ id }} viewerDidAuthor author {{ __typename login }} createdAt body }} }} }} }} \
          }} }} }}"
     )
 }

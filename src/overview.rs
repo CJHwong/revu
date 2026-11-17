@@ -14,11 +14,88 @@ use crate::model::{
 use crate::theme::Theme;
 use crate::ui::relative_time;
 
+/// GitHub's controls over the Comments list: which items, and in which order.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CommentView {
+    pub filter: CommentFilter,
+    pub newest_first: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CommentFilter {
+    #[default]
+    All,
+    /// Reviews with an open thread, showing only their open threads.
+    Unresolved,
+    /// What you wrote, and the threads you took part in.
+    Mine,
+}
+
+impl CommentFilter {
+    pub const ALL: [CommentFilter; 3] = [Self::All, Self::Unresolved, Self::Mine];
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::Unresolved,
+            Self::Unresolved => Self::Mine,
+            Self::Mine => Self::All,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Unresolved => "Unresolved",
+            Self::Mine => "Mine",
+        }
+    }
+
+    /// The item as this filter shows it, or None when the filter hides it. Commits show
+    /// only under All, as on GitHub.
+    fn apply(self, item: &TimelineItem) -> Option<TimelineItem> {
+        let TimelineItem::Comment(comment) = item else {
+            return (self == Self::All).then(|| item.clone());
+        };
+        let keep_thread: fn(&ThreadLine) -> bool = match self {
+            Self::All => return Some(item.clone()),
+            Self::Unresolved => |thread| !thread.resolved,
+            Self::Mine => |thread| thread.comments.iter().any(|reply| reply.mine),
+        };
+        let threads: Vec<ThreadLine> = comment
+            .threads
+            .iter()
+            .filter(|thread| keep_thread(thread))
+            .cloned()
+            .collect();
+        let mine = self == Self::Mine && comment.mine;
+        if threads.is_empty() && !mine {
+            return None;
+        }
+        Some(TimelineItem::Comment(Comment {
+            threads: if mine {
+                comment.threads.clone()
+            } else {
+                threads
+            },
+            ..comment.clone()
+        }))
+    }
+
+    fn empty_text(self) -> &'static str {
+        match self {
+            Self::All => "No comments yet.",
+            Self::Unresolved => "No unresolved threads.",
+            Self::Mine => "Nothing from you here yet.",
+        }
+    }
+}
+
 pub struct Context<'a> {
     pub detail: &'a PrDetail,
     pub activity: Option<&'a Result<PrActivity, String>>,
     /// Folds the user flipped from their default state.
     pub toggled: &'a HashSet<usize>,
+    pub comments: CommentView,
     pub theme: &'a Theme,
     pub now: DateTime<Utc>,
 }
@@ -45,9 +122,7 @@ pub fn build(context: &Context, width: usize) -> Vec<TextRow> {
     rows.push(TextRow::blank());
     rows.extend(description_card(context, width, &mut folds));
     rows.push(TextRow::blank());
-    rows.push(TextRow::plain(Line::from(
-        context.bold(" Comments", context.theme.heading),
-    )));
+    rows.push(TextRow::plain(comments_header(context)));
     rows.push(TextRow::blank());
     rows.extend(timeline_rows(context, width, &mut folds));
     rows
@@ -234,8 +309,17 @@ fn timeline_rows(context: &Context, width: usize, folds: &mut Folds) -> Vec<Text
         Some(Err(error)) => return notice(error.clone(), theme.danger),
         Some(Ok(activity)) => activity,
     };
-    if activity.timeline.is_empty() {
-        return notice("No comments yet.".to_string(), theme.muted);
+    let filter = context.comments.filter;
+    let mut items: Vec<TimelineItem> = activity
+        .timeline
+        .iter()
+        .filter_map(|item| filter.apply(item))
+        .collect();
+    if items.is_empty() {
+        return notice(filter.empty_text().to_string(), theme.muted);
+    }
+    if context.comments.newest_first {
+        items.reverse();
     }
     let mut rows = Vec::new();
     if activity.timeline_cut {
@@ -243,10 +327,36 @@ fn timeline_rows(context: &Context, width: usize, folds: &mut Folds) -> Vec<Text
         rows.extend(notice(text.to_string(), theme.muted));
         rows.push(TextRow::blank());
     }
-    for item in &activity.timeline {
+    for item in &items {
         rows.extend(item_rows(context, item, width, folds));
     }
     rows
+}
+
+/// " Comments   All  Unresolved  Mine    Oldest first      f filter  F order", with the
+/// current filter as a chip.
+fn comments_header(context: &Context) -> Line<'static> {
+    let theme = context.theme;
+    let mut spans = vec![context.bold(" Comments   ", theme.heading)];
+    for filter in CommentFilter::ALL {
+        let style = if filter == context.comments.filter {
+            Style::new()
+                .bg(theme.selection)
+                .fg(theme.foreground)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(theme.muted)
+        };
+        spans.push(Span::styled(format!(" {} ", filter.label()), style));
+    }
+    let order = if context.comments.newest_first {
+        "Newest first"
+    } else {
+        "Oldest first"
+    };
+    spans.push(context.span(format!("    ↕ {order}"), theme.accent));
+    spans.push(context.span("      f filter  F order", theme.muted));
+    Line::from(spans)
 }
 
 fn item_rows(
@@ -386,6 +496,10 @@ mod tests {
     use crate::theme;
 
     fn rendered(open: &[usize]) -> Vec<String> {
+        rendered_with(open, CommentView::default())
+    }
+
+    fn rendered_with(open: &[usize], comments: CommentView) -> Vec<String> {
         let theme = theme::by_name("dracula").unwrap();
         let detail = sample_detail();
         let activity = Ok(sample_activity());
@@ -395,6 +509,7 @@ mod tests {
             detail: &detail,
             activity: Some(&activity),
             toggled: &open,
+            comments,
             theme: &theme,
             now,
         };
@@ -408,6 +523,38 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    #[test]
+    fn the_comment_filters_and_order_match_github() {
+        let shows = |lines: &[String], text: &str| lines.iter().any(|line| line.contains(text));
+        let view = |filter, newest_first| CommentView {
+            filter,
+            newest_first,
+        };
+
+        let unresolved = rendered_with(&[], view(CommentFilter::Unresolved, false));
+        assert!(shows(&unresolved, "Why here?"));
+        assert!(
+            !shows(&unresolved, "lines 827-830"),
+            "the resolved thread is hidden"
+        );
+        assert!(
+            !shows(&unresolved, "Looks fine"),
+            "a comment with no open thread is hidden"
+        );
+        assert!(!shows(&unresolved, "aaa111"), "commits show only under All");
+
+        let mine = rendered_with(&[], view(CommentFilter::Mine, false));
+        assert!(shows(&mine, "Because."), "a thread I replied in shows");
+        assert!(!shows(&mine, "Looks fine"));
+
+        let newest = rendered_with(&[], view(CommentFilter::All, true));
+        let position = |lines: &[String], text: &str| {
+            lines.iter().position(|line| line.contains(text)).unwrap()
+        };
+        assert!(position(&newest, "lead requested") < position(&newest, "Looks fine"));
+        assert!(shows(&newest, "Newest first"));
     }
 
     #[test]
@@ -425,6 +572,7 @@ mod tests {
             detail: &detail,
             activity: Some(&activity),
             toggled: &toggled,
+            comments: CommentView::default(),
             theme: &theme,
             now: detail.created_at,
         };

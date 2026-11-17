@@ -187,6 +187,7 @@ pub struct DetailView {
     pub scroll: usize,
     /// Folds the user opened or closed, away from their default state.
     pub toggled_folds: HashSet<usize>,
+    pub comments: crate::overview::CommentView,
     /// The Overview laid out at the last drawn width. Cleared when its content changes.
     pub overview: Option<OverviewLayout>,
     /// The Overview's visible height at the last draw, for paging.
@@ -223,6 +224,7 @@ impl DetailView {
             cursor: 0,
             scroll: 0,
             toggled_folds: HashSet::new(),
+            comments: crate::overview::CommentView::default(),
             overview: None,
             page: 20,
             commits: ListState::default().with_selected(Some(0)),
@@ -519,22 +521,45 @@ impl DetailView {
 
     /// Moves the Overview cursor to the next or previous card or fold.
     fn jump_anchor(&mut self, forward: bool) {
-        let Some(layout) = &self.overview else {
-            return;
-        };
+        if let Some(target) = self.anchor_target(forward) {
+            self.cursor = target;
+        }
+    }
+
+    /// One wheel tick on the Overview: to the next card or fold, or, when that is more
+    /// than a screen away, a third of a screen, so a long card can still be read.
+    fn wheel_overview(&mut self, forward: bool) {
+        let chunk = (self.page / 3).max(1);
+        let distance = self
+            .anchor_target(forward)
+            .map(|target| target.abs_diff(self.cursor));
+        match distance {
+            Some(distance) if distance <= self.page => self.jump_anchor(forward),
+            _ if forward => self.move_in_tab(chunk as isize),
+            _ => self.move_in_tab(-(chunk as isize)),
+        }
+    }
+
+    /// Fold numbers follow the order on screen, so a new filter or order starts every fold
+    /// at its default state.
+    fn set_comments(&mut self, comments: crate::overview::CommentView) {
+        self.comments = comments;
+        self.toggled_folds.clear();
+        self.overview = None;
+    }
+
+    fn anchor_target(&self, forward: bool) -> Option<usize> {
+        let layout = self.overview.as_ref()?;
         let mut anchors = layout
             .rows
             .iter()
             .enumerate()
             .filter(|(_, row)| row.anchor)
             .map(|(index, _)| index);
-        let target = if forward {
+        if forward {
             anchors.find(|index| *index > self.cursor)
         } else {
             anchors.rev().find(|index| *index < self.cursor)
-        };
-        if let Some(target) = target {
-            self.cursor = target;
         }
     }
 
@@ -989,7 +1014,7 @@ impl App {
         } else if diff_pane && view.diff_left > 0 && column >= view.diff_left {
             view.scroll_diff(3 * delta.signum() as i16);
         } else if view.tab == Tab::Overview {
-            view.move_in_tab(3 * delta);
+            view.wheel_overview(delta > 0);
         } else {
             view.move_in_tab(delta);
         }
@@ -1201,6 +1226,20 @@ impl App {
             KeyCode::Char('G') | KeyCode::End => view.move_in_tab(1_000_000),
             KeyCode::Enter if view.tab == Tab::Overview => view.toggle_fold(),
             KeyCode::Char(']') if view.tab == Tab::Overview => view.jump_anchor(true),
+            KeyCode::Char('f') if view.tab == Tab::Overview => {
+                let filter = view.comments.filter.next();
+                view.set_comments(crate::overview::CommentView {
+                    filter,
+                    ..view.comments
+                });
+            }
+            KeyCode::Char('F') if view.tab == Tab::Overview => {
+                let newest_first = !view.comments.newest_first;
+                view.set_comments(crate::overview::CommentView {
+                    newest_first,
+                    ..view.comments
+                });
+            }
             KeyCode::Char('[') if view.tab == Tab::Overview => view.jump_anchor(false),
             KeyCode::Char(']') if view.tab == Tab::Files => view.jump_unviewed(true),
             KeyCode::Char('[') if view.tab == Tab::Files => view.jump_unviewed(false),
@@ -1494,6 +1533,42 @@ mod tests {
             Some(1),
             "the wheel over the list moves the file"
         );
+    }
+
+    #[test]
+    fn the_wheel_on_the_overview_jumps_cards_and_reads_long_ones_by_chunk() {
+        use crate::markdown::TextRow;
+        let (mut app, _) = files_tab(Vec::new());
+        let Screen::Detail(view) = &mut app.screen else {
+            unreachable!()
+        };
+        let mut rows: Vec<TextRow> = (0..120).map(|_| TextRow::blank()).collect();
+        for anchor in [0, 5, 100] {
+            rows[anchor] = TextRow::anchor(ratatui::text::Line::from("card"));
+        }
+        view.tab = Tab::Overview;
+        view.overview = Some(OverviewLayout { width: 60, rows });
+        view.page = 30;
+        let mut cursors = Vec::new();
+        for _ in 0..4 {
+            app.handle_scroll(1, 1);
+            cursors.push(view_cursor(&app));
+        }
+        assert_eq!(
+            cursors,
+            vec![5, 15, 25, 35],
+            "a near card is one tick, a long one goes by thirds"
+        );
+        app.handle_scroll(1, -1);
+        assert_eq!(
+            view_cursor(&app),
+            5,
+            "the card top is within a screen, so one tick reaches it"
+        );
+    }
+
+    fn view_cursor(app: &App) -> usize {
+        view(app).cursor
     }
 
     #[test]

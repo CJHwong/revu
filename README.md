@@ -53,6 +53,7 @@ Press `?` anywhere for this list.
 | Overview | `j` / `k` | Move the cursor. The cursor stays a third of the way down, so each move scrolls the page. |
 | Overview | `Enter` | Open or close the card, review thread or `<details>` block under the cursor |
 | Overview | `]` / `[` | Next or previous card or folded block |
+| Overview | `f` / `F` | Filter the comments (All, Unresolved, Mine), flip oldest or newest first |
 | Files changed | `Enter` | Show the whole file at the PR head |
 | Files changed | `v` | Toggle Viewed. It syncs to GitHub's Viewed checkbox at once. |
 | Files changed | `H` | Hide viewed files |
@@ -66,4 +67,4 @@ Press `?` anywhere for this list.
 
 `Cmd+L` works only in terminals that pass Cmd to applications through the kitty keyboard protocol and do not use `Cmd+L` themselves. `Ctrl+L` works everywhere.
 
-The mouse wheel scrolls the pane under the pointer: the diff or the list beside it. The app captures the mouse for this, so selecting text needs the terminal's bypass modifier (Shift in most terminals, Option or Fn in some).
+The mouse wheel scrolls the pane under the pointer: the diff or the list beside it. On the Overview one tick goes to the next card, or a third of a screen inside a card taller than the screen. The app captures the mouse for this, so selecting text needs the terminal's bypass modifier (Shift in most terminals, Option or Fn in some).

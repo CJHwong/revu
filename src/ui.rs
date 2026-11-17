@@ -231,7 +231,7 @@ fn pad_span(span: Span<'static>, width: usize) -> Span<'static> {
 fn detail_help(tab: Tab) -> &'static str {
     match tab {
         Tab::Overview => {
-            "j/k move | enter fold | ]/[ next card | space/b page | o browser | esc back | ? keys"
+            "j/k move | enter fold | ]/[ next card | f/F filter, order | o browser | ? keys"
         }
         Tab::Checks => "j/k move | enter/o browser | r reload | esc back | ? keys",
         Tab::Commits => {
@@ -282,6 +282,10 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
             ("j/k", "move the cursor"),
             ("enter", "open or close the folded block under the cursor"),
             ("], [", "next or previous card or folded block"),
+            (
+                "f, F",
+                "filter comments: all, unresolved, mine; flip the order",
+            ),
         ],
     ),
     (
@@ -776,6 +780,7 @@ fn render_overview(frame: &mut Frame, view: &mut DetailView, area: Rect, paint: 
         detail: Some(Ok(detail)),
         activity,
         toggled_folds,
+        comments,
         overview: layout,
         cursor,
         scroll,
@@ -791,6 +796,7 @@ fn render_overview(frame: &mut Frame, view: &mut DetailView, area: Rect, paint: 
             detail,
             activity: activity.as_ref(),
             toggled: toggled_folds,
+            comments: *comments,
             theme: paint.theme,
             now: paint.now,
         };
