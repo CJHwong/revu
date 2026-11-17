@@ -157,12 +157,57 @@ pub struct Reviewer {
     pub state: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct Activity {
-    pub author: String,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Label {
+    pub name: String,
+    /// Hex color without the `#`, as GitHub stores it.
+    pub color: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Author {
+    pub login: String,
+    pub bot: bool,
+}
+
+/// A review comment thread, shown under the review that started it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadLine {
+    pub path: String,
+    /// "line 548" or "lines 827-830".
+    pub lines: String,
+    pub resolved: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Comment {
+    pub author: Author,
     pub at: DateTime<Utc>,
-    pub action: String,
-    pub excerpt: String,
+    /// "commented", "approved" or "requested changes".
+    pub verb: String,
+    pub body: String,
+    pub threads: Vec<ThreadLine>,
+}
+
+/// The Overview conversation in GitHub's order, oldest first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimelineItem {
+    Comment(Comment),
+    Commit {
+        oid: String,
+        headline: String,
+        at: DateTime<Utc>,
+    },
+}
+
+/// The slower half of a pull request, fetched next to `PrDetail`.
+#[derive(Debug, Clone)]
+pub struct PrActivity {
+    /// Failing checks first, then pending, then passing.
+    pub checks: Vec<CheckLine>,
+    /// Oldest first, like GitHub's Commits tab. At most 100.
+    pub commits: Vec<CommitLine>,
+    pub timeline: Vec<TimelineItem>,
 }
 
 #[derive(Debug, Clone)]
@@ -179,15 +224,9 @@ pub struct PrDetail {
     pub additions: u64,
     pub deletions: u64,
     pub changed_files: u64,
-    pub labels: Vec<String>,
+    pub labels: Vec<Label>,
     pub assignees: Vec<String>,
     pub reviewers: Vec<Reviewer>,
-    /// Failing checks first, then pending, then passing.
-    pub checks: Vec<CheckLine>,
-    /// Newest first.
-    pub activity: Vec<Activity>,
-    /// Oldest first, like GitHub's Commits tab. At most 100.
-    pub commits: Vec<CommitLine>,
     pub commit_count: u64,
 }
 
@@ -287,7 +326,6 @@ struct RawWorkflowRun {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawCommitList {
-    total_count: u64,
     nodes: Vec<RawCommitNode>,
 }
 
@@ -349,7 +387,7 @@ struct RawDetail {
     id: String,
     base_ref_oid: String,
     head_ref_oid: String,
-    commit_list: RawCommitList,
+    commit_count: RawCount,
     body: String,
     created_at: DateTime<Utc>,
     additions: u64,
@@ -357,12 +395,90 @@ struct RawDetail {
     changed_files: u64,
     base_ref_name: String,
     head_ref_name: String,
-    labels: Nodes<Name>,
+    labels: Nodes<RawLabel>,
     assignees: Nodes<Login>,
     review_requests: Nodes<RawRequest>,
     latest_opinionated_reviews: Nodes<RawReview>,
-    comments: Nodes<RawComment>,
-    reviews: Nodes<RawReview>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawCount {
+    total_count: u64,
+}
+
+#[derive(Deserialize)]
+struct RawLabel {
+    name: String,
+    color: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawActivity {
+    commits: Nodes<CommitNode>,
+    commit_list: RawCommitList,
+    timeline_items: Nodes<RawTimelineItem>,
+    review_threads: Nodes<RawThread>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "__typename", rename_all_fields = "camelCase")]
+enum RawTimelineItem {
+    IssueComment {
+        author: Option<RawActor>,
+        created_at: DateTime<Utc>,
+        body: String,
+    },
+    PullRequestReview {
+        id: String,
+        author: Option<RawActor>,
+        state: String,
+        submitted_at: Option<DateTime<Utc>>,
+        created_at: DateTime<Utc>,
+        body: String,
+    },
+    PullRequestCommit {
+        commit: RawTimelineCommit,
+    },
+}
+
+#[derive(Deserialize)]
+struct RawActor {
+    #[serde(rename = "__typename")]
+    kind: String,
+    login: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawTimelineCommit {
+    oid: String,
+    message_headline: String,
+    authored_date: DateTime<Utc>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawThread {
+    is_resolved: bool,
+    path: String,
+    line: Option<u64>,
+    original_line: Option<u64>,
+    start_line: Option<u64>,
+    original_start_line: Option<u64>,
+    comments: Nodes<RawThreadComment>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawThreadComment {
+    pull_request_review: Option<RawId>,
+}
+
+#[derive(Deserialize)]
+struct RawId {
+    id: String,
 }
 
 #[derive(Deserialize)]
@@ -383,17 +499,6 @@ struct RawReviewer {
 struct RawReview {
     author: Option<Login>,
     state: String,
-    created_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    body: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RawComment {
-    author: Option<Login>,
-    created_at: DateTime<Utc>,
-    body: String,
 }
 
 #[derive(Deserialize)]
@@ -447,21 +552,9 @@ pub fn parse_files_page(files: &Value) -> Result<FilesPage> {
     Ok(FilesPage { files, next_cursor })
 }
 
-/// `data` is the GraphQL `data` object, holding one `g<index>` search per group.
-pub fn parse_inbox(data: &Value, groups: &[GroupConfig]) -> Result<Vec<Group>> {
-    groups
-        .iter()
-        .enumerate()
-        .map(|(index, config)| parse_group(data, index, config))
-        .collect()
-}
-
-fn parse_group(data: &Value, index: usize, config: &GroupConfig) -> Result<Group> {
-    let key = format!("g{index}");
-    let raw = data
-        .get(&key)
-        .with_context(|| format!("response has no {key} field"))?;
-    let search: RawSearch = serde_json::from_value(raw.clone())
+/// `search` is one group's `data.search` object.
+pub fn parse_group(search: &Value, config: &GroupConfig) -> Result<Group> {
+    let search: RawSearch = serde_json::from_value(search.clone())
         .with_context(|| format!("parse group \"{}\"", config.title))?;
     Ok(Group {
         title: config.title.clone(),
@@ -471,25 +564,17 @@ fn parse_group(data: &Value, index: usize, config: &GroupConfig) -> Result<Group
     })
 }
 
-/// `pull_request` is `data.repository.pullRequest`.
+/// `pull_request` is `data.repository.pullRequest` from the detail query.
 pub fn parse_detail(pull_request: &Value) -> Result<PrDetail> {
     let raw: RawDetail =
         serde_json::from_value(pull_request.clone()).context("parse pull request")?;
-    let checks = check_lines(&raw.row);
     let reviewers = reviewers_from(&raw.review_requests, &raw.latest_opinionated_reviews);
-    let activity = activity_from(&raw.comments, &raw.reviews);
-    let commits = raw
-        .commit_list
-        .nodes
-        .into_iter()
-        .map(|node| commit_line(node.commit))
-        .collect();
+    let labels = raw.labels.nodes.into_iter();
     Ok(PrDetail {
         id: raw.id,
         base_oid: raw.base_ref_oid,
         head_oid: raw.head_ref_oid,
-        commit_count: raw.commit_list.total_count,
-        commits,
+        commit_count: raw.commit_count.total_count,
         summary: summary_from(raw.row),
         body: raw.body,
         created_at: raw.created_at,
@@ -498,11 +583,11 @@ pub fn parse_detail(pull_request: &Value) -> Result<PrDetail> {
         additions: raw.additions,
         deletions: raw.deletions,
         changed_files: raw.changed_files,
-        labels: raw
-            .labels
-            .nodes
-            .into_iter()
-            .map(|label| label.name)
+        labels: labels
+            .map(|label| Label {
+                name: label.name,
+                color: label.color,
+            })
             .collect(),
         assignees: raw
             .assignees
@@ -511,13 +596,28 @@ pub fn parse_detail(pull_request: &Value) -> Result<PrDetail> {
             .map(|user| user.login)
             .collect(),
         reviewers,
-        checks,
-        activity,
+    })
+}
+
+/// `pull_request` is `data.repository.pullRequest` from the activity query.
+pub fn parse_activity(pull_request: &Value) -> Result<PrActivity> {
+    let raw: RawActivity =
+        serde_json::from_value(pull_request.clone()).context("parse pull request activity")?;
+    let commits = raw
+        .commit_list
+        .nodes
+        .into_iter()
+        .map(|node| commit_line(node.commit))
+        .collect();
+    Ok(PrActivity {
+        checks: check_lines(latest_rollup(&raw.commits)),
+        commits,
+        timeline: timeline_from(raw.timeline_items.nodes, raw.review_threads.nodes),
     })
 }
 
 fn summary_from(raw: RawRow) -> PrSummary {
-    let checks = latest_rollup(&raw).and_then(check_summary);
+    let checks = latest_rollup(&raw.commits).and_then(check_summary);
     PrSummary {
         repo: raw.repository.name_with_owner,
         number: raw.number,
@@ -547,13 +647,8 @@ fn review_state(decision: Option<&str>) -> ReviewState {
     }
 }
 
-fn latest_rollup(raw: &RawRow) -> Option<&Rollup> {
-    raw.commits
-        .nodes
-        .last()?
-        .commit
-        .status_check_rollup
-        .as_ref()
+fn latest_rollup(commits: &Nodes<CommitNode>) -> Option<&Rollup> {
+    commits.nodes.last()?.commit.status_check_rollup.as_ref()
 }
 
 fn check_summary(rollup: &Rollup) -> Option<CheckSummary> {
@@ -589,8 +684,8 @@ fn rollup_state(state: &str) -> CheckState {
     }
 }
 
-fn check_lines(raw: &RawRow) -> Vec<CheckLine> {
-    let Some(rollup) = latest_rollup(raw) else {
+fn check_lines(rollup: Option<&Rollup>) -> Vec<CheckLine> {
+    let Some(rollup) = rollup else {
         return Vec::new();
     };
     let mut lines: Vec<CheckLine> = rollup.contexts.nodes.iter().map(check_line).collect();
@@ -694,42 +789,116 @@ fn reviewers_from(requests: &Nodes<RawRequest>, reviews: &Nodes<RawReview>) -> V
     reviewers
 }
 
-fn activity_from(comments: &Nodes<RawComment>, reviews: &Nodes<RawReview>) -> Vec<Activity> {
-    let comment_items = comments.nodes.iter().map(|comment| Activity {
-        author: author_name(&comment.author),
-        at: comment.created_at,
-        action: "commented".to_string(),
-        excerpt: first_line(&comment.body),
-    });
-    let review_items = reviews.nodes.iter().filter_map(|review| {
-        Some(Activity {
-            author: author_name(&review.author),
-            at: review.created_at?,
-            action: humanize(&review.state),
-            excerpt: first_line(&review.body),
-        })
-    });
-    let mut items: Vec<Activity> = comment_items.chain(review_items).collect();
-    items.sort_by(|left, right| right.at.cmp(&left.at));
+/// Comments, reviews and commits in GitHub's order. A review with no text and no
+/// threads is a reply to a thread, which GitHub's Overview does not show on its own.
+fn timeline_from(items: Vec<RawTimelineItem>, threads: Vec<RawThread>) -> Vec<TimelineItem> {
+    let mut threads_by_review: std::collections::HashMap<String, Vec<ThreadLine>> =
+        std::collections::HashMap::new();
+    for thread in threads {
+        let review = thread
+            .comments
+            .nodes
+            .first()
+            .and_then(|comment| comment.pull_request_review.as_ref());
+        if let Some(review) = review {
+            threads_by_review
+                .entry(review.id.clone())
+                .or_default()
+                .push(thread_line(&thread));
+        }
+    }
     items
+        .into_iter()
+        .filter_map(|item| timeline_item(item, &mut threads_by_review))
+        .collect()
 }
 
-fn author_name(author: &Option<Login>) -> String {
-    author
-        .as_ref()
-        .map_or_else(|| "ghost".to_string(), |user| user.login.clone())
+fn timeline_item(
+    item: RawTimelineItem,
+    threads_by_review: &mut std::collections::HashMap<String, Vec<ThreadLine>>,
+) -> Option<TimelineItem> {
+    let comment = match item {
+        RawTimelineItem::PullRequestCommit { commit } => {
+            return Some(TimelineItem::Commit {
+                oid: commit.oid,
+                headline: commit.message_headline,
+                at: commit.authored_date,
+            });
+        }
+        RawTimelineItem::IssueComment {
+            author,
+            created_at,
+            body,
+        } => Comment {
+            author: author_from(author),
+            at: created_at,
+            verb: "commented".to_string(),
+            body,
+            threads: Vec::new(),
+        },
+        RawTimelineItem::PullRequestReview {
+            id,
+            author,
+            state,
+            submitted_at,
+            created_at,
+            body,
+        } => {
+            let threads = threads_by_review.remove(&id).unwrap_or_default();
+            if state == "COMMENTED" && body.trim().is_empty() && threads.is_empty() {
+                return None;
+            }
+            Comment {
+                author: author_from(author),
+                at: submitted_at.unwrap_or(created_at),
+                verb: review_verb(&state).to_string(),
+                body,
+                threads,
+            }
+        }
+    };
+    Some(TimelineItem::Comment(comment))
+}
+
+fn author_from(actor: Option<RawActor>) -> Author {
+    match actor {
+        Some(actor) => Author {
+            bot: actor.kind == "Bot",
+            login: actor.login,
+        },
+        None => Author {
+            login: "ghost".to_string(),
+            bot: false,
+        },
+    }
+}
+
+fn review_verb(state: &str) -> &'static str {
+    match state {
+        "APPROVED" => "approved",
+        "CHANGES_REQUESTED" => "requested changes",
+        _ => "commented",
+    }
+}
+
+/// A thread on an outdated diff has no current line, so it falls back to the original one.
+fn thread_line(thread: &RawThread) -> ThreadLine {
+    let end = thread.line.or(thread.original_line);
+    let start = thread.start_line.or(thread.original_start_line);
+    let lines = match (start, end) {
+        (Some(start), Some(end)) if start != end => format!("lines {start}-{end}"),
+        (_, Some(end)) => format!("line {end}"),
+        _ => "the file".to_string(),
+    };
+    ThreadLine {
+        path: thread.path.clone(),
+        lines,
+        resolved: thread.is_resolved,
+    }
 }
 
 fn humanize(state: &str) -> String {
     state.to_lowercase().replace('_', " ")
-}
-
-fn first_line(body: &str) -> String {
-    body.lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with("<!--"))
-        .unwrap_or("")
-        .to_string()
 }
 
 #[cfg(test)]
@@ -777,11 +946,13 @@ pub mod tests {
     #[test]
     fn inbox_maps_each_alias_to_its_group() {
         let runs = json!([{ "state": "SUCCESS", "count": 3 }, { "state": "FAILURE", "count": 1 }]);
-        let data = json!({
-            "g0": { "issueCount": 1, "nodes": [row(7, json!("APPROVED"), rollup("FAILURE", 5, runs))] },
-            "g1": { "issueCount": 120, "nodes": [] },
-        });
-        let parsed = parse_inbox(&data, &groups(&["Mine", "Team"])).unwrap();
+        let configs = groups(&["Mine", "Team"]);
+        let mine = json!({ "issueCount": 1, "nodes": [row(7, json!("APPROVED"), rollup("FAILURE", 5, runs))] });
+        let team = json!({ "issueCount": 120, "nodes": [] });
+        let parsed = [
+            parse_group(&mine, &configs[0]).unwrap(),
+            parse_group(&team, &configs[1]).unwrap(),
+        ];
 
         assert_eq!(parsed[0].title, "Mine");
         let pr = &parsed[0].prs[0];
@@ -802,15 +973,16 @@ pub mod tests {
     }
 
     #[test]
-    fn missing_alias_is_an_error_naming_the_field() {
-        let error = parse_inbox(&json!({}), &groups(&["Mine"])).unwrap_err();
-        assert!(error.to_string().contains("g0"));
+    fn a_bad_search_is_an_error_naming_the_group() {
+        let error = parse_group(&json!({}), &groups(&["Mine"])[0]).unwrap_err();
+        assert!(error.to_string().contains("Mine"));
     }
 
     #[test]
     fn null_decision_awaits_approval_and_no_rollup_means_no_checks() {
-        let data = json!({ "g0": { "issueCount": 1, "nodes": [row(1, Value::Null, json!({ "nodes": [] }))] } });
-        let pr = &parse_inbox(&data, &groups(&["Mine"])).unwrap()[0].prs[0];
+        let search =
+            json!({ "issueCount": 1, "nodes": [row(1, Value::Null, json!({ "nodes": [] }))] });
+        let pr = &parse_group(&search, &groups(&["Mine"])[0]).unwrap().prs[0];
         assert_eq!(pr.review, ReviewState::Awaiting);
         assert_eq!(pr.checks, None);
     }
@@ -819,8 +991,8 @@ pub mod tests {
     fn deleted_author_reads_as_ghost() {
         let mut raw = row(1, json!("REVIEW_REQUIRED"), json!({ "nodes": [] }));
         raw["author"] = Value::Null;
-        let data = json!({ "g0": { "issueCount": 1, "nodes": [raw] } });
-        let pr = &parse_inbox(&data, &groups(&["Mine"])).unwrap()[0].prs[0];
+        let search = json!({ "issueCount": 1, "nodes": [raw] });
+        let pr = &parse_group(&search, &groups(&["Mine"])[0]).unwrap().prs[0];
         assert_eq!(pr.author, "ghost");
         assert_eq!(pr.review, ReviewState::Awaiting);
     }
@@ -829,11 +1001,45 @@ pub mod tests {
         parse_detail(&detail_fixture()).unwrap()
     }
 
+    pub fn sample_activity() -> PrActivity {
+        parse_activity(&activity_fixture()).unwrap()
+    }
+
     fn detail_fixture() -> Value {
-        let mut pr = row(
-            56,
-            json!("REVIEW_REQUIRED"),
-            json!({ "nodes": [{ "commit": { "statusCheckRollup": {
+        let counts = json!({ "nodes": [{ "commit": { "statusCheckRollup": {
+            "state": "PENDING",
+            "contexts": { "totalCount": 3, "checkRunCountsByState": [], "statusContextCountsByState": [] }
+        }}}]});
+        let mut pr = row(56, json!("REVIEW_REQUIRED"), counts);
+        let extra = json!({
+            "id": "PR_node",
+            "baseRefOid": "base000",
+            "headRefOid": "head999",
+            "commitCount": { "totalCount": 2 },
+            "body": "## Reason\nBecause.",
+            "createdAt": "2026-11-12T10:00:00Z",
+            "additions": 55, "deletions": 0, "changedFiles": 2,
+            "baseRefName": "main", "headRefName": "feature",
+            "labels": { "nodes": [{ "name": "created-by-skill", "color": "0e8a16" }] },
+            "assignees": { "nodes": [{ "login": "lead" }] },
+            "reviewRequests": { "nodes": [
+                { "requestedReviewer": { "login": "lead" } },
+                { "requestedReviewer": { "name": "backend" } },
+            ]},
+            "latestOpinionatedReviews": { "nodes": [
+                { "author": { "login": "lead" }, "state": "CHANGES_REQUESTED" },
+                { "author": { "login": "peer" }, "state": "APPROVED" },
+            ]},
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            pr[key] = value.clone();
+        }
+        pr
+    }
+
+    fn activity_fixture() -> Value {
+        json!({
+            "commits": { "nodes": [{ "commit": { "statusCheckRollup": {
                 "state": "PENDING",
                 "contexts": {
                     "totalCount": 3,
@@ -841,20 +1047,15 @@ pub mod tests {
                     "statusContextCountsByState": [],
                     "nodes": [
                         { "__typename": "CheckRun", "name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS",
-                      "detailsUrl": "https://ci/lint", "startedAt": "2026-11-12T10:00:00Z",
-                      "completedAt": "2026-11-12T10:02:30Z",
-                      "checkSuite": { "workflowRun": { "workflow": { "name": "CI" } } } },
+                          "detailsUrl": "https://ci/lint", "startedAt": "2026-11-12T10:00:00Z",
+                          "completedAt": "2026-11-12T10:02:30Z",
+                          "checkSuite": { "workflowRun": { "workflow": { "name": "CI" } } } },
                         { "__typename": "CheckRun", "name": "test", "status": "IN_PROGRESS", "conclusion": null },
                         { "__typename": "StatusContext", "context": "deploy", "state": "FAILURE" },
                     ]
                 }
-            }}}]}),
-        );
-        let extra = json!({
-            "id": "PR_node",
-            "baseRefOid": "base000",
-            "headRefOid": "head999",
-            "commitList": { "totalCount": 2, "nodes": [
+            }}}]},
+            "commitList": { "nodes": [
                 { "commit": {
                     "oid": "aaa111", "messageHeadline": "first", "authoredDate": "2026-11-12T10:00:00Z",
                     "url": "https://github.com/acme/app/commit/aaa111",
@@ -866,54 +1067,49 @@ pub mod tests {
                     "author": { "name": "No Account", "user": null },
                     "statusCheckRollup": null } },
             ]},
-            "body": "## Reason\nBecause.",
-            "createdAt": "2026-11-12T10:00:00Z",
-            "additions": 55, "deletions": 0, "changedFiles": 2,
-            "baseRefName": "main", "headRefName": "feature",
-            "labels": { "nodes": [{ "name": "created-by-skill" }] },
-            "assignees": { "nodes": [{ "login": "lead" }] },
-            "reviewRequests": { "nodes": [
-                { "requestedReviewer": { "login": "lead" } },
-                { "requestedReviewer": { "name": "backend" } },
+            "timelineItems": { "nodes": [
+                { "__typename": "PullRequestCommit", "commit": {
+                    "oid": "aaa111", "messageHeadline": "first", "authoredDate": "2026-11-12T10:00:00Z" } },
+                { "__typename": "IssueComment", "author": { "__typename": "Bot", "login": "coderabbitai" },
+                  "createdAt": "2026-11-13T10:00:00Z", "body": "<!-- bot -->\n\nLooks fine" },
+                { "__typename": "PullRequestReview", "id": "R1", "author": { "__typename": "User", "login": "lead" },
+                  "state": "CHANGES_REQUESTED", "submittedAt": "2026-11-14T10:00:00Z",
+                  "createdAt": "2026-11-14T09:00:00Z", "body": "" },
+                { "__typename": "PullRequestReview", "id": "R2", "author": { "__typename": "User", "login": "octo" },
+                  "state": "COMMENTED", "submittedAt": null, "createdAt": "2026-11-14T11:00:00Z", "body": "" },
             ]},
-            "latestOpinionatedReviews": { "nodes": [
-                { "author": { "login": "lead" }, "state": "CHANGES_REQUESTED" },
-                { "author": { "login": "peer" }, "state": "APPROVED" },
+            "reviewThreads": { "nodes": [
+                { "isResolved": true, "path": "a.md", "line": null, "originalLine": 830,
+                  "startLine": null, "originalStartLine": 827,
+                  "comments": { "nodes": [{ "pullRequestReview": { "id": "R1" } }] } },
+                { "isResolved": false, "path": "b.md", "line": 12, "originalLine": 12,
+                  "startLine": null, "originalStartLine": null,
+                  "comments": { "nodes": [{ "pullRequestReview": { "id": "R1" } }] } },
             ]},
-            "comments": { "nodes": [
-                { "author": { "login": "peer" }, "createdAt": "2026-11-13T10:00:00Z", "body": "<!-- bot -->\n\nLooks fine" },
-            ]},
-            "reviews": { "nodes": [
-                { "author": { "login": "lead" }, "createdAt": "2026-11-14T10:00:00Z", "state": "CHANGES_REQUESTED", "body": "" },
-            ]},
-        });
-        for (key, value) in extra.as_object().unwrap() {
-            pr[key] = value.clone();
-        }
-        pr
+        })
     }
 
     #[test]
-    fn detail_sorts_checks_failing_first() {
-        let detail = parse_detail(&detail_fixture()).unwrap();
-        let states: Vec<_> = detail
+    fn activity_sorts_checks_failing_first() {
+        let states: Vec<_> = sample_activity()
             .checks
             .iter()
-            .map(|check| (check.name.as_str(), check.state))
+            .map(|check| (check.name.clone(), check.state))
             .collect();
+        let expected = [
+            ("deploy", CheckState::Failing),
+            ("test", CheckState::Pending),
+            ("lint", CheckState::Passing),
+        ];
         assert_eq!(
             states,
-            [
-                ("deploy", CheckState::Failing),
-                ("test", CheckState::Pending),
-                ("lint", CheckState::Passing)
-            ]
+            expected.map(|(name, state)| (name.to_string(), state))
         );
     }
 
     #[test]
     fn detail_reviewers_prefer_the_pending_request() {
-        let detail = parse_detail(&detail_fixture()).unwrap();
+        let detail = sample_detail();
         let reviewers: Vec<_> = detail
             .reviewers
             .iter()
@@ -927,27 +1123,58 @@ pub mod tests {
                 ("peer", "approved")
             ]
         );
-    }
-
-    #[test]
-    fn detail_activity_is_newest_first_and_skips_html_comments() {
-        let detail = parse_detail(&detail_fixture()).unwrap();
-        assert_eq!(detail.activity[0].action, "changes requested");
-        assert_eq!(detail.activity[1].excerpt, "Looks fine");
-        assert_eq!(detail.labels, ["created-by-skill"]);
-        assert_eq!(detail.summary.number, 56);
-    }
-
-    #[test]
-    fn detail_carries_commits_and_check_metadata() {
-        let detail = parse_detail(&detail_fixture()).unwrap();
-        assert_eq!(detail.id, "PR_node");
+        assert_eq!(detail.labels[0].color, "0e8a16");
         assert_eq!(detail.commit_count, 2);
-        assert_eq!(detail.commits[0].author, "octo");
-        assert_eq!(detail.commits[0].checks, Some(CheckState::Passing));
-        assert_eq!(detail.commits[1].author, "No Account");
-        assert_eq!(detail.commits[1].checks, None);
-        let lint = detail
+        assert_eq!(detail.summary.checks.map(|checks| checks.total), Some(3));
+    }
+
+    #[test]
+    fn timeline_keeps_order_attaches_threads_and_drops_bare_replies() {
+        let timeline = sample_activity().timeline;
+        assert_eq!(
+            timeline.len(),
+            3,
+            "the empty COMMENTED review is a thread reply"
+        );
+        assert!(matches!(&timeline[0], TimelineItem::Commit { oid, .. } if oid == "aaa111"));
+        let TimelineItem::Comment(bot) = &timeline[1] else {
+            panic!("expected a comment")
+        };
+        assert_eq!(
+            bot.author,
+            Author {
+                login: "coderabbitai".to_string(),
+                bot: true
+            }
+        );
+        let TimelineItem::Comment(review) = &timeline[2] else {
+            panic!("expected a review")
+        };
+        assert_eq!(review.verb, "requested changes");
+        assert_eq!(
+            review.at.to_rfc3339(),
+            "2026-11-14T10:00:00+00:00",
+            "uses the submit time"
+        );
+        let threads: Vec<_> = review
+            .threads
+            .iter()
+            .map(|thread| (thread.path.as_str(), thread.lines.as_str(), thread.resolved))
+            .collect();
+        assert_eq!(
+            threads,
+            [("a.md", "lines 827-830", true), ("b.md", "line 12", false)]
+        );
+    }
+
+    #[test]
+    fn activity_carries_commits_and_check_metadata() {
+        let activity = sample_activity();
+        assert_eq!(activity.commits[0].author, "octo");
+        assert_eq!(activity.commits[0].checks, Some(CheckState::Passing));
+        assert_eq!(activity.commits[1].author, "No Account");
+        assert_eq!(activity.commits[1].checks, None);
+        let lint = activity
             .checks
             .iter()
             .find(|check| check.name == "lint")

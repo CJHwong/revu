@@ -10,7 +10,10 @@ use std::path::PathBuf;
 
 use crate::repo::{GrepHit, LocalRepo};
 
-use crate::model::{ChangedFile, Group, PrDetail, PrRef, PrSummary, ViewedState, parse_pr_ref};
+use crate::config::GroupConfig;
+use crate::model::{
+    ChangedFile, Group, PrActivity, PrDetail, PrRef, PrSummary, ViewedState, parse_pr_ref,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Row {
@@ -170,6 +173,8 @@ pub struct DetailView {
     pub pr: PrRef,
     /// `None` while the request runs.
     pub detail: Option<Result<PrDetail, String>>,
+    /// Checks, commits and the conversation, which arrive separately.
+    pub activity: Option<Result<PrActivity, String>>,
     pub tab: Tab,
     pub scroll: u16,
     pub commits: ListState,
@@ -196,6 +201,7 @@ impl DetailView {
         Self {
             pr,
             detail: None,
+            activity: None,
             tab: Tab::Overview,
             scroll: 0,
             commits: ListState::default().with_selected(Some(0)),
@@ -228,7 +234,7 @@ impl DetailView {
             ),
             Tab::Commits => {
                 let index = self.commits.selected()?;
-                DiffTarget::Commit(self.loaded()?.commits.get(index)?.oid.clone())
+                DiffTarget::Commit(self.loaded_activity()?.commits.get(index)?.oid.clone())
             }
             Tab::Overview | Tab::Checks => return None,
         };
@@ -382,6 +388,10 @@ impl DetailView {
         Ok(())
     }
 
+    pub fn loaded_activity(&self) -> Option<&PrActivity> {
+        self.activity.as_ref()?.as_ref().ok()
+    }
+
     fn loaded(&self) -> Option<&PrDetail> {
         self.detail.as_ref()?.as_ref().ok()
     }
@@ -445,13 +455,13 @@ impl DetailView {
     /// The page `o` and `Enter` open: the selected commit or check, else the PR.
     fn link(&self) -> String {
         let selected = |state: &ListState| state.selected().unwrap_or(0);
-        let item_url = self.loaded().and_then(|detail| match self.tab {
+        let item_url = self.loaded_activity().and_then(|activity| match self.tab {
             Tab::Overview => None,
-            Tab::Commits => detail
+            Tab::Commits => activity
                 .commits
                 .get(selected(&self.commits))
                 .map(|commit| commit.url.clone()),
-            Tab::Checks => detail
+            Tab::Checks => activity
                 .checks
                 .get(selected(&self.checks))
                 .and_then(|check| check.url.clone()),
@@ -461,13 +471,11 @@ impl DetailView {
     }
 
     fn list_len(&self) -> usize {
-        let Some(detail) = self.loaded() else {
-            return 0;
-        };
+        let activity = self.loaded_activity();
         match self.tab {
             Tab::Overview => 0,
-            Tab::Commits => detail.commits.len(),
-            Tab::Checks => detail.checks.len(),
+            Tab::Commits => activity.map_or(0, |activity| activity.commits.len()),
+            Tab::Checks => activity.map_or(0, |activity| activity.checks.len()),
             Tab::Files => self.visible_files().len(),
         }
     }
@@ -528,6 +536,9 @@ pub struct App {
     pub loading: bool,
     pub error: Option<String>,
     pub fetched_at: Option<DateTime<Utc>>,
+    /// One flag per group: true while its search is running.
+    pub group_loading: Vec<bool>,
+    inbox_generation: u64,
     /// Names of the configured diff renderers, in order; `m` cycles through them.
     pub renderer_names: Vec<String>,
 }
@@ -550,6 +561,8 @@ impl App {
             loading: false,
             error: None,
             fetched_at: None,
+            group_loading: Vec::new(),
+            inbox_generation: 0,
             renderer_names: Vec::new(),
         }
     }
@@ -737,17 +750,67 @@ impl App {
         }
     }
 
-    /// Keeps the fold state the user chose for groups that still exist.
-    pub fn set_groups(&mut self, mut groups: Vec<Group>, fetched_at: DateTime<Utc>) {
-        for group in &mut groups {
-            if let Some(previous) = self.groups.iter().find(|old| old.title == group.title) {
-                group.collapsed = previous.collapsed;
-            }
-        }
-        self.groups = groups;
-        self.loading = false;
+    /// Starts a new fetch of every group. A group keeps its old rows until its new
+    /// ones arrive. Returns the fetch's number, which `set_group` checks.
+    pub fn start_inbox(&mut self, configs: &[GroupConfig]) -> u64 {
+        let groups = configs.iter().map(|config| {
+            let old = self.groups.iter().find(|group| group.title == config.title);
+            old.cloned().unwrap_or_else(|| Group {
+                title: config.title.clone(),
+                total: 0,
+                prs: Vec::new(),
+                collapsed: config.collapsed,
+            })
+        });
+        self.groups = groups.collect();
+        self.group_loading = vec![true; configs.len()];
+        self.loading = !configs.is_empty();
         self.error = None;
-        self.fetched_at = Some(fetched_at);
+        self.clamp_selection();
+        self.inbox_generation += 1;
+        self.inbox_generation
+    }
+
+    /// Fills one group. A result from an older fetch is dropped. The selection stays
+    /// on the same PR when rows above it change.
+    pub fn set_group(
+        &mut self,
+        generation: u64,
+        index: usize,
+        result: Result<Group, String>,
+        fetched_at: DateTime<Utc>,
+    ) {
+        if generation != self.inbox_generation || index >= self.groups.len() {
+            return;
+        }
+        let selected = self.selected_pr().map(PrSummary::reference);
+        self.group_loading[index] = false;
+        match result {
+            Ok(mut group) => {
+                // Keep the fold state the user chose.
+                group.collapsed = self.groups[index].collapsed;
+                self.groups[index] = group;
+            }
+            Err(error) => self.error = Some(format!("{}: {error}", self.groups[index].title)),
+        }
+        if !self.group_loading.contains(&true) {
+            self.loading = false;
+            self.fetched_at = Some(fetched_at);
+        }
+        self.reselect(selected);
+    }
+
+    fn reselect(&mut self, pr: Option<PrRef>) {
+        let rows = self.rows();
+        let position = pr.and_then(|pr| {
+            rows.iter().position(|row| match row {
+                Row::Pr(group, index) => self.groups[*group].prs[*index].reference() == pr,
+                Row::Header(_) => false,
+            })
+        });
+        if let Some(position) = position {
+            self.list_state.select(Some(position));
+        }
         self.clamp_selection();
     }
 
@@ -767,6 +830,12 @@ impl App {
     pub fn set_detail(&mut self, pr: &PrRef, result: Result<PrDetail, String>) {
         if let Some(view) = self.view_for(pr) {
             view.detail = Some(result);
+        }
+    }
+
+    pub fn set_activity(&mut self, pr: &PrRef, result: Result<PrActivity, String>) {
+        if let Some(view) = self.view_for(pr) {
+            view.activity = Some(result);
         }
     }
 
@@ -1177,9 +1246,59 @@ mod tests {
         let mut app = app_with(vec![group("A", &[1, 2, 3], true)]);
         app.groups[0].collapsed = false;
         app.list_state.select(Some(3));
-        app.set_groups(vec![group("A", &[1], true)], Utc::now());
+        let configs = [GroupConfig {
+            title: "A".to_string(),
+            query: String::new(),
+            collapsed: true,
+        }];
+        let generation = app.start_inbox(&configs);
+        app.set_group(generation, 0, Ok(group("A", &[1], true)), Utc::now());
         assert!(!app.groups[0].collapsed);
         assert_eq!(app.list_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn groups_fill_in_any_order_and_an_old_fetch_is_dropped() {
+        let mut app = App::new();
+        let configs: Vec<GroupConfig> = ["A", "B"]
+            .iter()
+            .map(|title| GroupConfig {
+                title: title.to_string(),
+                query: String::new(),
+                collapsed: false,
+            })
+            .collect();
+        let old = app.start_inbox(&configs);
+        let current = app.start_inbox(&configs);
+        app.set_group(old, 0, Ok(group("A", &[99], false)), Utc::now());
+        assert!(
+            app.groups[0].prs.is_empty(),
+            "a result from the older fetch was used"
+        );
+        app.set_group(current, 1, Ok(group("B", &[2], false)), Utc::now());
+        assert!(app.loading, "group A is still loading");
+        assert_eq!(app.group_loading, [true, false]);
+        app.set_group(current, 0, Err("timeout".to_string()), Utc::now());
+        assert!(!app.loading);
+        assert_eq!(app.error.as_deref(), Some("A: timeout"));
+    }
+
+    #[test]
+    fn a_group_arriving_above_keeps_the_selected_pr() {
+        let mut app = app_with(vec![group("A", &[1], false), group("B", &[5, 6], false)]);
+        let configs: Vec<GroupConfig> = ["A", "B"]
+            .iter()
+            .map(|title| GroupConfig {
+                title: title.to_string(),
+                query: String::new(),
+                collapsed: false,
+            })
+            .collect();
+        app.list_state.select(Some(4));
+        assert_eq!(app.selected_pr().unwrap().number, 6);
+        let generation = app.start_inbox(&configs);
+        app.set_group(generation, 0, Ok(group("A", &[1, 2, 3], false)), Utc::now());
+        assert_eq!(app.selected_pr().unwrap().number, 6);
     }
 
     #[test]
@@ -1259,6 +1378,7 @@ mod tests {
         app.handle_key(key(KeyCode::Enter));
         let pr = view(&app).pr.clone();
         app.set_detail(&pr, Ok(crate::model::tests::sample_detail()));
+        app.set_activity(&pr, Ok(crate::model::tests::sample_activity()));
         app.handle_key(key(KeyCode::Char('4')));
         app.set_files(&pr, Ok(files));
         (app, pr)

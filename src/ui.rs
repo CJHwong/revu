@@ -10,8 +10,8 @@ use crate::app::{
     App, DetailView, DiffOutput, Overlay, Prompt, PromptKind, RepoState, Row, Screen, Tab,
 };
 use crate::model::{
-    Activity, ChangedFile, CheckLine, CheckState, CheckSummary, Group, PrDetail, PrRef, PrSummary,
-    ReviewState, ViewedState,
+    ChangedFile, CheckLine, CheckState, CheckSummary, Group, PrActivity, PrDetail, PrRef,
+    PrSummary, ReviewState, ViewedState,
 };
 use crate::repo::{GrepHit, MAX_GREP_HITS};
 use crate::theme::Theme;
@@ -105,7 +105,10 @@ fn inbox_status(app: &App, paint: Paint) -> Line<'static> {
 
 fn row_item(app: &App, row: Row, width: usize, selected: bool, paint: Paint) -> ListItem<'static> {
     match row {
-        Row::Header(group_index) => ListItem::new(header_line(&app.groups[group_index], paint)),
+        Row::Header(group_index) => {
+            let loading = app.group_loading.get(group_index).copied().unwrap_or(false);
+            ListItem::new(header_line(&app.groups[group_index], loading, paint))
+        }
         Row::Pr(group_index, pr_index) => pr_item(
             &app.groups[group_index].prs[pr_index],
             width,
@@ -115,7 +118,7 @@ fn row_item(app: &App, row: Row, width: usize, selected: bool, paint: Paint) -> 
     }
 }
 
-fn header_line(group: &Group, paint: Paint) -> Line<'static> {
+fn header_line(group: &Group, loading: bool, paint: Paint) -> Line<'static> {
     let marker = if group.collapsed { "▸" } else { "▾" };
     let shown = group.prs.len() as u64;
     // A search past the page limit shows how many of the matches are listed.
@@ -124,10 +127,14 @@ fn header_line(group: &Group, paint: Paint) -> Line<'static> {
     } else {
         group.total.to_string()
     };
-    Line::from(vec![
+    let mut spans = vec![
         paint.bold(format!("{marker} {}  ", group.title), paint.theme.heading),
         paint.span(count, paint.theme.accent),
-    ])
+    ];
+    if loading {
+        spans.push(paint.span("  loading...", paint.theme.warning));
+    }
+    Line::from(spans)
 }
 
 /// The selected row's secondary text uses the foreground color, because the muted
@@ -273,10 +280,24 @@ fn render_detail(
     }
     match view.tab {
         Tab::Overview => render_overview(frame, detail, view.scroll, body, paint),
-        Tab::Checks => render_checks(frame, detail, &mut view.checks, body, paint),
+        Tab::Checks => match &view.activity {
+            Some(Ok(activity)) => render_checks(frame, activity, &mut view.checks, body, paint),
+            other => render_activity_state(frame, other.as_ref(), body, paint),
+        },
         Tab::Commits => {
             let [list_area, diff_area] = split_for_diff(body);
-            render_commits(frame, detail, &mut view.commits, list_area, paint);
+            let Some(Ok(activity)) = &view.activity else {
+                render_activity_state(frame, view.activity.as_ref(), list_area, paint);
+                return;
+            };
+            render_commits(
+                frame,
+                activity,
+                detail.commit_count,
+                &mut view.commits,
+                list_area,
+                paint,
+            );
             render_diff_pane(frame, view, diff_area, renderer_names, paint);
         }
         Tab::Files => {
@@ -392,6 +413,20 @@ fn file_text(
             }
         });
     Text::from(visible.collect::<Vec<_>>())
+}
+
+/// What the Commits or Checks tab shows before its data arrives, or when it failed.
+fn render_activity_state(
+    frame: &mut Frame,
+    activity: Option<&Result<PrActivity, String>>,
+    area: Rect,
+    paint: Paint,
+) {
+    let message = match activity {
+        Some(Err(error)) => paint.span(format!(" {error}"), paint.theme.danger),
+        _ => paint.span(" loading...", paint.theme.warning),
+    };
+    frame.render_widget(Paragraph::new(message).wrap(Wrap { trim: false }), area);
 }
 
 fn split_for_diff(area: Rect) -> [Rect; 2] {
@@ -560,7 +595,11 @@ fn tab_bar(current: Tab, detail: &PrDetail, paint: Paint) -> Line<'static> {
         let count = match tab {
             Tab::Overview => String::new(),
             Tab::Commits => format!(" {}", detail.commit_count),
-            Tab::Checks => format!(" {}", detail.checks.len()),
+            Tab::Checks => detail
+                .summary
+                .checks
+                .as_ref()
+                .map_or(String::new(), |checks| format!(" {}", checks.total)),
             Tab::Files => format!(" {}", detail.changed_files),
         };
         let label = format!(" {} {}{count} ", index + 1, tab.title());
@@ -595,14 +634,15 @@ fn render_overview(frame: &mut Frame, detail: &PrDetail, scroll: u16, area: Rect
 
 fn render_commits(
     frame: &mut Frame,
-    detail: &PrDetail,
+    activity: &PrActivity,
+    commit_count: u64,
     state: &mut ListState,
     area: Rect,
     paint: Paint,
 ) {
     let theme = paint.theme;
     let selected = state.selected();
-    let items: Vec<ListItem> = detail
+    let items: Vec<ListItem> = activity
         .commits
         .iter()
         .enumerate()
@@ -630,11 +670,11 @@ fn render_commits(
         })
         .collect();
     let mut list = List::new(items).highlight_style(Style::new().bg(theme.selection));
-    if detail.commit_count > detail.commits.len() as u64 {
+    if commit_count > activity.commits.len() as u64 {
         let title = format!(
             " first {} of {} commits ",
-            detail.commits.len(),
-            detail.commit_count
+            activity.commits.len(),
+            commit_count
         );
         list = list.block(Block::new().title(paint.span(title, theme.warning)));
     }
@@ -643,13 +683,13 @@ fn render_commits(
 
 fn render_checks(
     frame: &mut Frame,
-    detail: &PrDetail,
+    activity: &PrActivity,
     state: &mut ListState,
     area: Rect,
     paint: Paint,
 ) {
     let theme = paint.theme;
-    if detail.checks.is_empty() {
+    if activity.checks.is_empty() {
         frame.render_widget(
             Paragraph::new(paint.span(" No checks ran on the head commit.", theme.muted)),
             area,
@@ -657,7 +697,7 @@ fn render_checks(
         return;
     }
     let selected = state.selected();
-    let items: Vec<ListItem> = detail
+    let items: Vec<ListItem> = activity
         .checks
         .iter()
         .enumerate()
@@ -804,15 +844,7 @@ fn sidebar_lines(detail: &PrDetail, paint: Paint) -> Vec<Line<'static>> {
         detail
             .labels
             .iter()
-            .map(|label| Line::from(paint.span(label.clone(), theme.accent))),
-    );
-    lines.extend(check_section(detail, paint));
-    lines.extend(section("Activity", paint));
-    lines.extend(
-        detail
-            .activity
-            .iter()
-            .flat_map(|item| activity_lines(item, paint)),
+            .map(|label| Line::from(paint.span(label.name.clone(), theme.accent))),
     );
     lines
 }
@@ -833,47 +865,6 @@ fn reviewer_state_span(state: &str, paint: Paint) -> Span<'static> {
         _ => theme.muted,
     };
     paint.span(format!("({state})"), color)
-}
-
-/// Lists every check that is not passing, and counts the passing ones.
-fn check_section(detail: &PrDetail, paint: Paint) -> Vec<Line<'static>> {
-    let mut lines = section("Checks", paint);
-    let passing = detail
-        .checks
-        .iter()
-        .filter(|check| check.state == CheckState::Passing)
-        .count();
-    for check in detail
-        .checks
-        .iter()
-        .filter(|check| check.state != CheckState::Passing)
-    {
-        let (symbol, color) = check_symbol(check.state, paint.theme);
-        lines.push(Line::from(vec![
-            paint.span(format!("{symbol} "), color),
-            Span::from(check.name.clone()),
-        ]));
-    }
-    if passing > 0 {
-        lines.push(Line::from(
-            paint.span(format!("✓ {passing} passing"), paint.theme.success),
-        ));
-    }
-    lines
-}
-
-fn activity_lines(item: &Activity, paint: Paint) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(vec![
-        paint.bold(item.author.clone(), paint.theme.foreground),
-        paint.span(
-            format!(" {}, {}", item.action, relative_time(item.at, paint.now)),
-            paint.theme.muted,
-        ),
-    ])];
-    if !item.excerpt.is_empty() {
-        lines.push(Line::from(format!("  {}", item.excerpt)));
-    }
-    lines
 }
 
 // ---- Text helpers ----

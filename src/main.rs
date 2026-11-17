@@ -25,12 +25,21 @@ use std::time::Duration;
 
 use app::{Action, App, DiffJob, DiffKey, PromptKind, RepoJob, RepoState};
 use config::Config;
-use model::{ChangedFile, Group, PrDetail, PrRef};
+use model::{ChangedFile, Group, PrActivity, PrDetail, PrRef};
 use repo::{CloneLookup, LocalRepo};
 
 /// Results from the fetch threads. Errors are strings because they only get displayed.
 enum Message {
-    Inbox(Result<Vec<Group>, String>, DateTime<Utc>),
+    Group {
+        generation: u64,
+        index: usize,
+        result: Result<Group, String>,
+        fetched_at: DateTime<Utc>,
+    },
+    Activity {
+        pr: PrRef,
+        result: Result<Box<PrActivity>, String>,
+    },
     Detail {
         pr: PrRef,
         result: Result<Box<PrDetail>, String>,
@@ -169,8 +178,15 @@ fn next_input() -> Result<Option<Input>> {
 fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
     for message in receiver.try_iter() {
         match message {
-            Message::Inbox(Ok(groups), fetched_at) => app.set_groups(groups, fetched_at),
-            Message::Inbox(Err(error), _) => app.set_inbox_error(error),
+            Message::Group {
+                generation,
+                index,
+                result,
+                fetched_at,
+            } => app.set_group(generation, index, result, fetched_at),
+            Message::Activity { pr, result } => {
+                app.set_activity(&pr, result.map(|activity| *activity))
+            }
             Message::Detail { pr, result } => app.set_detail(&pr, result.map(|detail| *detail)),
             Message::Files { pr, result } => app.set_files(&pr, result),
             Message::Viewed {
@@ -197,7 +213,10 @@ fn perform(
     match action {
         Action::Quit => return Ok(false),
         Action::Refresh => refresh(app, session),
-        Action::FetchDetail(pr) => start_detail_fetch(session, pr),
+        Action::FetchDetail(pr) => {
+            start_activity_fetch(session, pr.clone());
+            start_detail_fetch(session, pr);
+        }
         Action::OpenBrowser(url) => open_browser(app, &url),
         Action::RunDiff(pr) => run_diff(terminal, app, session, &pr)?,
         Action::Grep {
@@ -397,15 +416,36 @@ fn refresh(app: &mut App, session: &mut Session) {
     start_inbox_fetch(session, app);
 }
 
+/// One thread per group, so each group shows as soon as its own search returns.
 fn start_inbox_fetch(session: &Session, app: &mut App) {
-    app.loading = true;
-    let config = session.config.clone();
+    let generation = app.start_inbox(&session.config.groups);
+    let updated_since = session
+        .config
+        .updated_within_days
+        .map(|days| Local::now().date_naive() - chrono::Duration::days(i64::from(days)));
+    for (index, group) in session.config.groups.iter().cloned().enumerate() {
+        let sender = session.sender.clone();
+        thread::spawn(move || {
+            let result =
+                github::fetch_group(&group, updated_since).map_err(|error| format!("{error:#}"));
+            // The receiver only goes away when the app exits, so a failed send needs no handling.
+            let _ = sender.send(Message::Group {
+                generation,
+                index,
+                result,
+                fetched_at: Utc::now(),
+            });
+        });
+    }
+}
+
+fn start_activity_fetch(session: &Session, pr: PrRef) {
     let sender = session.sender.clone();
     thread::spawn(move || {
-        let result = github::fetch_inbox(&config, Local::now().date_naive())
+        let result = github::fetch_activity(&pr.repo, pr.number)
+            .map(Box::new)
             .map_err(|error| format!("{error:#}"));
-        // The receiver only goes away when the app exits, so a failed send needs no handling.
-        let _ = sender.send(Message::Inbox(result, Utc::now()));
+        let _ = sender.send(Message::Activity { pr, result });
     });
 }
 

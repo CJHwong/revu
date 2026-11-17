@@ -5,8 +5,8 @@ use chrono::NaiveDate;
 use serde_json::Value;
 use std::process::Command;
 
-use crate::config::Config;
-use crate::model::{self, ChangedFile, Group, PrDetail};
+use crate::config::GroupConfig;
+use crate::model::{self, ChangedFile, Group, PrActivity, PrDetail};
 
 /// GitHub's maximum page size for a search connection.
 const PAGE_SIZE: u32 = 100;
@@ -26,76 +26,75 @@ pub fn search_query(group_query: &str, updated_since: Option<NaiveDate>) -> Stri
     query
 }
 
-/// One request for every group: each group is a `search` under the alias `g<index>`.
-pub fn inbox_document(group_count: usize) -> String {
-    let variables: Vec<String> = (0..group_count)
-        .map(|index| format!("$q{index}: String!"))
-        .collect();
-    let searches: Vec<String> = (0..group_count)
-        .map(|index| {
-            format!("g{index}: search(query: $q{index}, type: ISSUE, first: {PAGE_SIZE}) {{ issueCount nodes {{ ...Row }} }}")
-        })
-        .collect();
+/// One group's search. Each group is its own request, so the groups load in parallel and
+/// a fast group shows before a slow one.
+pub fn group_document() -> String {
     format!(
-        "query({}) {{ {} }} \
-         fragment Row on PullRequest {{ {ROW_FIELDS} \
-         commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 0) {{ {ROLLUP_COUNTS} }} }} }} }} }} }}",
-        variables.join(", "),
-        searches.join(" ")
+        "query($q: String!) {{ search(query: $q, type: ISSUE, first: {PAGE_SIZE}) {{ issueCount nodes {{ \
+         ... on PullRequest {{ {ROW_FIELDS} \
+         commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 0) {{ {ROLLUP_COUNTS} }} }} }} }} }} }} }} }} }}"
     )
 }
 
+const PR_VARIABLES: &str = "$owner: String!, $name: String!, $number: Int!";
+
+/// The header, description and sidebar: what the Overview shows first.
 pub fn detail_document() -> String {
     format!(
-        "query($owner: String!, $name: String!, $number: Int!) {{ \
+        "query({PR_VARIABLES}) {{ \
          repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ \
          {ROW_FIELDS} id baseRefOid headRefOid body createdAt additions deletions changedFiles baseRefName headRefName \
+         commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 0) {{ {ROLLUP_COUNTS} }} }} }} }} }} \
+         commitCount: commits {{ totalCount }} \
+         labels(first: 20) {{ nodes {{ name color }} }} \
+         assignees(first: 10) {{ nodes {{ login }} }} \
+         reviewRequests(first: 20) {{ nodes {{ requestedReviewer {{ \
+           ... on User {{ login }} ... on Bot {{ login }} ... on Mannequin {{ login }} ... on Team {{ name }} }} }} }} \
+         latestOpinionatedReviews(first: 20) {{ nodes {{ author {{ login }} state }} }} \
+         }} }} }}"
+    )
+}
+
+/// Checks, commits and the conversation, fetched at the same time as the detail.
+pub fn activity_document() -> String {
+    format!(
+        "query({PR_VARIABLES}) {{ \
+         repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ \
          commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 100) {{ {ROLLUP_COUNTS} \
            nodes {{ __typename \
              ... on CheckRun {{ name conclusion status detailsUrl startedAt completedAt \
                checkSuite {{ workflowRun {{ workflow {{ name }} }} }} }} \
              ... on StatusContext {{ context state targetUrl createdAt }} }} }} }} }} }} }} \
-         commitList: commits(first: 100) {{ totalCount nodes {{ commit {{ \
+         commitList: commits(first: 100) {{ nodes {{ commit {{ \
            oid messageHeadline authoredDate url author {{ name user {{ login }} }} \
            statusCheckRollup {{ state }} }} }} }} \
-         labels(first: 20) {{ nodes {{ name }} }} \
-         assignees(first: 10) {{ nodes {{ login }} }} \
-         reviewRequests(first: 20) {{ nodes {{ requestedReviewer {{ \
-           ... on User {{ login }} ... on Bot {{ login }} ... on Mannequin {{ login }} ... on Team {{ name }} }} }} }} \
-         latestOpinionatedReviews(first: 20) {{ nodes {{ author {{ login }} state }} }} \
-         comments(last: 15) {{ nodes {{ author {{ login }} createdAt body }} }} \
-         reviews(last: 15) {{ nodes {{ author {{ login }} createdAt state body }} }} \
+         timelineItems(last: 100, itemTypes: [ISSUE_COMMENT, PULL_REQUEST_REVIEW, PULL_REQUEST_COMMIT]) {{ nodes {{ __typename \
+           ... on IssueComment {{ author {{ __typename login }} createdAt body }} \
+           ... on PullRequestReview {{ id author {{ __typename login }} state submittedAt createdAt body }} \
+           ... on PullRequestCommit {{ commit {{ oid messageHeadline authoredDate }} }} }} }} \
+         reviewThreads(first: 100) {{ nodes {{ isResolved path line originalLine startLine originalStartLine \
+           comments(first: 1) {{ nodes {{ pullRequestReview {{ id }} }} }} }} }} \
          }} }} }}"
     )
 }
 
-pub fn fetch_inbox(config: &Config, today: NaiveDate) -> Result<Vec<Group>> {
-    if config.groups.is_empty() {
-        return Ok(Vec::new());
-    }
-    let updated_since = config
-        .updated_within_days
-        .map(|days| today - chrono::Duration::days(i64::from(days)));
-    let mut args = vec![
+pub fn fetch_group(group: &GroupConfig, updated_since: Option<NaiveDate>) -> Result<Group> {
+    let args = [
         "-f".to_string(),
-        format!("query={}", inbox_document(config.groups.len())),
+        format!("query={}", group_document()),
+        "-f".to_string(),
+        format!("q={}", search_query(&group.query, updated_since)),
     ];
-    for (index, group) in config.groups.iter().enumerate() {
-        args.push("-f".to_string());
-        args.push(format!(
-            "q{index}={}",
-            search_query(&group.query, updated_since)
-        ));
-    }
     let data = run_graphql(&args)?;
-    model::parse_inbox(&data, &config.groups)
+    let search = data.get("search").context("response has no search field")?;
+    model::parse_group(search, group)
 }
 
-pub fn fetch_detail(repo: &str, number: u64) -> Result<PrDetail> {
+fn fetch_pull_request(document: &str, repo: &str, number: u64) -> Result<Value> {
     let (owner, name) = split_repo(repo)?;
     let args = [
         "-f".to_string(),
-        format!("query={}", detail_document()),
+        format!("query={document}"),
         "-f".to_string(),
         format!("owner={owner}"),
         "-f".to_string(),
@@ -104,11 +103,18 @@ pub fn fetch_detail(repo: &str, number: u64) -> Result<PrDetail> {
         format!("number={number}"),
     ];
     let data = run_graphql(&args)?;
-    let pull_request = data
-        .pointer("/repository/pullRequest")
+    data.pointer("/repository/pullRequest")
         .filter(|value| !value.is_null())
-        .with_context(|| format!("{repo}#{number} not found"))?;
-    model::parse_detail(pull_request)
+        .cloned()
+        .with_context(|| format!("{repo}#{number} not found"))
+}
+
+pub fn fetch_detail(repo: &str, number: u64) -> Result<PrDetail> {
+    model::parse_detail(&fetch_pull_request(&detail_document(), repo, number)?)
+}
+
+pub fn fetch_activity(repo: &str, number: u64) -> Result<PrActivity> {
+    model::parse_activity(&fetch_pull_request(&activity_document(), repo, number)?)
 }
 
 const FILES_DOCUMENT: &str = "query($owner: String!, $name: String!, $number: Int!, $cursor: String) { \
@@ -220,11 +226,9 @@ mod tests {
     }
 
     #[test]
-    fn inbox_document_declares_one_variable_and_alias_per_group() {
-        let document = inbox_document(2);
-        assert!(document.starts_with("query($q0: String!, $q1: String!)"));
-        assert!(document.contains("g0: search(query: $q0, type: ISSUE, first: 100)"));
-        assert!(document.contains("g1: search(query: $q1, type: ISSUE, first: 100)"));
-        assert!(!document.contains("$q2"));
+    fn group_document_takes_one_search_variable() {
+        let document = group_document();
+        assert!(document.starts_with("query($q: String!)"));
+        assert!(document.contains("search(query: $q, type: ISSUE, first: 100)"));
     }
 }
