@@ -811,7 +811,7 @@ fn render_overview(frame: &mut Frame, view: &mut DetailView, area: Rect, paint: 
     let height = main.height as usize;
     *page = height;
     *cursor = (*cursor).min(layout.rows.len().saturating_sub(1));
-    *scroll = follow_cursor(*cursor, height, layout.rows.len());
+    *scroll = keep_cursor_in_view(*scroll, *cursor, height, layout.rows.len());
     let lines: Vec<Line> = layout
         .rows
         .iter()
@@ -832,12 +832,11 @@ fn render_overview(frame: &mut Frame, view: &mut DetailView, area: Rect, paint: 
     }
 }
 
-/// Holds the cursor a third of the way down the screen, so each move scrolls the text.
-/// The cursor leaves that row only at the top or bottom of the page.
-fn follow_cursor(cursor: usize, height: usize, total: usize) -> usize {
-    cursor
-        .saturating_sub(height / 3)
-        .min(total.saturating_sub(height))
+/// The keys move the page; this only repairs it after the layout changes size, such as
+/// when a fold closes or the terminal shrinks.
+fn keep_cursor_in_view(scroll: usize, cursor: usize, height: usize, total: usize) -> usize {
+    let scroll = scroll.min(total.saturating_sub(height));
+    scroll.clamp((cursor + 1).saturating_sub(height), cursor)
 }
 
 /// The cursor row across the full width. On a fold bar it turns the accent color, so the
@@ -1214,25 +1213,14 @@ mod tests {
     use chrono::TimeZone;
 
     #[test]
-    fn every_cursor_move_scrolls_the_text_away_from_the_ends() {
-        // 30 rows on screen, 200 in the page: the cursor sits on screen row 10.
-        assert_eq!(follow_cursor(50, 30, 200), 40);
-        assert_eq!(follow_cursor(51, 30, 200), 41);
+    fn a_shrunk_layout_keeps_the_cursor_on_screen() {
+        assert_eq!(keep_cursor_in_view(170, 198, 30, 200), 170);
         assert_eq!(
-            follow_cursor(50, 30, 200),
-            40,
-            "moving back scrolls back at once"
+            keep_cursor_in_view(170, 120, 30, 140),
+            110,
+            "a fold closed under the page"
         );
-        assert_eq!(
-            follow_cursor(4, 30, 200),
-            0,
-            "at the top the cursor moves instead"
-        );
-        assert_eq!(
-            follow_cursor(199, 30, 200),
-            170,
-            "at the bottom the page stops"
-        );
+        assert_eq!(keep_cursor_in_view(50, 10, 30, 200), 10);
     }
 
     #[test]

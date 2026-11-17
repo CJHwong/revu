@@ -523,7 +523,27 @@ impl DetailView {
     fn jump_anchor(&mut self, forward: bool) {
         if let Some(target) = self.anchor_target(forward) {
             self.cursor = target;
+            // A jump lands a third of the way down, with the text after it in view.
+            self.scroll = self.clamp_scroll(target.saturating_sub(self.page / 3));
         }
+    }
+
+    /// Moves the cursor and the page together, so the text moves on every press. Only at
+    /// the very top or bottom, where the page cannot move, does the cursor move alone.
+    fn move_overview(&mut self, delta: isize) {
+        let total = self.overview.as_ref().map_or(0, |layout| layout.rows.len());
+        let cursor = self
+            .cursor
+            .saturating_add_signed(delta)
+            .min(total.saturating_sub(1));
+        let moved = cursor as isize - self.cursor as isize;
+        self.cursor = cursor;
+        self.scroll = self.clamp_scroll(self.scroll.saturating_add_signed(moved));
+    }
+
+    fn clamp_scroll(&self, scroll: usize) -> usize {
+        let total = self.overview.as_ref().map_or(0, |layout| layout.rows.len());
+        scroll.min(total.saturating_sub(self.page))
     }
 
     /// One wheel tick on the Overview: to the next card or fold, or, when that is more
@@ -593,14 +613,7 @@ impl DetailView {
     fn move_in_tab(&mut self, delta: isize) {
         let last = self.list_len().saturating_sub(1);
         let state = match self.tab {
-            Tab::Overview => {
-                let last = self
-                    .overview
-                    .as_ref()
-                    .map_or(0, |layout| layout.rows.len().saturating_sub(1));
-                self.cursor = self.cursor.saturating_add_signed(delta).min(last);
-                return;
-            }
+            Tab::Overview => return self.move_overview(delta),
             Tab::Commits => &mut self.commits,
             Tab::Checks => &mut self.checks,
             Tab::Files => &mut self.file_state,
@@ -1569,6 +1582,37 @@ mod tests {
 
     fn view_cursor(app: &App) -> usize {
         view(app).cursor
+    }
+
+    #[test]
+    fn every_overview_move_scrolls_the_page_until_an_end() {
+        use crate::markdown::TextRow;
+        let (mut app, _) = files_tab(Vec::new());
+        let Screen::Detail(detail) = &mut app.screen else {
+            unreachable!()
+        };
+        detail.tab = Tab::Overview;
+        detail.overview = Some(OverviewLayout {
+            width: 60,
+            rows: (0..200).map(|_| TextRow::blank()).collect(),
+        });
+        detail.page = 30;
+        app.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(
+            (view(&app).cursor, view(&app).scroll),
+            (1, 1),
+            "the first j scrolls"
+        );
+        app.handle_key(key(KeyCode::Char('G')));
+        assert_eq!((view(&app).cursor, view(&app).scroll), (199, 170));
+        app.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(
+            (view(&app).cursor, view(&app).scroll),
+            (198, 169),
+            "the first k after G scrolls"
+        );
+        app.handle_key(key(KeyCode::Char('g')));
+        assert_eq!((view(&app).cursor, view(&app).scroll), (0, 0));
     }
 
     #[test]
