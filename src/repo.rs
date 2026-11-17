@@ -325,9 +325,20 @@ pub fn fill_template(template: &str, values: &[(&str, String)]) -> String {
 /// Runs a renderer command inside the clone and returns its colored output. With
 /// `whole_file`, git and difftastic show the whole file around the changes, so the
 /// renderer draws the full file with its changes marked.
-pub fn run_renderer(dir: &Path, command: &str, whole_file: bool) -> Result<Vec<u8>> {
+/// The words a renderer's error starts with when its command is missing; the app then
+/// leaves that renderer out of the m cycle.
+pub const NOT_INSTALLED: &str = "is not installed";
+
+/// Below this many columns difftastic's two columns wrap nearly every line, so it draws
+/// one column instead, unless DFT_DISPLAY is already set.
+const SIDE_BY_SIDE_MIN_WIDTH: u16 = 100;
+
+pub fn run_renderer(dir: &Path, command: &str, whole_file: bool, width: u16) -> Result<Vec<u8>> {
     let mut shell = Command::new("sh");
     shell.arg("-c").arg(command).current_dir(dir);
+    if width < SIDE_BY_SIDE_MIN_WIDTH && std::env::var_os("DFT_DISPLAY").is_none() {
+        shell.env("DFT_DISPLAY", "inline");
+    }
     if whole_file {
         // git reads config from these variables; difftastic reads its own.
         shell
@@ -342,7 +353,29 @@ pub fn run_renderer(dir: &Path, command: &str, whole_file: bool) -> Result<Vec<u
         return Ok(output.stdout);
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
-    bail!("renderer exited with {}: {}", output.status, stderr.trim())
+    if let Some(program) = missing_program(&stderr) {
+        bail!("{program} {NOT_INSTALLED}, so this renderer cannot run. m switches to another one.");
+    }
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    bail!(
+        "renderer exited with {}:\n{}",
+        output.status,
+        lines.join("\n")
+    )
+}
+
+/// The program the shell could not find, from "sh: delta: command not found" or git's
+/// "difft --width=94: difft: command not found".
+fn missing_program(stderr: &str) -> Option<&str> {
+    let line = stderr
+        .lines()
+        .find(|line| line.contains("command not found"))?;
+    let before = line.split(": command not found").next()?;
+    before.rsplit([':', ' ']).find(|word| !word.is_empty())
 }
 
 /// The changed files whose diff holds `query`, ignoring case, each with the number of
@@ -534,6 +567,7 @@ mod tests {
             &dir,
             "git config diff.context; printf \"$DFT_CONTEXT\"",
             true,
+            200,
         )
         .unwrap();
         assert_eq!(String::from_utf8(output).unwrap(), "1000000\n1000000");
@@ -545,14 +579,34 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_renderer_command_says_so_and_narrow_difftastic_goes_inline() {
+        let dir = std::env::temp_dir();
+        let error = run_renderer(&dir, "no-such-renderer-xyz", false, 200)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("no-such-renderer-xyz is not installed"),
+            "{error}"
+        );
+        assert_eq!(
+            missing_program("x --width=94: difft: command not found\nfatal: external diff died"),
+            Some("difft")
+        );
+        let narrow = run_renderer(&dir, "printf \"$DFT_DISPLAY\"", false, 60).unwrap();
+        if std::env::var_os("DFT_DISPLAY").is_none() {
+            assert_eq!(narrow, b"inline");
+        }
+    }
+
+    #[test]
     fn renderer_output_survives_a_nonzero_exit() {
         let dir = std::env::temp_dir();
         assert_eq!(
-            run_renderer(&dir, "printf diff; exit 1", false).unwrap(),
+            run_renderer(&dir, "printf diff; exit 1", false, 200).unwrap(),
             b"diff"
         );
         assert!(
-            run_renderer(&dir, "echo broken >&2; exit 2", false)
+            run_renderer(&dir, "echo broken >&2; exit 2", false, 200)
                 .unwrap_err()
                 .to_string()
                 .contains("broken")
@@ -631,7 +685,7 @@ mod tests {
             ("head", shell_quote(&head)),
             ("paths", shell_quote(path)),
         ];
-        let output = run_renderer(&dir, &fill_template(template, &values), false).unwrap();
+        let output = run_renderer(&dir, &fill_template(template, &values), false, 200).unwrap();
         let _ = fs::remove_dir_all(&dir);
         assert!(
             String::from_utf8(output)

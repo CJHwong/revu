@@ -1343,6 +1343,15 @@ impl LabelMenu {
     }
 }
 
+/// The next renderer whose command is installed, or the next one when none is known to
+/// be.
+fn next_renderer(current: usize, count: usize, missing: &HashSet<usize>) -> usize {
+    (1..=count)
+        .map(|step| (current + step) % count)
+        .find(|index| !missing.contains(index))
+        .unwrap_or((current + 1) % count)
+}
+
 /// Why a review can only be a Comment: GitHub refuses your Approve and Request changes
 /// on your own PR, and a verdict means nothing once the PR is merged or closed.
 fn comment_only_reason(detail: &PrDetail) -> Option<&'static str> {
@@ -1608,6 +1617,8 @@ pub struct App {
     pub composer: Option<Composer>,
     /// The label checklist, while it is open.
     pub label_menu: Option<LabelMenu>,
+    /// Renderers whose command is not installed; m skips them.
+    pub missing_renderers: HashSet<usize>,
     /// A write to GitHub is running; the footer says what it saves.
     pub saving: Option<SaveNote>,
     /// The last write succeeded; the footer says so until the next key.
@@ -1655,6 +1666,7 @@ impl App {
             theme_menu: None,
             composer: None,
             label_menu: None,
+            missing_renderers: HashSet::new(),
             saving: None,
             saved: None,
             reload_after_write: None,
@@ -1761,6 +1773,11 @@ impl App {
 
     /// Converts the renderer's ANSI colors into styled text once, when it arrives.
     pub fn set_diff(&mut self, pr: &PrRef, key: DiffKey, result: Result<Text<'static>, String>) {
+        if let Err(error) = &result
+            && error.contains(crate::repo::NOT_INSTALLED)
+        {
+            self.missing_renderers.insert(key.renderer);
+        }
         let Some(view) = self.view_for(pr) else {
             return;
         };
@@ -2673,7 +2690,8 @@ impl App {
                 view.show_tab(Tab::ALL.get(index).copied().unwrap_or(view.tab));
             }
             KeyCode::Char('m') if diff_pane => {
-                view.renderer = (view.renderer + 1) % renderer_count;
+                view.renderer =
+                    next_renderer(view.renderer, renderer_count, &self.missing_renderers);
                 view.diff_scroll = 0;
             }
             KeyCode::Char('J') if diff_pane => view.scroll_diff(3),
@@ -3439,6 +3457,18 @@ mod tests {
 
     fn ctrl(character: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn m_skips_a_renderer_that_is_not_installed() {
+        let missing = HashSet::from([1]);
+        assert_eq!(next_renderer(0, 3, &missing), 2);
+        assert_eq!(next_renderer(2, 3, &missing), 0);
+        assert_eq!(
+            next_renderer(0, 1, &HashSet::from([0])),
+            0,
+            "a lone renderer stays"
+        );
     }
 
     #[test]

@@ -1634,9 +1634,18 @@ pub mod tests {
 
     #[test]
     fn a_skipped_check_neither_passes_nor_fails() {
-        assert_eq!(check_run_state("COMPLETED", Some("SKIPPED")), CheckState::Skipped);
-        assert_eq!(check_run_state("COMPLETED", Some("NEUTRAL")), CheckState::Passing);
-        assert!(CheckState::Passing < CheckState::Skipped, "skipped checks list last");
+        assert_eq!(
+            check_run_state("COMPLETED", Some("SKIPPED")),
+            CheckState::Skipped
+        );
+        assert_eq!(
+            check_run_state("COMPLETED", Some("NEUTRAL")),
+            CheckState::Passing
+        );
+        assert!(
+            CheckState::Passing < CheckState::Skipped,
+            "skipped checks list last"
+        );
     }
 
     #[test]

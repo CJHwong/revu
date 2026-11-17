@@ -694,8 +694,8 @@ fn render_diff(
     whole_file: bool,
     syntax: Option<Syntax>,
 ) -> Result<Text<'static>, String> {
-    let bytes =
-        repo::run_renderer(&job.dir, command, whole_file).map_err(|error| format!("{error:#}"))?;
+    let bytes = repo::run_renderer(&job.dir, command, whole_file, job.key.width)
+        .map_err(|error| format!("{error:#}"))?;
     highlight::to_text(&bytes, syntax)
 }
 
