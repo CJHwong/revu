@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use unicode_width::UnicodeWidthChar;
 
-use crate::app::{App, DetailView, Prompt, Row, Screen, Tab};
+use crate::app::{App, DetailView, DiffOutput, Prompt, PromptKind, RepoState, Row, Screen, Tab};
 use crate::model::{
     Activity, ChangedFile, CheckLine, CheckState, CheckSummary, Group, PrDetail, PrRef, PrSummary,
     ReviewState, ViewedState,
@@ -40,7 +40,13 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: &Theme, now: DateTime<Utc
     let base = Style::new().bg(theme.background).fg(theme.foreground);
     frame.render_widget(Block::new().style(base), frame.area());
     if let Screen::Detail(view) = &mut app.screen {
-        render_detail(frame, view, app.error.as_deref(), paint);
+        render_detail(
+            frame,
+            view,
+            app.error.as_deref(),
+            &app.renderer_names,
+            paint,
+        );
     } else {
         render_inbox(frame, app, paint);
     }
@@ -210,16 +216,25 @@ fn detail_help(tab: Tab) -> &'static str {
         Tab::Overview => {
             "tab/1-4 switch | j/k scroll | o browser | d diff | r reload | ctrl-l open link | esc back"
         }
-        Tab::Commits | Tab::Checks => {
+        Tab::Checks => {
             "tab/1-4 switch | j/k move | enter/o browser | d diff | r reload | ctrl-l open link | esc back"
         }
+        Tab::Commits => {
+            "j/k commit | J/K, space/b scroll diff | m renderer | enter/o browser | r reload | esc back"
+        }
         Tab::Files => {
-            "tab/1-4 switch | j/k move | v viewed | H hide viewed | o browser | r reload | esc back"
+            "j/k file | J/K, space/b scroll diff | m renderer | v viewed | H hide viewed | o browser | esc back"
         }
     }
 }
 
-fn render_detail(frame: &mut Frame, view: &mut DetailView, error: Option<&str>, paint: Paint) {
+fn render_detail(
+    frame: &mut Frame,
+    view: &mut DetailView,
+    error: Option<&str>,
+    renderer_names: &[String],
+    paint: Paint,
+) {
     let theme = paint.theme;
     let [top, tabs, body, bottom] = Layout::vertical([
         Constraint::Length(3),
@@ -235,86 +250,57 @@ fn render_detail(frame: &mut Frame, view: &mut DetailView, error: Option<&str>, 
     };
     frame.render_widget(Paragraph::new(footer), bottom);
 
-    let visible_files = view.visible_files();
-    let DetailView {
-        pr,
-        detail,
-        tab,
-        scroll,
-        commits,
-        checks,
-        files,
-        file_state,
-        hide_viewed,
-        ..
-    } = view;
-    let detail = match detail {
-        None => {
-            frame.render_widget(Paragraph::new(detail_title(pr, paint)), top);
-            frame.render_widget(
-                Paragraph::new(paint.span("loading...", theme.warning)),
-                body,
-            );
-            return;
-        }
-        Some(Err(error)) => {
-            frame.render_widget(Paragraph::new(detail_title(pr, paint)), top);
-            let message = paint.span(error.clone(), theme.danger);
-            frame.render_widget(Paragraph::new(message).wrap(Wrap { trim: false }), body);
-            return;
-        }
-        Some(Ok(detail)) => detail,
+    let Some(Ok(detail)) = &view.detail else {
+        frame.render_widget(Paragraph::new(detail_title(&view.pr, paint)), top);
+        let message = match &view.detail {
+            Some(Err(error)) => paint.span(error.clone(), theme.danger),
+            _ => paint.span("loading...", theme.warning),
+        };
+        frame.render_widget(Paragraph::new(message).wrap(Wrap { trim: false }), body);
+        return;
     };
-
     frame.render_widget(Paragraph::new(detail_header(detail, paint)), top);
-    frame.render_widget(Paragraph::new(tab_bar(*tab, detail, paint)), tabs);
-    match tab {
-        Tab::Overview => render_overview(frame, detail, *scroll, body, paint),
-        Tab::Commits => render_commits(frame, detail, commits, body, paint),
-        Tab::Checks => render_checks(frame, detail, checks, body, paint),
+    frame.render_widget(Paragraph::new(tab_bar(view.tab, detail, paint)), tabs);
+    match view.tab {
+        Tab::Overview => render_overview(frame, detail, view.scroll, body, paint),
+        Tab::Checks => render_checks(frame, detail, &mut view.checks, body, paint),
+        Tab::Commits => {
+            let [list_area, diff_area] = split_for_diff(body);
+            render_commits(frame, detail, &mut view.commits, list_area, paint);
+            render_diff_pane(frame, view, diff_area, renderer_names, paint);
+        }
         Tab::Files => {
-            let files_view = FilesView {
-                files: files.as_ref(),
-                visible: &visible_files,
-                hide_viewed: *hide_viewed,
-            };
-            render_files(frame, &files_view, file_state, body, paint);
+            let [list_area, diff_area] = split_for_diff(body);
+            if render_file_list(frame, view, list_area, paint) {
+                render_diff_pane(frame, view, diff_area, renderer_names, paint);
+            }
         }
     }
 }
 
-struct FilesView<'a> {
-    files: Option<&'a Result<Vec<ChangedFile>, String>>,
-    visible: &'a [usize],
-    hide_viewed: bool,
+fn split_for_diff(area: Rect) -> [Rect; 2] {
+    Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).areas(area)
 }
 
-fn render_files(
-    frame: &mut Frame,
-    view: &FilesView,
-    state: &mut ListState,
-    area: Rect,
-    paint: Paint,
-) {
+/// Draws the file list. Returns false when there is no list yet, so no diff pane either.
+fn render_file_list(frame: &mut Frame, view: &mut DetailView, area: Rect, paint: Paint) -> bool {
     let theme = paint.theme;
-    let files = match view.files {
+    let visible = view.visible_files();
+    let files = match &view.files {
         None => {
             frame.render_widget(
                 Paragraph::new(paint.span(" loading files...", theme.warning)),
                 area,
             );
-            return;
+            return false;
         }
         Some(Err(error)) => {
             let message = paint.span(format!(" {error}"), theme.danger);
             frame.render_widget(Paragraph::new(message).wrap(Wrap { trim: false }), area);
-            return;
+            return false;
         }
         Some(Ok(files)) => files,
     };
-    let [list_area, diff_area] =
-        Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(area);
-
     let viewed = files
         .iter()
         .filter(|file| file.viewed == ViewedState::Viewed)
@@ -325,26 +311,65 @@ fn render_files(
         ""
     };
     let title = format!(" {viewed}/{} viewed{hidden_note} ", files.len());
-    let items: Vec<ListItem> = view
-        .visible
+    let items: Vec<ListItem> = visible
         .iter()
-        .map(|index| ListItem::new(file_line(&files[*index], list_area.width as usize, paint)))
+        .map(|index| ListItem::new(file_line(&files[*index], area.width as usize, paint)))
         .collect();
     let list = List::new(items)
         .highlight_style(Style::new().bg(theme.selection))
-        .block(
-            Block::new()
-                .borders(Borders::RIGHT)
-                .border_style(Style::new().fg(theme.muted))
-                .title(paint.span(title, theme.heading)),
-        );
-    frame.render_stateful_widget(list, list_area, state);
+        .block(Block::new().title(paint.span(title, theme.heading)));
+    frame.render_stateful_widget(list, area, &mut view.file_state);
+    true
+}
 
-    let selected = state
-        .selected()
-        .and_then(|position| view.visible.get(position));
-    let summary = selected.map(|index| file_summary(&files[*index], paint));
-    frame.render_widget(Paragraph::new(summary.unwrap_or_default()), diff_area);
+/// The rendered diff for the selected file or commit, or what is still missing for it.
+/// Records the pane width, which the next diff request renders to.
+fn render_diff_pane(
+    frame: &mut Frame,
+    view: &mut DetailView,
+    area: Rect,
+    renderer_names: &[String],
+    paint: Paint,
+) {
+    let theme = paint.theme;
+    let renderer = renderer_names
+        .get(view.renderer)
+        .map_or("diff", String::as_str);
+    let block = Block::new()
+        .borders(Borders::LEFT)
+        .border_style(Style::new().fg(theme.muted))
+        .title(paint.bold(format!(" {renderer} "), theme.heading))
+        .title(paint.span("m switches ", theme.muted));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    view.diff_width = inner.width;
+
+    let notice = |text: String, color: Color| {
+        Paragraph::new(paint.span(text, color)).wrap(Wrap { trim: false })
+    };
+    let content = match &view.repo {
+        RepoState::Unknown => notice(" looking for a local clone...".to_string(), theme.warning),
+        RepoState::Busy(message) => notice(format!(" {message}..."), theme.warning),
+        RepoState::Failed(message) => notice(format!(" {message}"), theme.danger),
+        RepoState::Ready(_) => match view.current_diff_key().and_then(|key| view.diffs.get(&key)) {
+            None | Some(DiffOutput::Pending) => notice(" rendering...".to_string(), theme.warning),
+            Some(DiffOutput::Done(Err(error))) => notice(format!(" {error}"), theme.danger),
+            Some(DiffOutput::Done(Ok(text))) if text.lines.is_empty() => notice(
+                " this renderer shows no changes here".to_string(),
+                theme.muted,
+            ),
+            Some(DiffOutput::Done(Ok(text))) => {
+                // Clone only the visible lines; a long diff is redrawn every frame.
+                let lines = text
+                    .lines
+                    .iter()
+                    .skip(view.diff_scroll as usize)
+                    .take(inner.height as usize);
+                Paragraph::new(Text::from(lines.cloned().collect::<Vec<_>>()))
+            }
+        },
+    };
+    frame.render_widget(content, inner);
 }
 
 /// "✓ src/app/ main.rs  +3 -1", with the directory muted so the file name stands out.
@@ -371,19 +396,6 @@ fn file_line(file: &ChangedFile, width: usize, paint: Paint) -> Line<'static> {
         Span::from(" ".repeat(padding)),
         paint.span(format!(" +{}", file.additions), theme.success),
         paint.span(format!(" -{}", file.deletions), theme.danger),
-    ])
-}
-
-fn file_summary(file: &ChangedFile, paint: Paint) -> Text<'static> {
-    let theme = paint.theme;
-    let viewed = match file.viewed {
-        ViewedState::Viewed => paint.span("viewed", theme.success),
-        ViewedState::Dismissed => paint.span("changed since you viewed it", theme.warning),
-        ViewedState::Unviewed => paint.span("not viewed", theme.muted),
-    };
-    Text::from(vec![
-        Line::from(paint.bold(format!(" {}", file.path), theme.foreground)),
-        Line::from(vec![Span::from(format!(" {}, ", file.change)), viewed]),
     ])
 }
 
@@ -575,19 +587,34 @@ fn format_duration(duration: chrono::Duration) -> String {
 fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
     let theme = paint.theme;
     let area = frame.area();
-    let width = area.width.saturating_sub(4).min(90);
+    let width = area.width.saturating_sub(4).min(100);
     let box_area = Rect {
         x: area.x + (area.width - width) / 2,
         y: area.y + 2,
         width,
         height: 4,
     };
+    let (title, hint) = match &prompt.kind {
+        PromptKind::OpenLink => (
+            " Open a pull request ".to_string(),
+            "paste a PR link or owner/repo#123, enter to open, esc to cancel".to_string(),
+        ),
+        PromptKind::Workspace => (
+            " Workspace folder ".to_string(),
+            "the folder that holds your clones. enter saves it to the config, esc skips"
+                .to_string(),
+        ),
+        PromptKind::ConfirmClone { pr, dir } => (
+            format!(" Clone {}? ", pr.repo),
+            format!(
+                "no clone in the workspace. y and enter clones it into {}",
+                dir.display()
+            ),
+        ),
+    };
     let hint = match &prompt.error {
         Some(error) => paint.span(error.clone(), theme.danger),
-        None => paint.span(
-            "paste a PR link or owner/repo#123, enter to open, esc to cancel",
-            theme.muted,
-        ),
+        None => paint.span(hint, theme.muted),
     };
     let text = Text::from(vec![
         Line::from(vec![
@@ -600,7 +627,7 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
     let block = Block::new()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(theme.heading))
-        .title(paint.bold(" Open a pull request ", theme.heading))
+        .title(paint.bold(title, theme.heading))
         .style(Style::new().bg(theme.background).fg(theme.foreground));
     frame.render_widget(Clear, box_area);
     frame.render_widget(Paragraph::new(text).block(block), box_area);

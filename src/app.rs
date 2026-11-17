@@ -1,8 +1,14 @@
 //! Screen state and key handling. It does no I/O: keys that need I/O return an `Action`.
 
+use ansi_to_tui::IntoText;
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::text::Text;
 use ratatui::widgets::ListState;
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use crate::repo::LocalRepo;
 
 use crate::model::{ChangedFile, Group, PrDetail, PrRef, PrSummary, ViewedState, parse_pr_ref};
 
@@ -20,7 +26,11 @@ pub enum Action {
     FetchDetail(PrRef),
     OpenBrowser(String),
     RunDiff(PrRef),
-    FetchFiles(PrRef),
+    SetWorkspace(String),
+    CloneRepo {
+        pr: PrRef,
+        dir: PathBuf,
+    },
     SetViewed {
         pr: PrRef,
         pull_request_id: String,
@@ -59,6 +69,55 @@ impl Tab {
     }
 }
 
+/// The user's local clone for the open PR, which the diff panes need.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepoState {
+    /// Not looked for yet; the main loop picks this up.
+    Unknown,
+    /// Looking, cloning, fetching, or waiting on the user. The text says which.
+    Busy(String),
+    Ready(LocalRepo),
+    Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DiffTarget {
+    File(String),
+    Commit(String),
+}
+
+/// One rendered diff: a target drawn by one renderer at one pane width.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DiffKey {
+    pub target: DiffTarget,
+    pub renderer: usize,
+    pub width: u16,
+}
+
+pub enum DiffOutput {
+    Pending,
+    Done(Result<Text<'static>, String>),
+}
+
+/// What the main loop needs to render one diff off the UI thread.
+pub struct DiffJob {
+    pub pr: PrRef,
+    pub key: DiffKey,
+    pub dir: PathBuf,
+    pub base: String,
+    pub head: String,
+    /// One path, or the old and new path of a rename. Empty for a whole commit.
+    pub paths: Vec<String>,
+}
+
+/// What the main loop needs to find or fetch the PR's commits in a local clone.
+pub struct RepoJob {
+    pub pr: PrRef,
+    pub base_ref: String,
+    pub base_oid: String,
+    pub head_oid: String,
+}
+
 pub struct DetailView {
     pub pr: PrRef,
     /// `None` while the request runs.
@@ -73,6 +132,12 @@ pub struct DetailView {
     /// Indexes into the visible files, not into `files`.
     pub file_state: ListState,
     pub hide_viewed: bool,
+    pub repo: RepoState,
+    pub renderer: usize,
+    pub diff_scroll: u16,
+    /// The diff pane's width at the last draw; diffs render to fit it.
+    pub diff_width: u16,
+    pub diffs: HashMap<DiffKey, DiffOutput>,
 }
 
 impl DetailView {
@@ -88,7 +153,41 @@ impl DetailView {
             files_requested: false,
             file_state: ListState::default().with_selected(Some(0)),
             hide_viewed: false,
+            repo: RepoState::Unknown,
+            renderer: 0,
+            diff_scroll: 0,
+            diff_width: 0,
+            diffs: HashMap::new(),
         }
+    }
+
+    /// The diff the pane should show now, or `None` when no diff pane is showing.
+    pub fn current_diff_key(&self) -> Option<DiffKey> {
+        if self.diff_width == 0 {
+            return None;
+        }
+        let target = match self.tab {
+            Tab::Files => DiffTarget::File(
+                self.loaded_files()?
+                    .get(self.selected_file()?)?
+                    .path
+                    .clone(),
+            ),
+            Tab::Commits => {
+                let index = self.commits.selected()?;
+                DiffTarget::Commit(self.loaded()?.commits.get(index)?.oid.clone())
+            }
+            Tab::Overview | Tab::Checks => return None,
+        };
+        Some(DiffKey {
+            target,
+            renderer: self.renderer,
+            width: self.diff_width,
+        })
+    }
+
+    fn scroll_diff(&mut self, delta: i16) {
+        self.diff_scroll = self.diff_scroll.saturating_add_signed(delta);
     }
 
     fn loaded(&self) -> Option<&PrDetail> {
@@ -115,14 +214,9 @@ impl DetailView {
             .copied()
     }
 
-    /// Switches tab, and asks for the file list the first time the Files tab shows.
-    fn show_tab(&mut self, tab: Tab) -> Option<Action> {
+    fn show_tab(&mut self, tab: Tab) {
         self.tab = tab;
-        if tab != Tab::Files || self.files_requested {
-            return None;
-        }
-        self.files_requested = true;
-        Some(Action::FetchFiles(self.pr.clone()))
+        self.diff_scroll = 0;
     }
 
     /// Flips the selected file's Viewed state at once; the caller syncs it to GitHub.
@@ -203,6 +297,7 @@ impl DetailView {
             .saturating_add_signed(delta)
             .min(last);
         state.select(Some(next));
+        self.diff_scroll = 0;
     }
 }
 
@@ -211,9 +306,22 @@ pub enum Screen {
     Detail(Box<DetailView>),
 }
 
-/// The "open a PR link" box.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum PromptKind {
+    #[default]
+    OpenLink,
+    Workspace,
+    /// Asks before cloning the PR's repo into this folder.
+    ConfirmClone {
+        pr: PrRef,
+        dir: PathBuf,
+    },
+}
+
+/// A one-line input box over the current screen.
 #[derive(Debug, Default)]
 pub struct Prompt {
+    pub kind: PromptKind,
     pub text: String,
     pub error: Option<String>,
 }
@@ -226,6 +334,8 @@ pub struct App {
     pub loading: bool,
     pub error: Option<String>,
     pub fetched_at: Option<DateTime<Utc>>,
+    /// Names of the configured diff renderers, in order; `m` cycles through them.
+    pub renderer_names: Vec<String>,
 }
 
 /// Ctrl+L everywhere; Cmd+L only where the terminal reports the Super modifier.
@@ -246,7 +356,121 @@ impl App {
             loading: false,
             error: None,
             fetched_at: None,
+            renderer_names: Vec::new(),
         }
+    }
+
+    fn open_view(&mut self) -> Option<&mut DetailView> {
+        match &mut self.screen {
+            Screen::Detail(view) => Some(view),
+            Screen::Inbox => None,
+        }
+    }
+
+    /// The open PR, when its Files tab shows and its file list was never requested.
+    pub fn take_files_request(&mut self) -> Option<PrRef> {
+        let view = self.open_view()?;
+        if view.tab != Tab::Files || view.files_requested {
+            return None;
+        }
+        view.files_requested = true;
+        Some(view.pr.clone())
+    }
+
+    /// The open PR, when a diff pane needs a local clone that nobody has looked for yet.
+    pub fn take_repo_request(&mut self) -> Option<RepoJob> {
+        if self.prompt.is_some() {
+            return None;
+        }
+        let view = self.open_view()?;
+        if !matches!(view.tab, Tab::Files | Tab::Commits) || view.repo != RepoState::Unknown {
+            return None;
+        }
+        let detail = view.loaded()?;
+        let job = RepoJob {
+            pr: view.pr.clone(),
+            base_ref: detail.base.clone(),
+            base_oid: detail.base_oid.clone(),
+            head_oid: detail.head_oid.clone(),
+        };
+        view.repo = RepoState::Busy("looking for a local clone".to_string());
+        Some(job)
+    }
+
+    /// The diff the pane shows, when it is neither rendered nor being rendered.
+    pub fn take_diff_request(&mut self) -> Option<DiffJob> {
+        let view = self.open_view()?;
+        let RepoState::Ready(repo) = &view.repo else {
+            return None;
+        };
+        let key = view.current_diff_key()?;
+        if view.diffs.contains_key(&key) {
+            return None;
+        }
+        let detail = view.loaded()?;
+        let (base, head, paths) = match &key.target {
+            DiffTarget::File(path) => {
+                let old = repo.renames.get(path).cloned();
+                let paths = old.into_iter().chain([path.clone()]).collect();
+                (detail.base_oid.clone(), detail.head_oid.clone(), paths)
+            }
+            DiffTarget::Commit(oid) => (format!("{oid}~1"), oid.clone(), Vec::new()),
+        };
+        let job = DiffJob {
+            pr: view.pr.clone(),
+            key: key.clone(),
+            dir: repo.dir.clone(),
+            base,
+            head,
+            paths,
+        };
+        view.diffs.insert(key, DiffOutput::Pending);
+        Some(job)
+    }
+
+    pub fn set_repo(&mut self, pr: &PrRef, result: Result<LocalRepo, String>) {
+        if let Some(view) = self.view_for(pr) {
+            view.repo = match result {
+                Ok(repo) => RepoState::Ready(repo),
+                Err(error) => RepoState::Failed(error),
+            };
+        }
+    }
+
+    /// Shows progress or a problem with the clone in the open PR's diff pane.
+    pub fn set_repo_state(&mut self, state: RepoState) {
+        if let Some(view) = self.open_view() {
+            view.repo = state;
+        }
+    }
+
+    /// Converts the renderer's ANSI colors into styled text once, when it arrives.
+    pub fn set_diff(&mut self, pr: &PrRef, key: DiffKey, result: Result<Vec<u8>, String>) {
+        let Some(view) = self.view_for(pr) else {
+            return;
+        };
+        let text = result.and_then(|bytes| {
+            bytes
+                .into_text()
+                .map_err(|error| format!("bad renderer output: {error}"))
+        });
+        view.diffs.insert(key, DiffOutput::Done(text));
+    }
+
+    pub fn ask(&mut self, kind: PromptKind, text: &str) {
+        self.prompt = Some(Prompt {
+            kind,
+            text: text.to_string(),
+            error: None,
+        });
+    }
+
+    pub fn set_prompt_error(&mut self, kind: PromptKind, text: &str, error: String) {
+        self.prompt = Some(Prompt {
+            kind,
+            text: text.to_string(),
+            error: Some(error),
+        });
     }
 
     pub fn rows(&self) -> Vec<Row> {
@@ -351,7 +575,7 @@ impl App {
         }
     }
 
-    /// A paste anywhere opens the link box with the pasted text.
+    /// A paste goes into the open box, or opens the link box when none is open.
     pub fn handle_paste(&mut self, text: &str) {
         let prompt = self.prompt.get_or_insert_with(Prompt::default);
         prompt.text.push_str(text.trim());
@@ -361,6 +585,16 @@ impl App {
     fn prompt_key(&mut self, key: KeyCode) -> Option<Action> {
         let prompt = self.prompt.as_mut()?;
         match key {
+            // Escaping a clone question is the same as answering no.
+            KeyCode::Esc if matches!(prompt.kind, PromptKind::ConfirmClone { .. }) => {
+                prompt.text.clear();
+                return self.submit_prompt();
+            }
+            KeyCode::Esc if prompt.kind == PromptKind::Workspace => {
+                self.prompt = None;
+                let message = "no workspace folder, so no diff here. r asks again.";
+                self.set_repo_state(RepoState::Failed(message.to_string()));
+            }
             KeyCode::Esc => self.prompt = None,
             KeyCode::Backspace => {
                 prompt.text.pop();
@@ -373,12 +607,30 @@ impl App {
     }
 
     fn submit_prompt(&mut self) -> Option<Action> {
-        let prompt = self.prompt.as_mut()?;
+        let prompt = self.prompt.take()?;
+        match prompt.kind {
+            PromptKind::OpenLink => self.submit_link(prompt),
+            PromptKind::Workspace => Some(Action::SetWorkspace(prompt.text.trim().to_string())),
+            PromptKind::ConfirmClone { pr, dir } => self.submit_clone(pr, dir, &prompt.text),
+        }
+    }
+
+    fn submit_clone(&mut self, pr: PrRef, dir: PathBuf, answer: &str) -> Option<Action> {
+        if answer.trim().eq_ignore_ascii_case("y") {
+            return Some(Action::CloneRepo { pr, dir });
+        }
+        let declined =
+            "no local clone, so no diff here. d still opens the whole diff; r asks again.";
+        self.set_repo(&pr, Err(declined.to_string()));
+        None
+    }
+
+    fn submit_link(&mut self, mut prompt: Prompt) -> Option<Action> {
         let Some(pr) = parse_pr_ref(&prompt.text) else {
             prompt.error = Some("not a pull request link or owner/repo#number".to_string());
+            self.prompt = Some(prompt);
             return None;
         };
-        self.prompt = None;
         Some(self.open_pr(pr))
     }
 
@@ -412,20 +664,30 @@ impl App {
     }
 
     fn detail_key(&mut self, key: KeyCode) -> Option<Action> {
+        let renderer_count = self.renderer_names.len().max(1);
         let Screen::Detail(view) = &mut self.screen else {
             return None;
         };
+        let diff_pane = matches!(view.tab, Tab::Files | Tab::Commits);
         match key {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Left => {
                 self.screen = Screen::Inbox;
                 self.error = None;
             }
-            KeyCode::Tab => return view.show_tab(view.tab.shifted(1)),
-            KeyCode::BackTab => return view.show_tab(view.tab.shifted(-1)),
+            KeyCode::Tab => view.show_tab(view.tab.shifted(1)),
+            KeyCode::BackTab => view.show_tab(view.tab.shifted(-1)),
             KeyCode::Char(digit @ '1'..='9') => {
                 let index = digit as usize - '1' as usize;
-                return view.show_tab(Tab::ALL.get(index).copied().unwrap_or(view.tab));
+                view.show_tab(Tab::ALL.get(index).copied().unwrap_or(view.tab));
             }
+            KeyCode::Char('m') if diff_pane => {
+                view.renderer = (view.renderer + 1) % renderer_count;
+                view.diff_scroll = 0;
+            }
+            KeyCode::Char('J') if diff_pane => view.scroll_diff(3),
+            KeyCode::Char('K') if diff_pane => view.scroll_diff(-3),
+            KeyCode::Char(' ') | KeyCode::PageDown if diff_pane => view.scroll_diff(20),
+            KeyCode::Char('b') | KeyCode::PageUp if diff_pane => view.scroll_diff(-20),
             KeyCode::Char('v') if view.tab == Tab::Files => return view.toggle_viewed(),
             KeyCode::Char('H') if view.tab == Tab::Files => {
                 view.hide_viewed = !view.hide_viewed;
@@ -447,15 +709,14 @@ impl App {
         None
     }
 
-    /// Starts the PR over, keeping the tab, and fetches its files again if that tab shows.
+    /// Starts the PR over on the same tab. The file list and the clone are looked up
+    /// again when a tab needs them.
     fn reload(view: &mut DetailView) -> Action {
         let tab = view.tab;
+        let renderer = view.renderer;
         *view = DetailView::new(view.pr.clone());
-        // FetchDetail covers the overview; the Files tab asks again when shown.
         view.tab = tab;
-        if tab == Tab::Files {
-            view.files_requested = false;
-        }
+        view.renderer = renderer;
         Action::FetchDetail(view.pr.clone())
     }
 
@@ -717,10 +978,123 @@ mod tests {
         let mut app = app_with(vec![group("A", &[7], false)]);
         app.list_state.select(Some(1));
         app.handle_key(key(KeyCode::Enter));
-        let first = app.handle_key(key(KeyCode::Char('4')));
-        assert!(matches!(first, Some(Action::FetchFiles(_))));
+        assert!(app.take_files_request().is_none());
+        app.handle_key(key(KeyCode::Char('4')));
+        assert!(app.take_files_request().is_some());
         app.handle_key(key(KeyCode::Char('1')));
-        assert!(app.handle_key(key(KeyCode::Char('4'))).is_none());
+        app.handle_key(key(KeyCode::Char('4')));
+        assert!(app.take_files_request().is_none());
+    }
+
+    #[test]
+    fn reloading_on_the_files_tab_requests_the_list_again() {
+        let (mut app, _) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        app.handle_key(key(KeyCode::Char('r')));
+        assert!(app.take_files_request().is_some());
+    }
+
+    fn ready_repo(app: &mut App, pr: &PrRef) {
+        let renames = HashMap::from([("b.md".to_string(), "old/b.md".to_string())]);
+        app.set_repo(
+            pr,
+            Ok(LocalRepo {
+                dir: PathBuf::from("/clone"),
+                renames,
+            }),
+        );
+        let Screen::Detail(view) = &mut app.screen else {
+            panic!("expected detail screen")
+        };
+        view.diff_width = 80;
+    }
+
+    #[test]
+    fn the_repo_is_requested_once_the_detail_loads() {
+        let (mut app, _) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        let job = app.take_repo_request().expect("repo job");
+        assert_eq!(
+            (job.base_oid.as_str(), job.head_oid.as_str()),
+            ("base000", "head999")
+        );
+        assert!(app.take_repo_request().is_none(), "asked twice");
+    }
+
+    #[test]
+    fn a_renamed_file_diffs_with_both_names() {
+        let (mut app, pr) = files_tab(vec![
+            file("a.md", ViewedState::Unviewed),
+            file("b.md", ViewedState::Unviewed),
+        ]);
+        ready_repo(&mut app, &pr);
+        let first = app.take_diff_request().expect("diff job");
+        assert_eq!(first.paths, ["a.md"]);
+        assert!(
+            app.take_diff_request().is_none(),
+            "the pending diff was requested again"
+        );
+        app.handle_key(key(KeyCode::Char('j')));
+        let second = app.take_diff_request().expect("diff job");
+        assert_eq!(second.paths, ["old/b.md", "b.md"]);
+        assert_eq!(
+            (second.base.as_str(), second.head.as_str()),
+            ("base000", "head999")
+        );
+    }
+
+    #[test]
+    fn m_switches_renderer_and_needs_a_new_diff() {
+        let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        app.renderer_names = vec!["word".to_string(), "delta".to_string()];
+        ready_repo(&mut app, &pr);
+        let first = app.take_diff_request().unwrap();
+        app.set_diff(&pr, first.key, Ok(b"\x1b[32m+added\x1b[0m\n".to_vec()));
+        assert!(app.take_diff_request().is_none());
+        app.handle_key(key(KeyCode::Char('m')));
+        assert_eq!(app.take_diff_request().unwrap().key.renderer, 1);
+        app.handle_key(key(KeyCode::Char('m')));
+        assert!(app.take_diff_request().is_none(), "renderer 0 is cached");
+    }
+
+    #[test]
+    fn a_commit_diffs_against_its_parent() {
+        let (mut app, pr) = files_tab(vec![]);
+        app.handle_key(key(KeyCode::Char('2')));
+        ready_repo(&mut app, &pr);
+        let job = app.take_diff_request().expect("diff job");
+        assert_eq!(
+            (job.base.as_str(), job.head.as_str()),
+            ("aaa111~1", "aaa111")
+        );
+        assert!(job.paths.is_empty());
+    }
+
+    #[test]
+    fn declining_the_clone_leaves_a_message_and_no_action() {
+        let (mut app, pr) = files_tab(vec![]);
+        app.ask(
+            PromptKind::ConfirmClone {
+                pr: pr.clone(),
+                dir: PathBuf::from("/w/app"),
+            },
+            "",
+        );
+        assert!(app.handle_key(key(KeyCode::Esc)).is_none());
+        let Screen::Detail(view) = &app.screen else {
+            panic!("expected detail screen")
+        };
+        assert!(matches!(view.repo, RepoState::Failed(_)));
+        app.ask(
+            PromptKind::ConfirmClone {
+                pr,
+                dir: PathBuf::from("/w/app"),
+            },
+            "",
+        );
+        app.handle_key(key(KeyCode::Char('y')));
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Enter)),
+            Some(Action::CloneRepo { .. })
+        ));
     }
 
     #[test]

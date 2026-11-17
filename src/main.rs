@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod github;
 mod model;
+mod repo;
 mod theme;
 mod ui;
 
@@ -22,9 +23,10 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
-use app::{Action, App};
+use app::{Action, App, DiffJob, DiffKey, PromptKind, RepoJob, RepoState};
 use config::Config;
 use model::{ChangedFile, Group, PrDetail, PrRef};
+use repo::{CloneLookup, LocalRepo};
 
 /// Results from the fetch threads. Errors are strings because they only get displayed.
 enum Message {
@@ -43,6 +45,15 @@ enum Message {
         viewed: bool,
         result: Result<(), String>,
     },
+    Repo {
+        pr: PrRef,
+        result: Result<LocalRepo, String>,
+    },
+    Diff {
+        pr: PrRef,
+        key: DiffKey,
+        result: Result<Vec<u8>, String>,
+    },
 }
 
 enum Input {
@@ -57,6 +68,8 @@ struct Session {
     receiver: Receiver<Message>,
     /// Whether the terminal reports modifiers such as Cmd (kitty keyboard protocol).
     enhanced_keys: bool,
+    /// The PR waiting on the user's answer to "clone it?".
+    pending_clone: Option<RepoJob>,
 }
 
 fn main() -> Result<()> {
@@ -69,8 +82,10 @@ fn main() -> Result<()> {
         sender,
         receiver,
         enhanced_keys: false,
+        pending_clone: None,
     };
     let mut app = App::new();
+    app.renderer_names = renderer_names(&session.config);
     start_inbox_fetch(&session, &mut app);
 
     let mut terminal = ratatui::init();
@@ -108,6 +123,7 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App, session: &mut Session) -> 
     loop {
         terminal.draw(|frame| ui::render(frame, app, &session.config.theme, Utc::now()))?;
         apply_messages(app, &session.receiver);
+        dispatch_requests(app, session);
         let key = match next_input()? {
             None => continue,
             Some(Input::Paste(text)) => {
@@ -153,6 +169,8 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
                 viewed,
                 result,
             } => app.set_viewed_result(&pr, &path, viewed, result),
+            Message::Repo { pr, result } => app.set_repo(&pr, result),
+            Message::Diff { pr, key, result } => app.set_diff(&pr, key, result),
         }
     }
 }
@@ -170,7 +188,18 @@ fn perform(
         Action::FetchDetail(pr) => start_detail_fetch(session, pr),
         Action::OpenBrowser(url) => open_browser(app, &url),
         Action::RunDiff(pr) => run_diff(terminal, app, session, &pr)?,
-        Action::FetchFiles(pr) => start_files_fetch(session, pr),
+        Action::SetWorkspace(text) => set_workspace(app, session, text),
+        Action::CloneRepo { pr, dir } => match session.pending_clone.take() {
+            Some(job) if job.pr == pr => {
+                app.set_repo_state(RepoState::Busy(format!(
+                    "cloning {} into {}",
+                    pr.repo,
+                    dir.display()
+                )));
+                start_repo_fetch(session, job, dir, true);
+            }
+            _ => app.set_repo(&pr, Err("the clone request expired; press r".to_string())),
+        },
         Action::SetViewed {
             pr,
             pull_request_id,
@@ -181,10 +210,147 @@ fn perform(
     Ok(true)
 }
 
+fn renderer_names(config: &Config) -> Vec<String> {
+    config
+        .diff_renderers
+        .iter()
+        .map(|renderer| renderer.name.clone())
+        .collect()
+}
+
+/// Starts whatever the screen now needs: a file list, a local clone, or a diff.
+fn dispatch_requests(app: &mut App, session: &mut Session) {
+    if let Some(pr) = app.take_files_request() {
+        start_files_fetch(session, pr);
+    }
+    if let Some(job) = app.take_repo_request() {
+        prepare_repo(app, session, job);
+    }
+    if let Some(job) = app.take_diff_request() {
+        start_diff(session, job);
+    }
+}
+
+/// Finds the clone in the workspace, asking for the workspace or for a clone first when needed.
+fn prepare_repo(app: &mut App, session: &mut Session, job: RepoJob) {
+    let Some(workspace) = &session.config.workspace_dir else {
+        app.set_repo_state(RepoState::Busy(
+            "waiting for the workspace folder".to_string(),
+        ));
+        app.ask(PromptKind::Workspace, "~/Workspace");
+        return;
+    };
+    let workspace = repo::expand_home(workspace);
+    match repo::find_clone(&workspace, &job.pr.repo) {
+        Ok(CloneLookup::Found(dir)) => {
+            app.set_repo_state(RepoState::Busy(format!(
+                "fetching the PR into {}",
+                dir.display()
+            )));
+            start_repo_fetch(session, job, dir, false);
+        }
+        Ok(CloneLookup::Missing(dir)) => {
+            app.set_repo_state(RepoState::Busy("waiting for your answer".to_string()));
+            app.ask(
+                PromptKind::ConfirmClone {
+                    pr: job.pr.clone(),
+                    dir,
+                },
+                "",
+            );
+            session.pending_clone = Some(job);
+        }
+        Ok(CloneLookup::Conflict { dir, origin }) => {
+            let message = format!(
+                "{} is a clone of {origin}, not {}",
+                dir.display(),
+                job.pr.repo
+            );
+            app.set_repo(&job.pr, Err(message));
+        }
+        Err(error) => app.set_repo(&job.pr, Err(format!("{error:#}"))),
+    }
+}
+
+/// Saves the workspace folder, then lets the open PR look for its clone again.
+fn set_workspace(app: &mut App, session: &mut Session, text: String) {
+    let dir = repo::expand_home(&text);
+    if text.is_empty() || !dir.is_dir() {
+        let error = format!("{} is not a folder", dir.display());
+        app.set_prompt_error(PromptKind::Workspace, &text, error);
+        return;
+    }
+    if let Err(error) = config::append_workspace_dir(&session.config_path, &text) {
+        app.set_prompt_error(PromptKind::Workspace, &text, format!("{error:#}"));
+        return;
+    }
+    session.config.workspace_dir = Some(text);
+    app.set_repo_state(RepoState::Unknown);
+}
+
+fn start_repo_fetch(session: &Session, job: RepoJob, dir: PathBuf, clone_first: bool) {
+    let sender = session.sender.clone();
+    thread::spawn(move || {
+        let result =
+            fetch_local_repo(&job, &dir, clone_first).map_err(|error| format!("{error:#}"));
+        let _ = sender.send(Message::Repo { pr: job.pr, result });
+    });
+}
+
+fn fetch_local_repo(job: &RepoJob, dir: &std::path::Path, clone_first: bool) -> Result<LocalRepo> {
+    if clone_first {
+        repo::clone(&job.pr.repo, dir)?;
+    }
+    repo::fetch_pr(
+        dir,
+        job.pr.number,
+        &job.base_ref,
+        &job.base_oid,
+        &job.head_oid,
+    )?;
+    let renames = repo::renames(dir, &job.base_oid, &job.head_oid)?;
+    Ok(LocalRepo {
+        dir: dir.to_path_buf(),
+        renames,
+    })
+}
+
+fn start_diff(session: &Session, job: DiffJob) {
+    let Some(renderer) = session.config.diff_renderers.get(job.key.renderer) else {
+        return;
+    };
+    let paths: Vec<String> = job
+        .paths
+        .iter()
+        .map(|path| repo::shell_quote(path))
+        .collect();
+    let command = repo::fill_template(
+        &renderer.command,
+        &[
+            ("base", repo::shell_quote(&job.base)),
+            ("head", repo::shell_quote(&job.head)),
+            ("paths", paths.join(" ")),
+            ("width", job.key.width.to_string()),
+        ],
+    );
+    let sender = session.sender.clone();
+    thread::spawn(move || {
+        let result = repo::run_renderer(&job.dir, &command).map_err(|error| format!("{error:#}"));
+        let _ = sender.send(Message::Diff {
+            pr: job.pr,
+            key: job.key,
+            result,
+        });
+    });
+}
+
 /// Reloads the config first, so edits to the groups apply without a restart.
 fn refresh(app: &mut App, session: &mut Session) {
     match config::load_or_init(&session.config_path) {
-        Ok(config) => session.config = config,
+        Ok(config) => {
+            app.renderer_names = renderer_names(&config);
+            session.config = config;
+        }
         Err(error) => {
             app.set_inbox_error(format!("config not reloaded: {error:#}"));
             return;
@@ -264,9 +430,9 @@ fn run_diff(
     let command = session
         .config
         .open_diff
-        .replace("{repo}", &pr.repo)
+        .replace("{repo}", &repo::shell_quote(&pr.repo))
         .replace("{number}", &pr.number.to_string())
-        .replace("{url}", &pr.url());
+        .replace("{url}", &repo::shell_quote(&pr.url()));
     disable_input_modes(session.enhanced_keys)?;
     ratatui::restore();
     let status = Command::new("sh").arg("-c").arg(&command).status();

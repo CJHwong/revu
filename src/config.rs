@@ -16,6 +16,22 @@ theme: dracula
 # Runs when you press d. {repo}, {number} and {url} are replaced.
 open_diff: "gh pr diff {number} -R {repo} | delta"
 
+# The folder that holds your clones, such as ~/Workspace. The Files changed tab asks
+# for it the first time and adds it here.
+# workspace_dir: ~/Workspace
+
+# Diff views for the Files changed and Commits tabs; m switches between them.
+# Each command runs in the repo's clone. {base} and {head} are commits, {paths} is
+# the file (both names for a rename), {width} is the pane width. Values are quoted
+# for the shell, so write {paths}, not "{paths}".
+diff_renderers:
+  - name: word
+    command: git diff --color=always --word-diff=color {base}...{head} -- {paths}
+  - name: delta
+    command: git diff {base}...{head} -- {paths} | delta --paging=never --width={width}
+  - name: difftastic
+    command: GIT_EXTERNAL_DIFF="difft --color=always --width={width}" git diff --ext-diff {base}...{head} -- {paths}
+
 groups:
   - title: Needs your review
     query: user-review-requested:@me
@@ -39,6 +55,34 @@ pub struct Config {
     pub groups: Vec<GroupConfig>,
     #[serde(default = "default_theme", deserialize_with = "theme_from_name")]
     pub theme: Theme,
+    pub workspace_dir: Option<String>,
+    #[serde(default = "default_renderers")]
+    pub diff_renderers: Vec<Renderer>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Renderer {
+    pub name: String,
+    pub command: String,
+}
+
+/// The renderers in DEFAULT_CONFIG, for config files written before the key existed.
+fn default_renderers() -> Vec<Renderer> {
+    parse(DEFAULT_CONFIG)
+        .map(|config| config.diff_renderers)
+        .unwrap_or_default()
+}
+
+/// Appends one line rather than rewriting the file, so the user's comments survive.
+pub fn append_workspace_dir(path: &Path, workspace_dir: &str) -> Result<()> {
+    let mut text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    let quoted = workspace_dir.replace('\\', "\\\\").replace('"', "\\\"");
+    text.push_str(&format!("workspace_dir: \"{quoted}\"\n"));
+    parse(&text).context("the config would no longer parse")?;
+    fs::write(path, text).with_context(|| format!("write {}", path.display()))
 }
 
 fn default_theme() -> Theme {
@@ -106,6 +150,33 @@ mod tests {
         assert_eq!(config.theme, theme::by_name("dracula").unwrap());
         let error = parse("open_diff: x\ngroups: []\ntheme: nope\n").unwrap_err();
         assert!(format!("{error:#}").contains("unknown theme"));
+    }
+
+    #[test]
+    fn missing_renderers_fall_back_to_the_defaults() {
+        let config = parse("open_diff: x\ngroups: []\n").unwrap();
+        let names: Vec<_> = config
+            .diff_renderers
+            .iter()
+            .map(|renderer| renderer.name.as_str())
+            .collect();
+        assert_eq!(names, ["word", "delta", "difftastic"]);
+    }
+
+    #[test]
+    fn appending_the_workspace_keeps_comments_and_parses() {
+        let dir = std::env::temp_dir().join(format!("rs-github-inbox-ws-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.yaml");
+        fs::write(&path, "# keep me\nopen_diff: x\ngroups: []").unwrap();
+        append_workspace_dir(&path, "~/My \"Work\"").unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# keep me\n"));
+        assert_eq!(
+            parse(&text).unwrap().workspace_dir.as_deref(),
+            Some("~/My \"Work\"")
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
