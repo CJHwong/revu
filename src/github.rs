@@ -474,22 +474,48 @@ const NETWORK_ERRORS: &[&str] = &[
     "connection refused",
     "connection reset",
     "TLS handshake timeout",
+    "error connecting to",
 ];
 
-/// Reads what `gh auth status` said when it failed.
-fn classify_auth_failure(said: &str) -> GhProblem {
-    if !NETWORK_ERRORS.iter().any(|marker| said.contains(marker)) {
-        return GhProblem::LoggedOut(said.to_string());
-    }
-    let error = said
+/// The line of gh's output that names a network failure, without gh's prefixes.
+pub fn network_error(said: &str) -> Option<String> {
+    let line = said
         .lines()
         .rev()
-        .find(|line| NETWORK_ERRORS.iter().any(|marker| line.contains(marker)))
-        .unwrap_or(said)
+        .find(|line| NETWORK_ERRORS.iter().any(|marker| line.contains(marker)))?;
+    let line = line
         .trim()
         .trim_start_matches("- ")
         .trim_start_matches("Error: ");
-    GhProblem::Offline(error.to_string())
+    Some(line.to_string())
+}
+
+/// GitHub's rate limits as what to do, in place of gh's text and the raw JSON.
+/// `limit` comes from the same response, so its reset time is the one that applies.
+fn rate_limit_message(said: &str, limit: Option<&RateLimit>) -> Option<String> {
+    let said = said.to_lowercase();
+    if said.contains("secondary rate limit") {
+        return Some(
+            "GitHub's secondary rate limit was hit: too many requests in a short time. Wait a few minutes, then try again."
+                .to_string(),
+        );
+    }
+    if !said.contains("rate limit") {
+        return None;
+    }
+    let reset = limit.map_or(String::new(), |limit| {
+        let at = limit.reset_at.with_timezone(&chrono::Local);
+        format!(" It resets at {}.", at.format("%H:%M"))
+    });
+    Some(format!("GitHub's API limit is used up.{reset}"))
+}
+
+/// Reads what `gh auth status` said when it failed.
+fn classify_auth_failure(said: &str) -> GhProblem {
+    match network_error(said) {
+        Some(error) => GhProblem::Offline(error),
+        None => GhProblem::LoggedOut(said.to_string()),
+    }
 }
 
 /// Asks gh whether it is installed and logged in. It runs only after a fetch fails, so
@@ -524,13 +550,21 @@ fn run_graphql(args: &[String]) -> Result<Value> {
         .context("run gh; is the GitHub CLI installed and on PATH?")?;
     let response = String::from_utf8_lossy(&output.stdout);
     let (headers, stdout) = split_headers(&response);
-    if let Some(limit) = parse_rate_limit(headers)
+    let limit = parse_rate_limit(headers);
+    if let Some(limit) = limit
         && let Ok(mut limits) = RATE_LIMITS.lock()
     {
         record_rate_limit(&mut limits, limit, chrono::Utc::now());
     }
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let said = format!("{stderr}\n{stdout}");
+        if let Some(message) = rate_limit_message(&said, limit.as_ref()) {
+            bail!("{message}");
+        }
+        if let Some(error) = network_error(&stderr) {
+            bail!("{error}");
+        }
         bail!(
             "gh api graphql failed ({}): {} {}",
             output.status,
@@ -540,6 +574,9 @@ fn run_graphql(args: &[String]) -> Result<Value> {
     }
     let response: Value = serde_json::from_str(stdout).context("gh returned invalid JSON")?;
     if let Some(errors) = response.get("errors") {
+        if let Some(message) = rate_limit_message(&errors.to_string(), limit.as_ref()) {
+            bail!("{message}");
+        }
         bail!("GitHub GraphQL errors: {errors}");
     }
     response
@@ -551,6 +588,41 @@ fn run_graphql(args: &[String]) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rate_limits_read_as_what_to_do() {
+        let limit = RateLimit {
+            remaining: 0,
+            limit: 5000,
+            reset_at: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+        };
+        let at = limit.reset_at.with_timezone(&chrono::Local).format("%H:%M");
+        assert_eq!(
+            rate_limit_message(
+                "gh: API rate limit already exceeded for user ID 1.",
+                Some(&limit)
+            ),
+            Some(format!("GitHub's API limit is used up. It resets at {at}."))
+        );
+        assert!(
+            rate_limit_message("You have exceeded a secondary rate limit.", Some(&limit))
+                .unwrap()
+                .contains("Wait a few minutes")
+        );
+        assert_eq!(
+            rate_limit_message("Could not resolve to a PullRequest", None),
+            None
+        );
+    }
+
+    #[test]
+    fn a_fetch_error_names_its_network_failure() {
+        assert_eq!(
+            network_error("Post \"https://api.github.com/graphql\": proxyconnect tcp: dial tcp 10.0.0.1:9: i/o timeout").as_deref(),
+            Some("Post \"https://api.github.com/graphql\": proxyconnect tcp: dial tcp 10.0.0.1:9: i/o timeout")
+        );
+        assert_eq!(network_error("HTTP 502: Bad Gateway"), None);
+    }
 
     #[test]
     fn a_network_failure_is_not_read_as_a_bad_login() {
