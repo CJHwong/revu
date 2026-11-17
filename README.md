@@ -4,7 +4,8 @@ A terminal version of GitHub's pull request inbox. It shows the pull requests yo
 
 ## Requirements
 
-- The GitHub CLI (`gh`), logged in. The tool calls `gh api graphql` and stores no token of its own. When gh is missing or logged out, the app says so in place of the inbox, with the command that fixes it; `r` checks again.
+- The GitHub CLI (`gh`), logged in. The tool calls `gh api graphql` and stores no token of its own. When any GitHub call fails, the app asks gh why. If gh is missing, logged out, or cannot reach GitHub, a full screen says which, with the command or the network error, from the inbox or from a PR; `r` checks again. Any other failure that empties every inbox group, such as the rate limit or a GitHub outage, shows GitHub's error in place of the groups.
+- git. Without it, diffs, find and `s` say git is missing and how to install it.
 - Rust, to build it.
 
 ## Install

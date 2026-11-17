@@ -510,6 +510,14 @@ fn perform(
 /// warning the diff footer shows once.
 fn check_renderers(config: &Config, app: &mut App) {
     app.missing_renderers.clear();
+    // Every renderer runs git, so without it the warning is about git alone.
+    if !repo::on_path("git") {
+        app.notice = Some(format!(
+            "git is not installed, so diffs, find and search cannot run. To add it: {}",
+            repo::GIT_INSTALL
+        ));
+        return;
+    }
     let mut missing = Vec::new();
     let mut installs = Vec::new();
     for (index, renderer) in config.diff_renderers.iter().enumerate() {
@@ -790,10 +798,8 @@ fn start_inbox_fetch(session: &Session, app: &mut App) {
         thread::spawn(move || {
             let result =
                 github::fetch_group(&group, updated_since).map_err(|error| format!("{error:#}"));
-            if result.is_err()
-                && let Some(problem) = github::gh_problem()
-            {
-                let _ = sender.send(Message::GhProblem(problem));
+            if result.is_err() {
+                report_gh_problem(&sender);
             }
             // The receiver only goes away when the app exits, so a failed send needs no handling.
             let _ = sender.send(Message::Group {
@@ -806,12 +812,24 @@ fn start_inbox_fetch(session: &Session, app: &mut App) {
     }
 }
 
+/// After a GitHub call fails, asks gh why. A missing gh, a lost login or no network
+/// takes the whole screen, since nothing else can load until it is fixed; any other
+/// failure stays where it happened.
+fn report_gh_problem(sender: &Sender<Message>) {
+    if let Some(problem) = github::gh_problem() {
+        let _ = sender.send(Message::GhProblem(problem));
+    }
+}
+
 fn start_activity_fetch(session: &Session, pr: PrRef) {
     let sender = session.sender.clone();
     thread::spawn(move || {
         let result = github::fetch_activity(&pr.repo, pr.number)
             .map(Box::new)
             .map_err(|error| format!("{error:#}"));
+        if result.is_err() {
+            report_gh_problem(&sender);
+        }
         let _ = sender.send(Message::Activity { pr, result });
     });
 }
@@ -822,6 +840,9 @@ fn start_detail_fetch(session: &Session, pr: PrRef) {
         let result = github::fetch_detail(&pr.repo, pr.number)
             .map(Box::new)
             .map_err(|error| format!("{error:#}"));
+        if result.is_err() {
+            report_gh_problem(&sender);
+        }
         let _ = sender.send(Message::Detail { pr, result });
     });
 }
@@ -838,6 +859,9 @@ fn start_files_fetch(session: &Session, pr: PrRef) {
         };
         let result = github::fetch_files(&pr.repo, pr.number, progress)
             .map_err(|error| format!("{error:#}"));
+        if result.is_err() {
+            report_gh_problem(&sender);
+        }
         let _ = sender.send(Message::Files { pr, result });
     });
 }

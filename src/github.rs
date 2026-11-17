@@ -446,6 +446,13 @@ fn split_repo(repo: &str) -> Result<(&str, &str)> {
         .with_context(|| format!("repo \"{repo}\" is not owner/name"))
 }
 
+/// How to install gh here, for the gh screen.
+pub const GH_INSTALL: &str = if cfg!(target_os = "macos") {
+    "brew install gh"
+} else {
+    "see https://cli.github.com for your system's package"
+};
+
 /// Why gh cannot reach GitHub.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GhProblem {
@@ -453,6 +460,36 @@ pub enum GhProblem {
     Missing,
     /// gh runs but has no working login; holds what gh said.
     LoggedOut(String),
+    /// gh cannot reach GitHub; holds the network error gh hit.
+    Offline(String),
+}
+
+/// What gh prints when the network, not the login, failed. gh then also calls the
+/// token invalid, so these words decide which one it is.
+const NETWORK_ERRORS: &[&str] = &[
+    "dial tcp",
+    "no such host",
+    "i/o timeout",
+    "network is unreachable",
+    "connection refused",
+    "connection reset",
+    "TLS handshake timeout",
+];
+
+/// Reads what `gh auth status` said when it failed.
+fn classify_auth_failure(said: &str) -> GhProblem {
+    if !NETWORK_ERRORS.iter().any(|marker| said.contains(marker)) {
+        return GhProblem::LoggedOut(said.to_string());
+    }
+    let error = said
+        .lines()
+        .rev()
+        .find(|line| NETWORK_ERRORS.iter().any(|marker| line.contains(marker)))
+        .unwrap_or(said)
+        .trim()
+        .trim_start_matches("- ")
+        .trim_start_matches("Error: ");
+    GhProblem::Offline(error.to_string())
 }
 
 /// Asks gh whether it is installed and logged in. It runs only after a fetch fails, so
@@ -474,7 +511,7 @@ pub fn gh_problem() -> Option<GhProblem> {
         .map(|bytes| String::from_utf8_lossy(bytes).trim().to_string())
         .find(|text| !text.is_empty())
         .unwrap_or_default();
-    Some(GhProblem::LoggedOut(said))
+    Some(classify_auth_failure(&said))
 }
 
 /// Returns the GraphQL `data` object. A GraphQL error fails the call even when gh exits 0.
@@ -514,6 +551,22 @@ fn run_graphql(args: &[String]) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_network_failure_is_not_read_as_a_bad_login() {
+        let offline = "github.com\n  X Failed to log in to github.com account someone (keyring)\n  - The token in keyring is invalid.\n  - Error: Get \"https://api.github.com/\": proxyconnect tcp: dial tcp 127.0.0.1:9: connect: connection refused";
+        assert_eq!(
+            classify_auth_failure(offline),
+            GhProblem::Offline(
+                "Get \"https://api.github.com/\": proxyconnect tcp: dial tcp 127.0.0.1:9: connect: connection refused".to_string()
+            )
+        );
+        let logged_out = "You are not logged into any GitHub hosts. To log in, run: gh auth login";
+        assert_eq!(
+            classify_auth_failure(logged_out),
+            GhProblem::LoggedOut(logged_out.to_string())
+        );
+    }
 
     #[test]
     fn the_budget_shown_never_flips_between_githubs_two_counters() {

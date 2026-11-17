@@ -264,6 +264,14 @@ fn render_inbox(frame: &mut Frame, app: &mut App, paint: Paint) {
     .areas(frame.area());
     frame.render_widget(Paragraph::new(inbox_status(app, paint)), top);
 
+    if let Some(errors) = app.inbox_failure() {
+        render_inbox_failure(frame, &errors, body, paint);
+        frame.render_widget(
+            Paragraph::new(hints_line(INBOX_HINTS, usize::from(bottom.width), paint)),
+            bottom,
+        );
+        return;
+    }
     let row_width = body.width.saturating_sub(2) as usize;
     let selected = app.list_state.selected();
     let items: Vec<ListItem> = app
@@ -294,7 +302,8 @@ fn inbox_status(app: &App, paint: Paint) -> Line<'static> {
             theme.muted,
         ));
     }
-    if let Some(error) = &app.error {
+    // An inbox where every group failed shows the error in full below.
+    if let Some(error) = app.error.as_ref().filter(|_| app.inbox_failure().is_none()) {
         spans.push(paint.span(format!(" {error}"), theme.danger));
     }
     Line::from(spans)
@@ -1134,6 +1143,30 @@ fn status_span(
     notice.map(|text| paint.span(format!("! {text}"), theme.warning))
 }
 
+/// Every group failed for a reason other than gh, such as the rate limit or GitHub
+/// itself, so the error takes the inbox's place in full.
+fn render_inbox_failure(frame: &mut Frame, errors: &[String], area: Rect, paint: Paint) {
+    let theme = paint.theme;
+    let mut lines = vec![
+        Line::from(paint.bold("The inbox could not load. GitHub said:", theme.danger)),
+        Line::default(),
+    ];
+    for error in errors {
+        lines.extend(
+            error
+                .lines()
+                .map(|line| Line::from(paint.span(line.to_string(), theme.foreground))),
+        );
+        lines.push(Line::default());
+    }
+    lines.push(Line::from(paint.span("r tries again", theme.muted)));
+    let area = area.inner(Margin {
+        horizontal: 2,
+        vertical: 1,
+    });
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+}
+
 /// Without a working gh the app can fetch nothing, so the whole screen says what is
 /// wrong and the command that fixes it, instead of an inbox of empty groups.
 fn render_gh_problem(
@@ -1152,7 +1185,7 @@ fn render_gh_problem(
                 plain("This app reads GitHub through the gh command, and gh is not on PATH."),
                 plain(""),
                 plain("Install it, then log in:"),
-                command("brew install gh"),
+                command(crate::github::GH_INSTALL),
                 command("gh auth login"),
             ],
         ),
@@ -1172,6 +1205,16 @@ fn render_gh_problem(
             ]);
             (" The GitHub CLI is not logged in ", lines)
         }
+        GhProblem::Offline(error) => (
+            " Cannot reach GitHub ",
+            vec![
+                plain("gh could not connect to GitHub, so nothing can load. gh hit:"),
+                plain(""),
+                Line::from(paint.span(format!("  {error}"), theme.muted)),
+                plain(""),
+                plain("Check the network, a VPN or a proxy (HTTPS_PROXY), then press r."),
+            ],
+        ),
     };
     // The time changes on every r, so a retry that fails again still shows it ran.
     let checked = checked_at.map_or(String::new(), |at| {
@@ -1192,7 +1235,13 @@ fn render_gh_problem(
         .unwrap_or(0)
         .saturating_add(4)
         .min(usize::from(area.width)) as u16;
-    let height = (lines.len() as u16 + 2).min(area.height);
+    // A line wider than the screen wraps, and each wrapped row needs room.
+    let inner = usize::from(width.saturating_sub(2)).max(1);
+    let rows: usize = lines
+        .iter()
+        .map(|line| line.width().div_ceil(inner).max(1))
+        .sum();
+    let height = (rows as u16 + 2).min(area.height);
     let popup = Rect {
         x: area.x + (area.width - width) / 2,
         y: area.y + (area.height - height) / 2,

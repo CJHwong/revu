@@ -498,7 +498,7 @@ impl DetailView {
     /// c on Files changed: comment mode for the selected file.
     fn start_line_mode(&mut self) -> Result<Action, String> {
         let RepoState::Ready(repo) = &self.repo else {
-            return Err("the local clone is not ready yet".to_string());
+            return Err(self.clone_not_ready("the local clone is not ready yet"));
         };
         let detail = self.loaded().ok_or("the pull request is still loading")?;
         let key = self.current_diff_key().ok_or("select a file first")?;
@@ -516,9 +516,24 @@ impl DetailView {
         Ok(Action::LineDiff(job))
     }
 
+    /// Why the clone cannot be used: the lookup's own error when it failed, git missing
+    /// before it ever ran, or else `waiting`.
+    fn clone_not_ready(&self, waiting: &str) -> String {
+        match &self.repo {
+            RepoState::Failed(error) => error.clone(),
+            _ if !crate::repo::on_path("git") => format!(
+                "git is not installed, so diffs, find and search cannot run. To add it: {}",
+                crate::repo::GIT_INSTALL
+            ),
+            _ => waiting.to_string(),
+        }
+    }
+
     fn head_in_clone(&self) -> Result<(PathBuf, String), String> {
         let RepoState::Ready(repo) = &self.repo else {
-            return Err("the local clone is not ready; open Files changed first".to_string());
+            return Err(
+                self.clone_not_ready("the local clone is not ready; open Files changed first")
+            );
         };
         let detail = self.loaded().ok_or("the pull request is still loading")?;
         Ok((repo.dir.clone(), detail.head_oid.clone()))
@@ -565,7 +580,7 @@ impl DetailView {
     /// it across the whole screen.
     fn open_whole_diff(&mut self) -> Result<Action, String> {
         let RepoState::Ready(repo) = &self.repo else {
-            return Err("the local clone is not ready yet".to_string());
+            return Err(self.clone_not_ready("the local clone is not ready yet"));
         };
         let mut key = self.current_diff_key().ok_or("select a file first")?;
         let DiffTarget::File(path) = &key.target else {
@@ -1640,6 +1655,8 @@ pub struct App {
     pub gh_problem: Option<crate::github::GhProblem>,
     /// When gh was last found broken, so r shows that it checked again.
     pub gh_checked_at: Option<DateTime<Utc>>,
+    /// Each group's error from the latest fetch.
+    group_errors: Vec<Option<String>>,
     /// A write to GitHub is running; the footer says what it saves.
     pub saving: Option<SaveNote>,
     /// The last write succeeded; the footer says so until the next key.
@@ -1692,6 +1709,7 @@ impl App {
             notice_seen: false,
             gh_problem: None,
             gh_checked_at: None,
+            group_errors: Vec::new(),
             saving: None,
             saved: None,
             reload_after_write: None,
@@ -1952,11 +1970,31 @@ impl App {
         });
         self.groups = groups.collect();
         self.group_loading = vec![true; configs.len()];
+        self.group_errors = vec![None; configs.len()];
         self.loading = !configs.is_empty();
         self.error = None;
         self.clamp_selection();
         self.inbox_generation += 1;
         self.inbox_generation
+    }
+
+    /// The errors, without repeats, when every group failed and none has rows from
+    /// before; an inbox of empty groups would read as nothing to review.
+    pub fn inbox_failure(&self) -> Option<Vec<String>> {
+        let all_failed = !self.loading
+            && !self.group_errors.is_empty()
+            && self.group_errors.iter().all(Option::is_some)
+            && self.groups.iter().all(|group| group.prs.is_empty());
+        if !all_failed {
+            return None;
+        }
+        let mut errors: Vec<String> = Vec::new();
+        for error in self.group_errors.iter().flatten() {
+            if !errors.contains(error) {
+                errors.push(error.clone());
+            }
+        }
+        Some(errors)
     }
 
     /// Fills one group. A result from an older fetch is dropped. The selection stays
@@ -1979,7 +2017,10 @@ impl App {
                 group.collapsed = self.groups[index].collapsed;
                 self.groups[index] = group;
             }
-            Err(error) => self.error = Some(format!("{}: {error}", self.groups[index].title)),
+            Err(error) => {
+                self.error = Some(format!("{}: {error}", self.groups[index].title));
+                self.group_errors[index] = Some(error);
+            }
         }
         if !self.group_loading.contains(&true) {
             self.loading = false;
@@ -3551,6 +3592,33 @@ mod tests {
         assert_eq!(app.kept_renderer(0).as_deref(), Some("difftastic"));
         app.missing_renderers.clear();
         assert_eq!(app.kept_renderer(0).as_deref(), Some("word"));
+    }
+
+    #[test]
+    fn an_inbox_where_every_group_failed_shows_the_error_not_empty_groups() {
+        let configs: Vec<GroupConfig> = ["A", "B"]
+            .map(|title| GroupConfig {
+                title: title.to_string(),
+                query: String::new(),
+                collapsed: false,
+            })
+            .to_vec();
+        let mut app = App::new();
+        let generation = app.start_inbox(&configs);
+        let limit = "API rate limit exceeded".to_string();
+        app.set_group(generation, 0, Err(limit.clone()), Utc::now());
+        assert!(app.inbox_failure().is_none(), "B is still loading");
+        app.set_group(generation, 1, Err(limit.clone()), Utc::now());
+        assert_eq!(
+            app.inbox_failure(),
+            Some(vec![limit.clone()]),
+            "one copy of a shared error"
+        );
+
+        let generation = app.start_inbox(&configs);
+        app.set_group(generation, 0, Ok(group("A", &[1], false)), Utc::now());
+        app.set_group(generation, 1, Err(limit), Utc::now());
+        assert!(app.inbox_failure().is_none(), "one group loaded");
     }
 
     #[test]

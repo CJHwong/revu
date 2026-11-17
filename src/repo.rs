@@ -75,6 +75,10 @@ fn is_clone_of(dir: &Path, repo: &str) -> bool {
 /// Tries `<workspace>/<name>` first, then every folder directly inside the workspace,
 /// because a clone's folder name does not always match its repo name.
 pub fn find_clone(workspace: &Path, repo: &str) -> Result<CloneLookup> {
+    // Without git every folder would look like a clone of nothing, and a clone fails.
+    if !on_path("git") {
+        bail!("git is not installed, so no diff can show. To add it: {GIT_INSTALL}");
+    }
     let name = repo.split_once('/').map_or(repo, |(_, name)| name);
     let named = workspace.join(name);
     if named.exists() && is_clone_of(&named, repo) {
@@ -203,7 +207,7 @@ pub fn grep(dir: &Path, commit: &str, query: &str) -> Result<Vec<GrepHit>> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .context("run git grep")?;
+        .map_err(|error| git_spawn_error(error, "git grep"))?;
     let stdout = child.stdout.take().context("read git grep output")?;
     let prefix = format!("{commit}:");
     let mut hits = Vec::new();
@@ -325,6 +329,23 @@ pub fn fill_template(template: &str, values: &[(&str, String)]) -> String {
 /// Runs a renderer command inside the clone and returns its colored output. With
 /// `whole_file`, git and difftastic show the whole file around the changes, so the
 /// renderer draws the full file with its changes marked.
+/// How to install git here, for the warnings.
+pub const GIT_INSTALL: &str = if cfg!(target_os = "macos") {
+    "xcode-select --install"
+} else {
+    "your package manager, such as apt install git"
+};
+
+/// A git that would not start says why: git missing has its own words.
+fn git_spawn_error(error: std::io::Error, what: &str) -> anyhow::Error {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => {
+            anyhow::anyhow!("git is not installed, so {what} cannot run. To add it: {GIT_INSTALL}")
+        }
+        _ => anyhow::Error::new(error).context(format!("run {what}")),
+    }
+}
+
 /// True when `program` is an executable file in one of PATH's folders.
 pub fn on_path(program: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -365,8 +386,13 @@ pub fn run_renderer(dir: &Path, command: &str, whole_file: bool, width: u16) -> 
         return Ok(output.stdout);
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
-    if let Some(program) = missing_program(&stderr) {
-        bail!("{program} {NOT_INSTALLED}, so this renderer cannot run. m switches to another one.");
+    match missing_program(&stderr) {
+        // Every renderer needs git, so m has nothing to switch to.
+        Some("git") => bail!("git is not installed, so no diff can show. To add it: {GIT_INSTALL}"),
+        Some(program) => bail!(
+            "{program} {NOT_INSTALLED}, so this renderer cannot run. m switches to another one."
+        ),
+        None => {}
     }
     let lines: Vec<&str> = stderr
         .lines()
@@ -496,7 +522,7 @@ fn git(dir: &Path, args: &[&str]) -> Result<Output> {
         .arg(dir)
         .args(args)
         .output()
-        .with_context(|| format!("run git {}", args.first().unwrap_or(&"")))
+        .map_err(|error| git_spawn_error(error, &format!("git {}", args.first().unwrap_or(&""))))
 }
 
 fn ensure_success(output: &Output, what: &str) -> Result<()> {
