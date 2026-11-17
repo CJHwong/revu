@@ -9,8 +9,8 @@ use ratatui::widgets::{
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::{
-    App, DetailView, DiffOutput, Overlay, OverviewLayout, Prompt, PromptKind, RepoState, Row,
-    Screen, Tab,
+    App, Click, ClickTarget, DetailView, DiffOutput, Overlay, OverviewLayout, Prompt, PromptKind,
+    RepoState, Row, Screen, Tab,
 };
 use crate::file_tree::FileRow;
 use crate::model::{
@@ -46,6 +46,10 @@ impl Paint<'_> {
 pub fn render(frame: &mut Frame, app: &mut App, theme: &Theme, now: DateTime<Utc>) {
     let paint = Paint { theme, now };
     let base = Style::new().bg(theme.background).fg(theme.foreground);
+    app.inbox_clicks.clear();
+    if let Screen::Detail(view) = &mut app.screen {
+        view.clicks.clear();
+    }
     frame.render_widget(Block::new().style(base), frame.area());
     if let Screen::Detail(view) = &mut app.screen {
         render_detail(
@@ -85,8 +89,10 @@ fn render_inbox(frame: &mut Frame, app: &mut App, paint: Paint) {
         .enumerate()
         .map(|(index, row)| row_item(app, row, row_width, selected == Some(index), paint))
         .collect();
+    let heights: Vec<usize> = items.iter().map(ListItem::height).collect();
     let list = List::new(items).highlight_style(Style::new().bg(paint.theme.selection));
     frame.render_stateful_widget(list, body, &mut app.list_state);
+    app.inbox_clicks = list_targets(body, &heights, app.list_state.offset());
 
     frame.render_widget(
         Paragraph::new(paint.span(INBOX_HELP, paint.theme.muted)),
@@ -406,14 +412,19 @@ fn render_detail(
     ];
     frame.render_widget(Paragraph::new(tab_lines), tabs);
     view.body_width = body.width;
+    view.clicks.extend(tab_targets(detail, tabs, paint));
     if let Some(overlay) = view.overlays.last_mut() {
-        render_overlay(frame, overlay, body, paint);
+        let targets = render_overlay(frame, overlay, body, paint);
+        view.clicks.extend(targets);
         return;
     }
     match view.tab {
         Tab::Overview => render_overview(frame, view, body, paint),
         Tab::Checks => match &view.activity {
-            Some(Ok(activity)) => render_checks(frame, activity, &mut view.checks, body, paint),
+            Some(Ok(activity)) => {
+                let targets = render_checks(frame, activity, &mut view.checks, body, paint);
+                view.clicks.extend(targets);
+            }
             other => render_activity_state(frame, other.as_ref(), body, paint),
         },
         Tab::Commits => {
@@ -426,7 +437,7 @@ fn render_detail(
                 render_activity_state(frame, view.activity.as_ref(), list_area, paint);
                 return;
             };
-            render_commits(
+            let targets = render_commits(
                 frame,
                 activity,
                 detail.commit_count,
@@ -434,6 +445,7 @@ fn render_detail(
                 list_area,
                 paint,
             );
+            view.clicks.extend(targets);
             let commit = view
                 .commits
                 .selected()
@@ -468,7 +480,13 @@ fn overlay_help(overlay: Option<&Overlay>) -> Option<&'static str> {
     }
 }
 
-fn render_overlay(frame: &mut Frame, overlay: &mut Overlay, area: Rect, paint: Paint) {
+/// Returns what a click can hit: the search hits.
+fn render_overlay(
+    frame: &mut Frame,
+    overlay: &mut Overlay,
+    area: Rect,
+    paint: Paint,
+) -> Vec<ClickTarget> {
     let theme = paint.theme;
     let width = area.width as usize;
     match overlay {
@@ -481,10 +499,14 @@ fn render_overlay(frame: &mut Frame, overlay: &mut Overlay, area: Rect, paint: P
                     grep_items(hits, width, paint),
                 ),
             };
+            let heights: Vec<usize> = items.iter().map(ListItem::height).collect();
+            let block = Block::new().title(paint.bold(title, theme.heading));
+            let inner = block.inner(area);
             let list = List::new(items)
                 .highlight_style(Style::new().bg(theme.selection))
-                .block(Block::new().title(paint.bold(title, theme.heading)));
+                .block(block);
             frame.render_stateful_widget(list, area, state);
+            return list_targets(inner, &heights, state.offset());
         }
         Overlay::File {
             path,
@@ -512,6 +534,7 @@ fn render_overlay(frame: &mut Frame, overlay: &mut Overlay, area: Rect, paint: P
             frame.render_widget(Paragraph::new(text), inner);
         }
     }
+    Vec::new()
 }
 
 fn search_title(query: &str, count: usize) -> String {
@@ -591,10 +614,15 @@ fn render_file_list(frame: &mut Frame, view: &mut DetailView, area: Rect, paint:
         .iter()
         .map(|row| ListItem::new(file_row_line(row, files, view.tree_view, width, paint)))
         .collect();
+    let heights: Vec<usize> = items.iter().map(ListItem::height).collect();
+    let block = Block::new().title(paint.span(title, theme.heading));
+    let inner = block.inner(area);
     let list = List::new(items)
         .highlight_style(Style::new().bg(theme.selection))
-        .block(Block::new().title(paint.span(title, theme.heading)));
+        .block(block);
     frame.render_stateful_widget(list, area, &mut view.file_state);
+    view.clicks
+        .extend(list_targets(inner, &heights, view.file_state.offset()));
     true
 }
 
@@ -854,6 +882,46 @@ fn tab_badge(tab: Tab, detail: &PrDetail, paint: Paint) -> Vec<Span<'static>> {
     }
 }
 
+/// One target per visible list item, from the list's scroll offset and item heights.
+fn list_targets(area: Rect, heights: &[usize], offset: usize) -> Vec<ClickTarget> {
+    let mut targets = Vec::new();
+    let mut top = area.y;
+    for (index, height) in heights.iter().enumerate().skip(offset) {
+        if top >= area.bottom() {
+            break;
+        }
+        let height = (*height as u16).min(area.bottom() - top);
+        let item = Rect::new(area.x, top, area.width, height);
+        targets.push(ClickTarget {
+            area: item,
+            click: Click::Row(index),
+        });
+        top += height;
+    }
+    targets
+}
+
+/// One target per tab label, at the same widths the bar draws.
+fn tab_targets(detail: &PrDetail, area: Rect, paint: Paint) -> Vec<ClickTarget> {
+    let mut left = area.x;
+    let mut targets = Vec::new();
+    for tab in Tab::ALL {
+        let width = tab_bar_width(tab, detail, paint) as u16;
+        let label = Rect::new(
+            left,
+            area.y,
+            width.min(area.right().saturating_sub(left)),
+            1,
+        );
+        targets.push(ClickTarget {
+            area: label,
+            click: Click::Tab(tab),
+        });
+        left += width;
+    }
+    targets
+}
+
 /// A thin rule with a thick bar under the current tab, like GitHub's underline.
 fn tab_rule(current: Tab, detail: &PrDetail, width: u16, paint: Paint) -> Line<'static> {
     let theme = paint.theme;
@@ -911,6 +979,7 @@ fn render_overview(frame: &mut Frame, view: &mut DetailView, area: Rect, paint: 
         cursor,
         scroll,
         page,
+        clicks,
         ..
     } = view
     else {
@@ -953,6 +1022,10 @@ fn render_overview(frame: &mut Frame, view: &mut DetailView, area: Rect, paint: 
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), main);
+    clicks.push(ClickTarget {
+        area: main,
+        click: Click::Page { first: *scroll },
+    });
     if sidebar_width > 0 {
         render_sidebar(frame, detail, sidebar, paint);
     }
@@ -1005,7 +1078,7 @@ fn render_commits(
     state: &mut ListState,
     area: Rect,
     paint: Paint,
-) {
+) -> Vec<ClickTarget> {
     let theme = paint.theme;
     let selected = state.selected();
     let items: Vec<ListItem> = activity
@@ -1035,16 +1108,21 @@ fn render_commits(
             ListItem::new(Text::from(vec![first, Line::from(second)]))
         })
         .collect();
+    let heights: Vec<usize> = items.iter().map(ListItem::height).collect();
     let mut list = List::new(items).highlight_style(Style::new().bg(theme.selection));
+    let mut inner = area;
     if commit_count > activity.commits.len() as u64 {
         let title = format!(
             " first {} of {} commits ",
             activity.commits.len(),
             commit_count
         );
-        list = list.block(Block::new().title(paint.span(title, theme.warning)));
+        let block = Block::new().title(paint.span(title, theme.warning));
+        inner = block.inner(area);
+        list = list.block(block);
     }
     frame.render_stateful_widget(list, area, state);
+    list_targets(inner, &heights, state.offset())
 }
 
 /// The selected commit's whole message above its diff. It takes at most a third of the
@@ -1097,14 +1175,14 @@ fn render_checks(
     state: &mut ListState,
     area: Rect,
     paint: Paint,
-) {
+) -> Vec<ClickTarget> {
     let theme = paint.theme;
     if activity.checks.is_empty() {
         frame.render_widget(
             Paragraph::new(paint.span(" No checks ran on the head commit.", theme.muted)),
             area,
         );
-        return;
+        return Vec::new();
     }
     let selected = state.selected();
     let items: Vec<ListItem> = activity
@@ -1124,8 +1202,10 @@ fn render_checks(
             ]))
         })
         .collect();
+    let heights: Vec<usize> = items.iter().map(ListItem::height).collect();
     let list = List::new(items).highlight_style(Style::new().bg(theme.selection));
     frame.render_stateful_widget(list, area, state);
+    list_targets(area, &heights, state.offset())
 }
 
 /// "CI, took 2m 30s" for a finished check run; status contexts have no workflow.

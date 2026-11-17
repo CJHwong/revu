@@ -13,8 +13,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Local, Utc};
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseEventKind,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseButton,
+    MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::supports_keyboard_enhancement;
@@ -83,6 +83,8 @@ enum Input {
     Paste(String),
     /// A mouse wheel tick: the pointer's column, and +1 down or -1 up.
     Scroll(u16, isize),
+    /// A left click at a column and row.
+    Click(u16, u16),
 }
 
 struct Session {
@@ -159,6 +161,15 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App, session: &mut Session) -> 
                 app.handle_scroll(column, delta);
                 continue;
             }
+            Some(Input::Click(column, row)) => {
+                let Some(action) = app.handle_click(column, row) else {
+                    continue;
+                };
+                if !perform(action, terminal, app, session)? {
+                    return Ok(());
+                }
+                continue;
+            }
             Some(Input::Key(key)) => key,
         };
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -184,6 +195,7 @@ fn next_input() -> Result<Option<Input>> {
         Event::Mouse(mouse) => Ok(match mouse.kind {
             MouseEventKind::ScrollDown => Some(Input::Scroll(mouse.column, 1)),
             MouseEventKind::ScrollUp => Some(Input::Scroll(mouse.column, -1)),
+            MouseEventKind::Down(MouseButton::Left) => Some(Input::Click(mouse.column, mouse.row)),
             _ => None,
         }),
         _ => Ok(None),

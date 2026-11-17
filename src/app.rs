@@ -120,6 +120,24 @@ pub enum DiffOutput {
     Done(Result<Text<'static>, String>),
 }
 
+/// A screen region the last draw put something clickable in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClickTarget {
+    pub area: ratatui::layout::Rect,
+    pub click: Click,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Click {
+    /// An item of the list on screen: inbox rows, files, commits, checks or search hits.
+    Row(usize),
+    Tab(Tab),
+    /// The Overview page; `first` is the page row at the top of the area.
+    Page {
+        first: usize,
+    },
+}
+
 /// What the main loop needs to render one diff off the UI thread.
 #[derive(Debug, Clone)]
 pub struct DiffJob {
@@ -218,6 +236,8 @@ pub struct DetailView {
     pub diff_height: u16,
     /// The width under the tabs at the last draw; the whole-file view renders to it.
     pub body_width: u16,
+    /// What a mouse click can hit, from the last draw.
+    pub clicks: Vec<ClickTarget>,
     /// The diff pane's width at the last draw; diffs render to fit it.
     pub diff_width: u16,
     /// The diff pane's left column at the last draw. The mouse wheel scrolls the diff to
@@ -258,6 +278,7 @@ impl DetailView {
             diff_left: 0,
             diff_height: 0,
             body_width: 0,
+            clicks: Vec::new(),
             diffs: HashMap::new(),
             overlays: Vec::new(),
             find: None,
@@ -664,6 +685,40 @@ impl DetailView {
         }
     }
 
+    fn click(&mut self, target: ClickTarget, row: u16) -> Result<Option<Action>, String> {
+        match target.click {
+            Click::Tab(tab) => self.show_tab(tab),
+            Click::Page { first } => {
+                let last = self
+                    .overview
+                    .as_ref()
+                    .map_or(0, |layout| layout.rows.len().saturating_sub(1));
+                self.cursor = (first + (row - target.area.y) as usize).min(last);
+                self.toggle_fold();
+            }
+            Click::Row(index) if !self.overlays.is_empty() => {
+                if let Some(Overlay::Search { state, .. }) = self.overlays.last_mut() {
+                    state.select(Some(index));
+                }
+                return self.overlay_key(KeyCode::Enter);
+            }
+            Click::Row(index) => {
+                let state = match self.tab {
+                    Tab::Files => &mut self.file_state,
+                    Tab::Commits => &mut self.commits,
+                    Tab::Checks => &mut self.checks,
+                    Tab::Overview => return Ok(None),
+                };
+                state.select(Some(index));
+                self.diff_scroll = 0;
+                if self.tab == Tab::Files {
+                    self.toggle_folder();
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Moves the cursor and the page together, so the text moves on every press. Only at
     /// the very top or bottom, where the page cannot move, does the cursor move alone.
     fn move_overview(&mut self, delta: isize) {
@@ -830,6 +885,8 @@ pub struct App {
     pub fetched_at: Option<DateTime<Utc>>,
     /// The full key list shows over the screen; any key closes it.
     pub show_help: bool,
+    /// What a mouse click can hit on the inbox, from the last draw.
+    pub inbox_clicks: Vec<ClickTarget>,
     /// One flag per group: true while its search is running.
     pub group_loading: Vec<bool>,
     inbox_generation: u64,
@@ -856,6 +913,7 @@ impl App {
             error: None,
             fetched_at: None,
             show_help: false,
+            inbox_clicks: Vec::new(),
             group_loading: Vec::new(),
             inbox_generation: 0,
             renderer_names: Vec::new(),
@@ -1183,6 +1241,37 @@ impl App {
         } else {
             view.move_in_tab(delta);
         }
+    }
+
+    /// A left click at a screen cell. It does what the keys would do on that item: open a
+    /// pull request, switch a tab, select a row, or open or close a fold.
+    pub fn handle_click(&mut self, column: u16, row: u16) -> Option<Action> {
+        if self.prompt.is_some() {
+            return None;
+        }
+        if self.show_help {
+            self.show_help = false;
+            return None;
+        }
+        let hit = |targets: &[ClickTarget]| {
+            let position = ratatui::layout::Position::new(column, row);
+            targets
+                .iter()
+                .rev()
+                .find(|target| target.area.contains(position))
+                .copied()
+        };
+        let Screen::Detail(view) = &mut self.screen else {
+            let target = hit(&self.inbox_clicks)?;
+            let Click::Row(index) = target.click else {
+                return None;
+            };
+            self.list_state.select(Some(index));
+            return self.open_selected();
+        };
+        let target = hit(&view.clicks)?;
+        let result = view.click(target, row);
+        self.report(result)
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
@@ -1868,6 +1957,37 @@ mod tests {
         );
         app.handle_key(key(KeyCode::Char('z')));
         assert!(view(&app).file_list_hidden);
+    }
+
+    #[test]
+    fn a_click_switches_tabs_and_selects_rows() {
+        use ratatui::layout::Rect;
+        let files = vec![
+            file("a.md", ViewedState::Unviewed),
+            file("b.md", ViewedState::Unviewed),
+        ];
+        let (mut app, _) = files_tab(files);
+        let Screen::Detail(detail) = &mut app.screen else {
+            unreachable!()
+        };
+        detail.clicks = vec![
+            ClickTarget {
+                area: Rect::new(0, 4, 10, 1),
+                click: Click::Tab(Tab::Commits),
+            },
+            ClickTarget {
+                area: Rect::new(0, 8, 30, 1),
+                click: Click::Row(1),
+            },
+        ];
+        app.handle_click(5, 8);
+        assert_eq!(view(&app).selected_file(), Some(1));
+        app.handle_click(3, 4);
+        assert_eq!(view(&app).tab, Tab::Commits);
+        assert!(
+            app.handle_click(50, 20).is_none(),
+            "a click on nothing does nothing"
+        );
     }
 
     #[test]

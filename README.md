@@ -69,4 +69,4 @@ Press `?` anywhere for this list.
 
 `Cmd+L` works only in terminals that pass Cmd to applications through the kitty keyboard protocol and do not use `Cmd+L` themselves. `Ctrl+L` works everywhere.
 
-The mouse wheel scrolls the pane under the pointer: the diff or the list beside it. On the Overview one tick goes to the next card, or a third of a screen inside a card taller than the screen. The app captures the mouse for this, so selecting text needs the terminal's bypass modifier (Shift in most terminals, Option or Fn in some).
+A click works like the keys on what it hits: it opens a pull request in the inbox, switches a tab, selects a file, commit, check or search hit, folds a folder, and opens or closes a card, thread or folded block on the Overview. The mouse wheel scrolls the pane under the pointer: the diff or the list beside it. On the Overview one tick goes to the next card, or a third of a screen inside a card taller than the screen. The app captures the mouse for this, so selecting text needs the terminal's bypass modifier (Shift in most terminals, Option or Fn in some).
