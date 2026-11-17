@@ -144,6 +144,8 @@ pub struct FilesPage {
 pub struct CommitLine {
     pub oid: String,
     pub headline: String,
+    /// The commit message after the headline, often empty.
+    pub body: String,
     pub author: String,
     pub authored_at: DateTime<Utc>,
     pub url: String,
@@ -350,6 +352,8 @@ struct RawCommitNode {
 struct RawCommitInfo {
     oid: String,
     message_headline: String,
+    #[serde(default)]
+    message_body: String,
     authored_date: DateTime<Utc>,
     url: String,
     author: Option<RawGitActor>,
@@ -759,6 +763,7 @@ fn commit_line(commit: RawCommitInfo) -> CommitLine {
     CommitLine {
         oid: commit.oid,
         headline: commit.message_headline,
+        body: commit.message_body.trim().to_string(),
         author: author.unwrap_or_else(|| "unknown".to_string()),
         authored_at: commit.authored_date,
         url: commit.url,
@@ -1086,7 +1091,7 @@ pub mod tests {
             }}}]},
             "commitList": { "nodes": [
                 { "commit": {
-                    "oid": "aaa111", "messageHeadline": "first", "authoredDate": "2026-11-12T10:00:00Z",
+                    "oid": "aaa111", "messageHeadline": "first", "messageBody": "[why] a reason\n", "authoredDate": "2026-11-12T10:00:00Z",
                     "url": "https://github.com/acme/app/commit/aaa111",
                     "author": { "name": "Octo Cat", "user": { "login": "octo" } },
                     "statusCheckRollup": { "state": "SUCCESS" } } },

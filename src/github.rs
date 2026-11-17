@@ -66,7 +66,7 @@ pub fn activity_document() -> String {
                checkSuite {{ workflowRun {{ workflow {{ name }} }} }} }} \
              ... on StatusContext {{ context state targetUrl createdAt }} }} }} }} }} }} }} \
          commitList: commits(first: 100) {{ nodes {{ commit {{ \
-           oid messageHeadline authoredDate url author {{ name user {{ login }} }} \
+           oid messageHeadline messageBody authoredDate url author {{ name user {{ login }} }} \
            statusCheckRollup {{ state }} }} }} }} \
          timelineItems(last: {TIMELINE_LIMIT}, itemTypes: [ISSUE_COMMENT, PULL_REQUEST_REVIEW, PULL_REQUEST_COMMIT]) {{ nodes {{ __typename \
            ... on IssueComment {{ author {{ __typename login }} createdAt body }} \

@@ -55,20 +55,62 @@ pub fn build(context: &Context, width: usize) -> Vec<TextRow> {
 
 /// A rounded box with the title in its top border. `content` is already laid out to
 /// `width - 4`. The top border is an anchor, so `]` and `[` jump between cards.
+/// A rounded box with the title in its top border. With `folds`, the card can collapse:
+/// Enter on the top border folds it to that one line, which then counts the hidden lines.
 fn card(
     title: Vec<Span<'static>>,
     content: Vec<TextRow>,
     width: usize,
     theme: &Theme,
+    folds: Option<&mut Folds>,
 ) -> Vec<TextRow> {
     let border = Style::new().fg(theme.muted);
-    let inner = width.saturating_sub(4);
-    let title_width: usize = title.iter().map(|span| span.content.width()).sum();
-    let mut top = vec![Span::styled("╭─ ", border)];
+    let fold = folds.map(|folds| {
+        let id = folds.next;
+        folds.next += 1;
+        (id, !folds.toggled.contains(&id))
+    });
+    let open = fold.is_none_or(|(_, open)| open);
+    let (start, end) = if open {
+        ("╭─ ", "╮")
+    } else {
+        ("╶─ ", "╴")
+    };
+    let chevron = match fold {
+        None => String::new(),
+        Some(_) if open => "▼ ".to_string(),
+        Some(_) => "▶ ".to_string(),
+    };
+    let hint = if open {
+        String::new()
+    } else {
+        format!(" {} lines, enter opens ─", content.len() + 1)
+    };
+    let used = 3 + chevron.width() + line_width(&Line::from(title.clone())) + 1 + hint.width() + 1;
+    let mut top = vec![
+        Span::styled(start, border),
+        Span::styled(
+            chevron,
+            Style::new().fg(theme.fold).add_modifier(Modifier::BOLD),
+        ),
+    ];
     top.extend(title);
-    let fill = width.saturating_sub(title_width + 5);
-    top.push(Span::styled(format!(" {}╮", "─".repeat(fill)), border));
-    let mut rows = vec![TextRow::anchor(Line::from(top))];
+    top.push(Span::styled(
+        format!(" {}", "─".repeat(width.saturating_sub(used))),
+        border,
+    ));
+    top.push(Span::styled(hint, Style::new().fg(theme.fold)));
+    top.push(Span::styled(end, border));
+    let top = TextRow {
+        line: Line::from(top),
+        fold: fold.map(|(id, _)| id),
+        anchor: true,
+    };
+    if !open {
+        return vec![top];
+    }
+    let inner = width.saturating_sub(4);
+    let mut rows = vec![top];
     for row in content {
         let padding = inner.saturating_sub(line_width(&row.line));
         let mut spans = vec![Span::styled("│ ", border)];
@@ -127,6 +169,7 @@ fn status_card(context: &Context, width: usize) -> Vec<TextRow> {
         vec![TextRow::plain(Line::from(line))],
         width,
         theme,
+        None,
     )
 }
 
@@ -154,7 +197,7 @@ fn description_card(context: &Context, width: usize, folds: &mut Folds) -> Vec<T
         folds,
         "No description provided.",
     );
-    card(title, body, width, context.theme)
+    card(title, body, width, context.theme, Some(folds))
 }
 
 fn body_rows(
@@ -242,6 +285,7 @@ fn item_rows(
         content,
         width,
         context.theme,
+        Some(folds),
     );
     rows.push(TextRow::blank());
     rows
@@ -367,6 +411,34 @@ mod tests {
     }
 
     #[test]
+    fn enter_on_a_card_border_folds_the_card_to_one_line() {
+        let open = rendered(&[]);
+        let border = open
+            .iter()
+            .position(|line| line.contains("▼ ") && line.contains("opened"))
+            .unwrap();
+        let theme = theme::by_name("dracula").unwrap();
+        let detail = sample_detail();
+        let activity = Ok(sample_activity());
+        let toggled = HashSet::new();
+        let context = Context {
+            detail: &detail,
+            activity: Some(&activity),
+            toggled: &toggled,
+            theme: &theme,
+            now: detail.created_at,
+        };
+        let id = build(&context, 60)[border]
+            .fold
+            .expect("the description card folds");
+        let closed = rendered(&[id]);
+        assert!(closed[border].starts_with("╶─ ▶ "), "{}", closed[border]);
+        assert!(closed[border].contains("lines, enter opens"));
+        assert!(closed.len() < open.len());
+        assert_eq!(closed[border].chars().count(), 60);
+    }
+
+    #[test]
     fn cards_are_closed_boxes_of_the_full_width() {
         let lines = rendered(&[]);
         assert!(lines[0].starts_with("╭─ ◷ Approval required"));
@@ -389,7 +461,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.starts_with("╭─ coderabbitai  bot  commented"))
+                .any(|line| line.starts_with("╭─ ▼ coderabbitai  bot  commented"))
         );
         assert!(
             lines.iter().any(|line| line.contains("│ Looks fine")),
@@ -398,7 +470,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.starts_with("╭─ lead requested changes"))
+                .any(|line| line.starts_with("╭─ ▼ lead requested changes"))
         );
         let thread = lines
             .iter()

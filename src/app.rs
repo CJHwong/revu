@@ -204,6 +204,9 @@ pub struct DetailView {
     pub diff_scroll: u16,
     /// The diff pane's width at the last draw; diffs render to fit it.
     pub diff_width: u16,
+    /// The diff pane's left column at the last draw. The mouse wheel scrolls the diff to
+    /// the right of it and the list to the left.
+    pub diff_left: u16,
     pub diffs: HashMap<DiffKey, DiffOutput>,
     pub overlays: Vec<Overlay>,
     /// The lowercased text that `n` and `N` look for in the diff.
@@ -232,6 +235,7 @@ impl DetailView {
             renderer: 0,
             diff_scroll: 0,
             diff_width: 0,
+            diff_left: 0,
             diffs: HashMap::new(),
             overlays: Vec::new(),
             find: None,
@@ -962,6 +966,35 @@ impl App {
         }
     }
 
+    /// A mouse wheel tick at `column`: positive scrolls down. It moves what the pointer is
+    /// over, so the wheel over a diff scrolls the diff, not the list beside it.
+    pub fn handle_scroll(&mut self, column: u16, delta: isize) {
+        if self.prompt.is_some() || self.show_help {
+            return;
+        }
+        let Screen::Detail(view) = &mut self.screen else {
+            self.move_selection(delta);
+            return;
+        };
+        let diff_pane = matches!(view.tab, Tab::Files | Tab::Commits);
+        if !view.overlays.is_empty() {
+            let key = if delta > 0 {
+                KeyCode::Down
+            } else {
+                KeyCode::Up
+            };
+            for _ in 0..3 {
+                self.error = view.overlay_key(key).err();
+            }
+        } else if diff_pane && view.diff_left > 0 && column >= view.diff_left {
+            view.scroll_diff(3 * delta.signum() as i16);
+        } else if view.tab == Tab::Overview {
+            view.move_in_tab(3 * delta);
+        } else {
+            view.move_in_tab(delta);
+        }
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
         if self.prompt.is_some() {
             return self.prompt_key(key.code);
@@ -1436,6 +1469,31 @@ mod tests {
             "q closes the list, it does not quit"
         );
         assert!(!app.show_help);
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_pane_under_the_pointer() {
+        let files = vec![
+            file("a.md", ViewedState::Unviewed),
+            file("b.md", ViewedState::Unviewed),
+        ];
+        let (mut app, _) = files_tab(files);
+        if let Screen::Detail(view) = &mut app.screen {
+            view.diff_left = 40;
+        }
+        app.handle_scroll(60, 1);
+        assert_eq!(
+            view(&app).selected_file(),
+            Some(0),
+            "the wheel over the diff keeps the file"
+        );
+        assert_eq!(view(&app).diff_scroll, 3);
+        app.handle_scroll(10, 1);
+        assert_eq!(
+            view(&app).selected_file(),
+            Some(1),
+            "the wheel over the list moves the file"
+        );
     }
 
     #[test]

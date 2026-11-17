@@ -11,9 +11,9 @@ mod ui;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, Utc};
 use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseEventKind,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::supports_keyboard_enhancement;
@@ -80,6 +80,8 @@ enum Message {
 enum Input {
     Key(KeyEvent),
     Paste(String),
+    /// A mouse wheel tick: the pointer's column, and +1 down or -1 up.
+    Scroll(u16, isize),
 }
 
 struct Session {
@@ -123,7 +125,8 @@ fn main() -> Result<()> {
 /// terminals that support them report Cmd as the Super modifier.
 fn enable_input_modes(enhanced_keys: bool) -> Result<()> {
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnableBracketedPaste)?;
+    // Without mouse capture the terminal sends the wheel as arrow keys, which move the list.
+    execute!(stdout, EnableBracketedPaste, EnableMouseCapture)?;
     if enhanced_keys {
         let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
         execute!(stdout, PushKeyboardEnhancementFlags(flags))?;
@@ -136,7 +139,7 @@ fn disable_input_modes(enhanced_keys: bool) -> Result<()> {
     if enhanced_keys {
         execute!(stdout, PopKeyboardEnhancementFlags)?;
     }
-    execute!(stdout, DisableBracketedPaste)?;
+    execute!(stdout, DisableBracketedPaste, DisableMouseCapture)?;
     Ok(())
 }
 
@@ -149,6 +152,10 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App, session: &mut Session) -> 
             None => continue,
             Some(Input::Paste(text)) => {
                 app.handle_paste(&text);
+                continue;
+            }
+            Some(Input::Scroll(column, delta)) => {
+                app.handle_scroll(column, delta);
                 continue;
             }
             Some(Input::Key(key)) => key,
@@ -173,6 +180,11 @@ fn next_input() -> Result<Option<Input>> {
     match event::read()? {
         Event::Key(key) if key.kind == KeyEventKind::Press => Ok(Some(Input::Key(key))),
         Event::Paste(text) => Ok(Some(Input::Paste(text))),
+        Event::Mouse(mouse) => Ok(match mouse.kind {
+            MouseEventKind::ScrollDown => Some(Input::Scroll(mouse.column, 1)),
+            MouseEventKind::ScrollUp => Some(Input::Scroll(mouse.column, -1)),
+            _ => None,
+        }),
         _ => Ok(None),
     }
 }

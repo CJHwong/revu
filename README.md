@@ -50,8 +50,8 @@ Press `?` anywhere for this list.
 | Pull request | `g` / `G`, `Space` / `b` | Top, bottom, page down, page up |
 | Pull request | `s` | Search every file in the repo at the PR head, not only the changed ones. `Enter` opens the file at the match. It needs the local clone, which the Files changed or Commits tab finds first. |
 | Pull request | `r` | Fetch the pull request again |
-| Overview | `j` / `k` | Move the cursor |
-| Overview | `Enter` | Open or close the folded `<details>` block under the cursor |
+| Overview | `j` / `k` | Move the cursor. The cursor stays a third of the way down, so each move scrolls the page. |
+| Overview | `Enter` | Open or close the card, review thread or `<details>` block under the cursor |
 | Overview | `]` / `[` | Next or previous card or folded block |
 | Files changed | `Enter` | Show the whole file at the PR head |
 | Files changed | `v` | Toggle Viewed. It syncs to GitHub's Viewed checkbox at once. |
@@ -65,3 +65,5 @@ Press `?` anywhere for this list.
 | Inbox, pull request | `d` | Run the `open_diff` command |
 
 `Cmd+L` works only in terminals that pass Cmd to applications through the kitty keyboard protocol and do not use `Cmd+L` themselves. `Ctrl+L` works everywhere.
+
+The mouse wheel scrolls the pane under the pointer: the diff or the list beside it. The app captures the mouse for this, so selecting text needs the terminal's bypass modifier (Shift in most terminals, Option or Fn in some).

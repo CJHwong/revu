@@ -3,7 +3,9 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap,
+};
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::{
@@ -11,8 +13,8 @@ use crate::app::{
     Screen, Tab,
 };
 use crate::model::{
-    ChangedFile, CheckLine, CheckState, CheckSummary, Group, Label, PrActivity, PrDetail, PrRef,
-    PrSummary, ReviewState, ViewedState,
+    ChangedFile, CheckLine, CheckState, CheckSummary, CommitLine, Group, Label, PrActivity,
+    PrDetail, PrRef, PrSummary, ReviewState, ViewedState,
 };
 use crate::repo::{GrepHit, MAX_GREP_HITS};
 use crate::theme::Theme;
@@ -418,6 +420,14 @@ fn render_detail(
                 list_area,
                 paint,
             );
+            let commit = view
+                .commits
+                .selected()
+                .and_then(|index| activity.commits.get(index));
+            let diff_area = match commit {
+                Some(commit) => render_commit_message(frame, commit, diff_area, paint),
+                None => diff_area,
+            };
             render_diff_pane(frame, view, diff_area, renderer_names, paint);
         }
         Tab::Files => {
@@ -614,6 +624,7 @@ fn render_diff_pane(
     let inner = block.inner(area);
     frame.render_widget(block, area);
     view.diff_width = inner.width;
+    view.diff_left = area.x;
 
     let notice = |text: String, color: Color| {
         Paragraph::new(paint.span(text, color)).wrap(Wrap { trim: false })
@@ -794,7 +805,7 @@ fn render_overview(frame: &mut Frame, view: &mut DetailView, area: Rect, paint: 
     let height = main.height as usize;
     *page = height;
     *cursor = (*cursor).min(layout.rows.len().saturating_sub(1));
-    *scroll = keep_visible(*scroll, *cursor, height, layout.rows.len());
+    *scroll = follow_cursor(*cursor, height, layout.rows.len());
     let lines: Vec<Line> = layout
         .rows
         .iter()
@@ -815,13 +826,11 @@ fn render_overview(frame: &mut Frame, view: &mut DetailView, area: Rect, paint: 
     }
 }
 
-/// Scrolls only as far as needed to keep a few rows around the cursor in view.
-fn keep_visible(scroll: usize, cursor: usize, height: usize, total: usize) -> usize {
-    let margin = 3.min(height / 4);
-    let low = (cursor + margin + 1).saturating_sub(height);
-    let high = cursor.saturating_sub(margin);
-    scroll
-        .clamp(low, high.max(low))
+/// Holds the cursor a third of the way down the screen, so each move scrolls the text.
+/// The cursor leaves that row only at the top or bottom of the page.
+fn follow_cursor(cursor: usize, height: usize, total: usize) -> usize {
+    cursor
+        .saturating_sub(height / 3)
         .min(total.saturating_sub(height))
 }
 
@@ -905,6 +914,50 @@ fn render_commits(
         list = list.block(Block::new().title(paint.span(title, theme.warning)));
     }
     frame.render_stateful_widget(list, area, state);
+}
+
+/// The selected commit's whole message above its diff. It takes at most a third of the
+/// pane; a longer message ends in a note. Returns the area left for the diff.
+fn render_commit_message(frame: &mut Frame, commit: &CommitLine, area: Rect, paint: Paint) -> Rect {
+    let theme = paint.theme;
+    let width = area.width.saturating_sub(2) as usize;
+    let mut lines = markdown::wrap(
+        &[paint.bold(commit.headline.clone(), theme.foreground)],
+        width,
+        0,
+    );
+    if !commit.body.is_empty() {
+        lines.push(Line::from(""));
+    }
+    for paragraph in commit.body.lines() {
+        if paragraph.trim().is_empty() {
+            lines.push(Line::from(""));
+            continue;
+        }
+        lines.extend(markdown::wrap(
+            &[paint.span(paragraph.to_string(), theme.foreground)],
+            width,
+            0,
+        ));
+    }
+    let room = (area.height / 3).max(3) as usize;
+    if lines.len() > room {
+        lines.truncate(room - 1);
+        lines.push(Line::from(
+            paint.span("… o opens the full message on GitHub", theme.muted),
+        ));
+    }
+    let [message_area, rest] = Layout::vertical([
+        Constraint::Length(lines.len() as u16 + 1),
+        Constraint::Fill(1),
+    ])
+    .areas(area);
+    let block = Block::new()
+        .borders(Borders::LEFT | Borders::BOTTOM)
+        .border_style(Style::new().fg(theme.muted))
+        .padding(Padding::left(1));
+    frame.render_widget(Paragraph::new(lines).block(block), message_area);
+    rest
 }
 
 fn render_checks(
@@ -1153,6 +1206,28 @@ mod tests {
     use super::*;
     use crate::theme;
     use chrono::TimeZone;
+
+    #[test]
+    fn every_cursor_move_scrolls_the_text_away_from_the_ends() {
+        // 30 rows on screen, 200 in the page: the cursor sits on screen row 10.
+        assert_eq!(follow_cursor(50, 30, 200), 40);
+        assert_eq!(follow_cursor(51, 30, 200), 41);
+        assert_eq!(
+            follow_cursor(50, 30, 200),
+            40,
+            "moving back scrolls back at once"
+        );
+        assert_eq!(
+            follow_cursor(4, 30, 200),
+            0,
+            "at the top the cursor moves instead"
+        );
+        assert_eq!(
+            follow_cursor(199, 30, 200),
+            170,
+            "at the bottom the page stops"
+        );
+    }
 
     #[test]
     fn relative_time_picks_the_largest_unit() {
