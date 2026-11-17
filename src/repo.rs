@@ -4,7 +4,7 @@
 use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -250,6 +250,57 @@ pub fn show_file(dir: &Path, commit: &str, path: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Context lines that cover any file a reviewer reads.
+const WHOLE_FILE_CONTEXT: &str = "1000000";
+
+/// The file at `commit` with syntax colors from `bat`, the `line` highlighted (0 for none).
+/// Without `bat` the file comes back plain, with line numbers.
+pub fn highlight_file(
+    dir: &Path,
+    commit: &str,
+    path: &str,
+    line: usize,
+    bat_theme: &str,
+) -> Result<Vec<u8>> {
+    let text = show_file(dir, commit, path)?;
+    let mut bat = Command::new("bat");
+    bat.args([
+        "--color=always",
+        "--style=numbers",
+        "--paging=never",
+        "--file-name",
+        path,
+    ])
+    .args(["--theme", bat_theme])
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    if line > 0 {
+        bat.args(["--highlight-line", &line.to_string()]);
+    }
+    let mut child = match bat.spawn() {
+        Ok(child) => child,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(numbered(&text)),
+        Err(error) => return Err(error).context("run bat"),
+    };
+    let mut stdin = child.stdin.take().context("open bat's input")?;
+    // Write from another thread: bat fills its output pipe while it reads a large file.
+    let writer = std::thread::spawn(move || stdin.write_all(text.as_bytes()));
+    let output = child.wait_with_output().context("wait for bat")?;
+    let _ = writer.join();
+    ensure_success(&output, "bat")?;
+    Ok(output.stdout)
+}
+
+fn numbered(text: &str) -> Vec<u8> {
+    let gutter = text.lines().count().to_string().len();
+    let lines = text
+        .lines()
+        .enumerate()
+        .map(|(index, line)| format!("{:>gutter$} {line}\n", index + 1));
+    lines.collect::<String>().into_bytes()
+}
+
 /// Single-quotes a value for `sh`, so a file name such as `$(rm -rf ~).md` stays text.
 pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
@@ -264,14 +315,21 @@ pub fn fill_template(template: &str, values: &[(&str, String)]) -> String {
         })
 }
 
-/// Runs a renderer command inside the clone and returns its colored output.
-pub fn run_renderer(dir: &Path, command: &str) -> Result<Vec<u8>> {
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(dir)
-        .output()
-        .context("run the diff renderer")?;
+/// Runs a renderer command inside the clone and returns its colored output. With
+/// `whole_file`, git and difftastic show the whole file around the changes, so the
+/// renderer draws the full file with its changes marked.
+pub fn run_renderer(dir: &Path, command: &str, whole_file: bool) -> Result<Vec<u8>> {
+    let mut shell = Command::new("sh");
+    shell.arg("-c").arg(command).current_dir(dir);
+    if whole_file {
+        // git reads config from these variables; difftastic reads its own.
+        shell
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "diff.context")
+            .env("GIT_CONFIG_VALUE_0", WHOLE_FILE_CONTEXT)
+            .env("DFT_CONTEXT", WHOLE_FILE_CONTEXT);
+    }
+    let output = shell.output().context("run the diff renderer")?;
     // Some diff tools exit 1 when files differ, so output counts as success.
     if output.status.success() || !output.stdout.is_empty() {
         return Ok(output.stdout);
@@ -372,11 +430,31 @@ mod tests {
     }
 
     #[test]
+    fn the_whole_file_mode_reaches_git_and_difftastic() {
+        let dir = std::env::temp_dir();
+        let output = run_renderer(
+            &dir,
+            "git config diff.context; printf \"$DFT_CONTEXT\"",
+            true,
+        )
+        .unwrap();
+        assert_eq!(String::from_utf8(output).unwrap(), "1000000\n1000000");
+    }
+
+    #[test]
+    fn a_file_without_bat_comes_back_numbered() {
+        assert_eq!(numbered("a\nb\n"), b"1 a\n2 b\n");
+    }
+
+    #[test]
     fn renderer_output_survives_a_nonzero_exit() {
         let dir = std::env::temp_dir();
-        assert_eq!(run_renderer(&dir, "printf diff; exit 1").unwrap(), b"diff");
+        assert_eq!(
+            run_renderer(&dir, "printf diff; exit 1", false).unwrap(),
+            b"diff"
+        );
         assert!(
-            run_renderer(&dir, "echo broken >&2; exit 2")
+            run_renderer(&dir, "echo broken >&2; exit 2", false)
                 .unwrap_err()
                 .to_string()
                 .contains("broken")
@@ -455,7 +533,7 @@ mod tests {
             ("head", shell_quote(&head)),
             ("paths", shell_quote(path)),
         ];
-        let output = run_renderer(&dir, &fill_template(template, &values)).unwrap();
+        let output = run_renderer(&dir, &fill_template(template, &values), false).unwrap();
         let _ = fs::remove_dir_all(&dir);
         assert!(
             String::from_utf8(output)

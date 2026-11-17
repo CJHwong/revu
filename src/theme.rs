@@ -17,6 +17,8 @@ pub struct Theme {
     pub danger: Color,
     /// Background of a `<details>` summary bar.
     pub fold: Color,
+    /// The `bat` theme that matches, for syntax colors in the file view.
+    pub bat_theme: &'static str,
 }
 
 pub const THEME_NAMES: [&str; 2] = ["dracula", "terminal"];
@@ -33,6 +35,7 @@ const DRACULA: Theme = Theme {
     warning: Color::Rgb(0xf1, 0xfa, 0x8c),
     danger: Color::Rgb(0xff, 0x55, 0x55),
     fold: Color::Rgb(0xbd, 0x93, 0xf9),
+    bat_theme: "Dracula",
 };
 
 /// Uses the terminal's own palette and background.
@@ -47,6 +50,7 @@ const TERMINAL: Theme = Theme {
     warning: Color::Yellow,
     danger: Color::Red,
     fold: Color::Magenta,
+    bat_theme: "ansi",
 };
 
 pub fn by_name(name: &str) -> Result<Theme> {

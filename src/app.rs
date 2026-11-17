@@ -37,12 +37,16 @@ pub enum Action {
         commit: String,
         query: String,
     },
+    /// A file at the PR head with syntax colors, the `line` marked (0 for none).
     ShowFile {
         pr: PrRef,
         dir: PathBuf,
         commit: String,
         path: String,
+        line: usize,
     },
+    /// A changed file in full, drawn by the diff renderer with its changes marked.
+    ShowWholeDiff(DiffJob),
     SetWorkspace(String),
     CloneRepo {
         pr: PrRef,
@@ -117,6 +121,7 @@ pub enum DiffOutput {
 }
 
 /// What the main loop needs to render one diff off the UI thread.
+#[derive(Debug, Clone)]
 pub struct DiffJob {
     pub pr: PrRef,
     pub key: DiffKey,
@@ -144,9 +149,8 @@ pub enum Overlay {
     },
     File {
         path: String,
-        /// The line to mark, counted from 1. Zero marks none.
-        line: usize,
-        lines: Option<Result<Vec<String>, String>>,
+        /// The file with the renderer's or bat's colors.
+        lines: Option<Result<Text<'static>, String>>,
         scroll: u16,
     },
 }
@@ -212,6 +216,8 @@ pub struct DetailView {
     pub diff_scroll: u16,
     /// The diff pane's height at the last draw.
     pub diff_height: u16,
+    /// The width under the tabs at the last draw; the whole-file view renders to it.
+    pub body_width: u16,
     /// The diff pane's width at the last draw; diffs render to fit it.
     pub diff_width: u16,
     /// The diff pane's left column at the last draw. The mouse wheel scrolls the diff to
@@ -251,6 +257,7 @@ impl DetailView {
             diff_width: 0,
             diff_left: 0,
             diff_height: 0,
+            body_width: 0,
             diffs: HashMap::new(),
             overlays: Vec::new(),
             find: None,
@@ -370,7 +377,6 @@ impl DetailView {
         let scroll = u16::try_from(line.saturating_sub(6)).unwrap_or(u16::MAX);
         self.overlays.push(Overlay::File {
             path: path.clone(),
-            line,
             lines: None,
             scroll,
         });
@@ -379,7 +385,33 @@ impl DetailView {
             dir,
             commit,
             path,
+            line,
         })
+    }
+
+    /// The selected changed file in full, with its changes, as the current renderer draws
+    /// it across the whole screen.
+    fn open_whole_diff(&mut self) -> Result<Action, String> {
+        let RepoState::Ready(repo) = &self.repo else {
+            return Err("the local clone is not ready yet".to_string());
+        };
+        let mut key = self.current_diff_key().ok_or("select a file first")?;
+        let DiffTarget::File(path) = &key.target else {
+            return Err("select a file first".to_string());
+        };
+        key.width = self.body_width.max(self.diff_width);
+        let job = diff_job(
+            &self.pr,
+            repo,
+            self.loaded().ok_or("the pull request is still loading")?,
+            key.clone(),
+        );
+        self.overlays.push(Overlay::File {
+            path: path.clone(),
+            lines: None,
+            scroll: 0,
+        });
+        Ok(Action::ShowWholeDiff(job))
     }
 
     fn overlay_key(&mut self, key: KeyCode) -> Result<Option<Action>, String> {
@@ -427,7 +459,8 @@ impl DetailView {
                 code,
             ) => {
                 if let Some(delta) = step(code) {
-                    let last = u16::try_from(lines.len().saturating_sub(1)).unwrap_or(u16::MAX);
+                    let last =
+                        u16::try_from(lines.lines.len().saturating_sub(1)).unwrap_or(u16::MAX);
                     *scroll = scroll.saturating_add_signed(delta).min(last);
                 }
             }
@@ -878,23 +911,7 @@ impl App {
         if view.diffs.contains_key(&key) {
             return None;
         }
-        let detail = view.loaded()?;
-        let (base, head, paths) = match &key.target {
-            DiffTarget::File(path) => {
-                let old = repo.renames.get(path).cloned();
-                let paths = old.into_iter().chain([path.clone()]).collect();
-                (detail.base_oid.clone(), detail.head_oid.clone(), paths)
-            }
-            DiffTarget::Commit(oid) => (format!("{oid}~1"), oid.clone(), Vec::new()),
-        };
-        let job = DiffJob {
-            pr: view.pr.clone(),
-            key: key.clone(),
-            dir: repo.dir.clone(),
-            base,
-            head,
-            paths,
-        };
+        let job = diff_job(&view.pr, repo, view.loaded()?, key.clone());
         view.diffs.insert(key, DiffOutput::Pending);
         Some(job)
     }
@@ -951,15 +968,17 @@ impl App {
     }
 
     /// Fills the file views that are still waiting for this path.
-    pub fn set_file(&mut self, pr: &PrRef, path: &str, result: Result<String, String>) {
+    pub fn set_file(&mut self, pr: &PrRef, path: &str, result: Result<Vec<u8>, String>) {
         let Some(view) = self.view_for(pr) else {
             return;
         };
         // The terminal draws a tab as one cell, so expand it like an editor would.
-        let lines = result.map(|text| {
-            text.lines()
-                .map(|line| line.replace('\t', "    "))
-                .collect::<Vec<_>>()
+        let lines = result.and_then(|bytes| {
+            String::from_utf8_lossy(&bytes)
+                .replace('\t', "    ")
+                .into_bytes()
+                .into_text()
+                .map_err(|error| format!("bad file output: {error}"))
         });
         for overlay in &mut view.overlays {
             match overlay {
@@ -1348,10 +1367,7 @@ impl App {
                 view.file_list_hidden = !view.file_list_hidden
             }
             KeyCode::Enter if view.tab == Tab::Files => {
-                let path = view
-                    .loaded_files()
-                    .and_then(|files| Some(files.get(view.selected_file()?)?.path.clone()));
-                let result = view.open_file(path?, 0).map(Some);
+                let result = view.open_whole_diff().map(Some);
                 return self.report(result);
             }
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Left => {
@@ -1495,6 +1511,26 @@ impl App {
         let last = self.rows().len().saturating_sub(1);
         let current = self.list_state.selected().unwrap_or(0);
         self.list_state.select(Some(current.min(last)));
+    }
+}
+
+/// What the renderer needs to draw `key`: the clone, the commits and the paths.
+fn diff_job(pr: &PrRef, repo: &LocalRepo, detail: &PrDetail, key: DiffKey) -> DiffJob {
+    let (base, head, paths) = match &key.target {
+        DiffTarget::File(path) => {
+            let old = repo.renames.get(path).cloned();
+            let paths = old.into_iter().chain([path.clone()]).collect();
+            (detail.base_oid.clone(), detail.head_oid.clone(), paths)
+        }
+        DiffTarget::Commit(oid) => (format!("{oid}~1"), oid.clone(), Vec::new()),
+    };
+    DiffJob {
+        pr: pr.clone(),
+        key,
+        dir: repo.dir.clone(),
+        base,
+        head,
+        paths,
     }
 }
 
@@ -1866,10 +1902,10 @@ mod tests {
     fn enter_on_a_file_shows_the_whole_file() {
         let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
         ready_repo(&mut app, &pr);
-        let Some(Action::ShowFile { path, .. }) = app.handle_key(key(KeyCode::Enter)) else {
-            panic!("expected the file view");
+        let Some(Action::ShowWholeDiff(job)) = app.handle_key(key(KeyCode::Enter)) else {
+            panic!("expected the whole file with its changes");
         };
-        assert_eq!(path, "a.md");
+        assert_eq!(job.paths, ["a.md"]);
     }
 
     #[test]
@@ -2193,9 +2229,8 @@ mod tests {
         let text = (1..=50)
             .map(|number| format!("line {number}\n"))
             .collect::<String>();
-        app.set_file(&pr, "y.py", Ok(text));
+        app.set_file(&pr, "y.py", Ok(text.into_bytes()));
         let Some(Overlay::File {
-            line,
             scroll,
             lines: Some(Ok(lines)),
             ..
@@ -2203,7 +2238,11 @@ mod tests {
         else {
             panic!("expected a loaded file");
         };
-        assert_eq!((*line, *scroll, lines.len()), (40, 34, 50));
+        assert_eq!(
+            (*scroll, lines.lines.len()),
+            (34, 50),
+            "the hit sits a few lines down"
+        );
         app.handle_key(key(KeyCode::Esc));
         assert!(matches!(
             view(&app).overlays.last(),

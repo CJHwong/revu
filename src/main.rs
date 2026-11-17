@@ -74,7 +74,7 @@ enum Message {
     File {
         pr: PrRef,
         path: String,
-        result: Result<String, String>,
+        result: Result<Vec<u8>, String>,
     },
 }
 
@@ -252,12 +252,30 @@ fn perform(
             dir,
             commit,
             path,
+            line,
         } => {
             let sender = session.sender.clone();
+            let bat_theme = session.config.theme.bat_theme;
             thread::spawn(move || {
-                let result =
-                    repo::show_file(&dir, &commit, &path).map_err(|error| format!("{error:#}"));
+                let result = repo::highlight_file(&dir, &commit, &path, line, bat_theme)
+                    .map_err(|error| format!("{error:#}"));
                 let _ = sender.send(Message::File { pr, path, result });
+            });
+        }
+        Action::ShowWholeDiff(job) => {
+            let Some(command) = renderer_command(session, &job) else {
+                return Ok(true);
+            };
+            let sender = session.sender.clone();
+            thread::spawn(move || {
+                let result = repo::run_renderer(&job.dir, &command, true)
+                    .map_err(|error| format!("{error:#}"));
+                let path = job.paths.last().cloned().unwrap_or_default();
+                let _ = sender.send(Message::File {
+                    pr: job.pr,
+                    path,
+                    result,
+                });
             });
         }
         Action::SetWorkspace(text) => set_workspace(app, session, text),
@@ -387,16 +405,15 @@ fn fetch_local_repo(job: &RepoJob, dir: &std::path::Path, clone_first: bool) -> 
     })
 }
 
-fn start_diff(session: &Session, job: DiffJob) {
-    let Some(renderer) = session.config.diff_renderers.get(job.key.renderer) else {
-        return;
-    };
+/// The renderer's shell command for this job, with its values quoted.
+fn renderer_command(session: &Session, job: &DiffJob) -> Option<String> {
+    let renderer = session.config.diff_renderers.get(job.key.renderer)?;
     let paths: Vec<String> = job
         .paths
         .iter()
         .map(|path| repo::shell_quote(path))
         .collect();
-    let command = repo::fill_template(
+    Some(repo::fill_template(
         &renderer.command,
         &[
             ("base", repo::shell_quote(&job.base)),
@@ -404,10 +421,17 @@ fn start_diff(session: &Session, job: DiffJob) {
             ("paths", paths.join(" ")),
             ("width", job.key.width.to_string()),
         ],
-    );
+    ))
+}
+
+fn start_diff(session: &Session, job: DiffJob) {
+    let Some(command) = renderer_command(session, &job) else {
+        return;
+    };
     let sender = session.sender.clone();
     thread::spawn(move || {
-        let result = repo::run_renderer(&job.dir, &command).map_err(|error| format!("{error:#}"));
+        let result =
+            repo::run_renderer(&job.dir, &command, false).map_err(|error| format!("{error:#}"));
         let _ = sender.send(Message::Diff {
             pr: job.pr,
             key: job.key,

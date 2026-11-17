@@ -239,7 +239,7 @@ fn detail_help(tab: Tab) -> &'static str {
             "j/k commit | J/K scroll diff | m renderer | / find | o browser | esc back | ? keys"
         }
         Tab::Files => {
-            "j/k file | enter whole file | v viewed | ]/[ unviewed | J/K scroll | m renderer | ? keys"
+            "j/k file | enter whole file | v viewed | ]/[ unviewed | t tree | z list | m renderer | ? keys"
         }
     }
 }
@@ -295,9 +295,10 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
     (
         "Files changed",
         &[
-            ("enter", "show the whole file at the PR head"),
+            ("enter", "whole file with its changes; on a folder, fold it"),
             ("v, H", "toggle Viewed (syncs to GitHub), hide viewed files"),
             ("], [", "next or previous unviewed file"),
+            ("t, z", "tree or flat list, hide or show the list"),
         ],
     ),
     (
@@ -404,6 +405,7 @@ fn render_detail(
         tab_rule(view.tab, detail, tabs.width, paint),
     ];
     frame.render_widget(Paragraph::new(tab_lines), tabs);
+    view.body_width = body.width;
     if let Some(overlay) = view.overlays.last_mut() {
         render_overlay(frame, overlay, body, paint);
         return;
@@ -486,9 +488,9 @@ fn render_overlay(frame: &mut Frame, overlay: &mut Overlay, area: Rect, paint: P
         }
         Overlay::File {
             path,
-            line,
             lines,
             scroll,
+            ..
         } => {
             let block =
                 Block::new().title(paint.bold(format!(" {path} at the PR head "), theme.heading));
@@ -497,9 +499,15 @@ fn render_overlay(frame: &mut Frame, overlay: &mut Overlay, area: Rect, paint: P
             let text = match lines {
                 None => Text::from(paint.span(" loading...", theme.warning)),
                 Some(Err(error)) => Text::from(paint.span(format!(" {error}"), theme.danger)),
-                Some(Ok(lines)) => {
-                    file_text(lines, *line, *scroll as usize, inner.height as usize, paint)
-                }
+                // Clone only the visible lines; a whole file is redrawn every frame.
+                Some(Ok(text)) => Text::from(
+                    text.lines
+                        .iter()
+                        .skip(*scroll as usize)
+                        .take(inner.height as usize)
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                ),
             };
             frame.render_widget(Paragraph::new(text), inner);
         }
@@ -533,36 +541,6 @@ fn grep_item(hit: &GrepHit, width: usize, paint: Paint) -> ListItem<'static> {
         paint.span(location, theme.accent),
         paint.span(code, theme.foreground),
     ]))
-}
-
-/// The visible lines of a file with line numbers. The marked line gets the selection color.
-fn file_text(
-    lines: &[String],
-    marked: usize,
-    scroll: usize,
-    height: usize,
-    paint: Paint,
-) -> Text<'static> {
-    let theme = paint.theme;
-    let gutter = lines.len().to_string().len();
-    let visible = lines
-        .iter()
-        .enumerate()
-        .skip(scroll)
-        .take(height)
-        .map(|(index, code)| {
-            let number = index + 1;
-            let line = Line::from(vec![
-                paint.span(format!("{number:>gutter$} "), theme.muted),
-                paint.span(code.clone(), theme.foreground),
-            ]);
-            if number == marked {
-                line.style(Style::new().bg(theme.selection))
-            } else {
-                line
-            }
-        });
-    Text::from(visible.collect::<Vec<_>>())
 }
 
 /// What the Commits or Checks tab shows before its data arrives, or when it failed.
