@@ -230,6 +230,11 @@ pub struct DetailView {
     pub folded_dirs: HashSet<String>,
     /// Files changed hides its list so the diff gets the full width.
     pub file_list_hidden: bool,
+    /// The list's top row while the wheel scrolls it apart from the selection, so the
+    /// diff does not reload on every wheel step. None: the list follows the selection.
+    pub file_list_top: Option<usize>,
+    /// The rows the file list showed at the last draw.
+    pub file_list_height: usize,
     pub repo: RepoState,
     pub renderer: usize,
     pub diff_scroll: u16,
@@ -271,6 +276,8 @@ impl DetailView {
             tree_view: true,
             folded_dirs: HashSet::new(),
             file_list_hidden: false,
+            file_list_top: None,
+            file_list_height: 0,
             hide_viewed: false,
             repo: RepoState::Unknown,
             renderer: 0,
@@ -317,6 +324,13 @@ impl DetailView {
 
     /// One wheel tick over a diff: to the next or previous hunk, or a third of the pane
     /// when that hunk is more than a pane away, so a long hunk can still be read.
+    /// Scrolls the file list three rows and leaves the selection, and so the diff, alone.
+    fn wheel_file_list(&mut self, delta: isize) {
+        let last_top = self.file_rows().len().saturating_sub(self.file_list_height);
+        let top = self.file_list_top.unwrap_or(self.file_state.offset());
+        self.file_list_top = Some(top.saturating_add_signed(delta * 3).min(last_top));
+    }
+
     fn wheel_diff(&mut self, forward: bool) {
         let chunk = (self.diff_height / 3).max(3);
         let current = self.diff_scroll as usize;
@@ -733,6 +747,10 @@ impl DetailView {
                 state.select(Some(index));
                 self.diff_scroll = 0;
                 if self.tab == Tab::Files {
+                    // The clicked row is on screen, so the list stays where the wheel left it.
+                    if let Some(top) = self.file_list_top.take() {
+                        *self.file_state.offset_mut() = top;
+                    }
                     self.toggle_folder();
                 }
             }
@@ -857,7 +875,10 @@ impl DetailView {
             Tab::Overview => return self.move_overview(delta),
             Tab::Commits => &mut self.commits,
             Tab::Checks => &mut self.checks,
-            Tab::Files => &mut self.file_state,
+            Tab::Files => {
+                self.file_list_top = None;
+                &mut self.file_state
+            }
         };
         let next = state
             .selected()
@@ -1266,6 +1287,8 @@ impl App {
             view.wheel_diff(delta > 0);
         } else if view.tab == Tab::Overview {
             view.wheel_overview(delta > 0);
+        } else if view.tab == Tab::Files {
+            view.wheel_file_list(delta);
         } else {
             view.move_in_tab(delta);
         }
@@ -1893,12 +1916,37 @@ mod tests {
             "the wheel over the diff keeps the file"
         );
         assert_eq!(view(&app).diff_scroll, 3);
+        let names: Vec<String> = (0..10).map(|index| format!("f{index}.md")).collect();
+        let many = names
+            .iter()
+            .map(|name| file(name, ViewedState::Unviewed))
+            .collect();
+        let (mut app, _) = files_tab(many);
+        if let Screen::Detail(view) = &mut app.screen {
+            view.diff_left = 40;
+            view.file_list_height = 4;
+        }
         app.handle_scroll(10, 1);
         assert_eq!(
             view(&app).selected_file(),
-            Some(1),
-            "the wheel over the list moves the file"
+            Some(0),
+            "the wheel over the list keeps the file"
         );
+        assert_eq!(view(&app).file_list_top, Some(3));
+        app.handle_scroll(10, 1);
+        app.handle_scroll(10, 1);
+        assert_eq!(
+            view(&app).file_list_top,
+            Some(6),
+            "it stops with the last row at the bottom"
+        );
+        app.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(
+            view(&app).file_list_top,
+            None,
+            "a key brings the list back to the file"
+        );
+        assert_eq!(view(&app).selected_file(), Some(1));
     }
 
     #[test]

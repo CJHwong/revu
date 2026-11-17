@@ -616,21 +616,78 @@ fn render_file_list(frame: &mut Frame, view: &mut DetailView, area: Rect, paint:
     };
     let title = format!(" {viewed}/{} viewed{hidden_note} ", files.len());
     let width = area.width as usize;
+    let selected = view.file_state.selected();
     let items: Vec<ListItem> = view
         .file_rows()
         .iter()
-        .map(|row| ListItem::new(file_row_line(row, files, view.tree_view, width, paint)))
+        .enumerate()
+        .map(|(index, row)| {
+            let item = ListItem::new(file_row_line(row, files, view.tree_view, width, paint));
+            // Styled here, not by the list, so it shows while the wheel scrolls the list
+            // away from the selection.
+            match Some(index) == selected {
+                true => item.style(Style::new().bg(theme.selection)),
+                false => item,
+            }
+        })
         .collect();
     let heights: Vec<usize> = items.iter().map(ListItem::height).collect();
-    let block = Block::new().title(paint.span(title, theme.heading));
-    let inner = block.inner(area);
-    let list = List::new(items)
-        .highlight_style(Style::new().bg(theme.selection))
-        .block(block);
-    frame.render_stateful_widget(list, area, &mut view.file_state);
+    let list_area = Rect {
+        y: area.y + 1,
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+    // A list taller than its space keeps its last line for the "more below" count.
+    let overflows = heights.iter().sum::<usize>() > list_area.height as usize;
+    let list_area = Rect {
+        height: list_area.height - u16::from(overflows),
+        ..list_area
+    };
+    view.file_list_height = list_area.height as usize;
+    let offset = match view.file_list_top {
+        Some(top) => {
+            let mut state = ListState::default().with_offset(top);
+            frame.render_stateful_widget(List::new(items), list_area, &mut state);
+            state.offset()
+        }
+        None => {
+            frame.render_stateful_widget(List::new(items), list_area, &mut view.file_state);
+            view.file_state.offset()
+        }
+    };
+    let (above, below) = rows_beyond(&heights, offset, list_area.height as usize);
+    let more = |count: usize, arrow: &str| match count {
+        0 => Line::default(),
+        _ => Line::from(paint.span(format!("{arrow} {count} more "), theme.muted)).right_aligned(),
+    };
+    let title_row = Rect { height: 1, ..area };
+    frame.render_widget(Paragraph::new(paint.span(title, theme.heading)), title_row);
+    frame.render_widget(more(above, "↑"), title_row);
+    if overflows {
+        let bottom_row = Rect {
+            y: list_area.bottom(),
+            height: 1,
+            ..area
+        };
+        frame.render_widget(more(below, "↓"), bottom_row);
+    }
     view.clicks
-        .extend(list_targets(inner, &heights, view.file_state.offset()));
+        .extend(list_targets(list_area, &heights, offset));
     true
+}
+
+/// The rows above the list's top and below its last shown row.
+fn rows_beyond(heights: &[usize], offset: usize, space: usize) -> (usize, usize) {
+    let mut used = 0;
+    let shown = heights
+        .iter()
+        .skip(offset)
+        .take_while(|height| {
+            used += **height;
+            used <= space
+        })
+        .count();
+    (offset, heights.len().saturating_sub(offset + shown))
 }
 
 /// The rendered diff for the selected file or commit, or what is still missing for it.
