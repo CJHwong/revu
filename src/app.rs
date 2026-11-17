@@ -2020,7 +2020,7 @@ mod tests {
         assert_eq!(app.theme_menu, Some(1));
         app.handle_key(key(KeyCode::Char('j')));
         let action = app.handle_key(key(KeyCode::Enter));
-        assert!(matches!(action, Some(Action::SetTheme("dracula"))));
+        assert!(matches!(action, Some(Action::SetTheme("catppuccin_mocha"))));
         assert!(app.theme_menu.is_none());
         app.handle_key(key(KeyCode::Char('T')));
         app.handle_key(key(KeyCode::Esc));

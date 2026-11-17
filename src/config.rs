@@ -11,7 +11,10 @@ pub const DEFAULT_CONFIG: &str = r#"# rs-github-inbox config. Press r in the inb
 # "sort:updated-desc" unless the query has its own sort:.
 updated_within_days: 30
 
-# Color theme: dracula or terminal (your terminal's own colors).
+# Color theme, or press T in the app to pick one. dracula, terminal (your terminal's
+# own colors), catppuccin_mocha, catppuccin_macchiato, catppuccin_frappe, nord,
+# gruvbox_dark, solarized_dark, one_half_dark, monokai, and the light ones:
+# catppuccin_latte, gruvbox_light, solarized_light, one_half_light, github.
 theme: dracula
 
 # Runs when you press d. {repo}, {number} and {url} are replaced.
