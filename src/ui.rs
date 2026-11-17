@@ -293,7 +293,7 @@ fn render_inbox(frame: &mut Frame, app: &mut App, paint: Paint) {
 
 fn inbox_status(app: &App, paint: Paint) -> Line<'static> {
     let theme = paint.theme;
-    let mut spans = vec![paint.bold(" GitHub Inbox ", theme.heading)];
+    let mut spans = vec![paint.bold(" revu ", theme.heading)];
     if app.loading {
         spans.push(paint.span(" loading...", theme.warning));
     } else if let Some(fetched_at) = app.fetched_at {
