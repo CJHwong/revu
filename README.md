@@ -4,7 +4,7 @@ A terminal version of GitHub's pull request inbox. It shows the pull requests yo
 
 ## Requirements
 
-- The GitHub CLI (`gh`), logged in. The tool calls `gh api graphql` and stores no token of its own.
+- The GitHub CLI (`gh`), logged in. The tool calls `gh api graphql` and stores no token of its own. When gh is missing or logged out, the app says so in place of the inbox, with the command that fixes it; `r` checks again.
 - Rust, to build it.
 
 ## Install
@@ -26,7 +26,7 @@ The first run writes `~/.config/rs-github-inbox/config.yaml` (or `$XDG_CONFIG_HO
 - `updated_within_days`: adds `updated:>=<date>` to every query. Remove the key to see older pull requests.
 - `theme`: `dracula` (the default) or `terminal`, which uses your terminal's own colors.
 - `workspace_dir`: the folder that holds your clones. The Files changed tab asks for it once and appends it here.
-- `diff_renderers`: the diff views that `m` switches between, as shell commands run inside the clone. `{base}`, `{head}`, `{paths}` and `{width}` are replaced and quoted for the shell. `{syntax_theme}`, `{added_bg}` and `{removed_bg}` come from the app's theme; the default `delta` command passes them, so all three renderers share one set of syntax colors and change tints, and follow a theme change. The defaults are `word` (`git diff --word-diff`), `delta` and `difftastic`. `highlight: true` on a renderer adds syntax colors from `bat`, and shows the renderer's red and green as a background tint. It is on for `word` and `difftastic`, which color little of the code themselves. Without `bat`, the output shows as the renderer drew it. A renderer whose command is not installed says so once, and `m` skips it for the rest of the session. When the diff pane is narrower than 100 columns, difftastic draws one column instead of two, unless you set `DFT_DISPLAY` yourself.
+- `diff_renderers`: the diff views that `m` switches between, as shell commands run inside the clone. `{base}`, `{head}`, `{paths}` and `{width}` are replaced and quoted for the shell. `{syntax_theme}`, `{added_bg}` and `{removed_bg}` come from the app's theme; the default `delta` command passes them, so all three renderers share one set of syntax colors and change tints, and follow a theme change. The defaults are `word` (`git diff --word-diff`), `delta` and `difftastic`. `highlight: true` on a renderer adds syntax colors from `bat`, and shows the renderer's red and green as a background tint. It is on for `word` and `difftastic`, which color little of the code themselves. Without `bat`, the output shows as the renderer drew it. `requires` names the program a renderer needs, and `install` how to get it. At startup, a renderer whose program is not on PATH drops out of `m`, a saved choice of it shows `word` instead without being forgotten, and the first diff you open says what is missing and how to add it. A renderer without `requires` that fails with "command not found" is skipped the same way. When the diff pane is narrower than 100 columns, difftastic draws one column instead of two, unless you set `DFT_DISPLAY` yourself.
 - `open_diff`: the shell command that `d` runs. `{repo}`, `{number}` and `{url}` are replaced. The default is `gh pr diff {number} -R {repo} | delta`.
 
 A search shows at most 100 pull requests. A group with more matches shows a count like `100 of 140`.

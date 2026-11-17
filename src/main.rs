@@ -39,6 +39,8 @@ use repo::{CloneLookup, LocalRepo};
 
 /// Results from the fetch threads. Errors are strings because they only get displayed.
 enum Message {
+    /// gh is missing or logged out; found after an inbox fetch failed.
+    GhProblem(github::GhProblem),
     /// The repo's labels, for the label menu.
     Labels {
         pr: PrRef,
@@ -149,6 +151,7 @@ fn main() -> Result<()> {
     };
     let mut app = App::new();
     app.renderer_names = renderer_names(&session.config);
+    check_renderers(&session.config, &mut app);
     app.workspace_dir = session.config.workspace_dir.clone();
     app.updated_within_days = session.config.updated_within_days;
     match config::load_prefs(&config::prefs_path(&session.config_path)) {
@@ -299,6 +302,7 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
                 result,
                 fetched_at,
             } => app.set_group(generation, index, result, fetched_at),
+            Message::GhProblem(problem) => app.gh_problem = Some(problem),
             Message::Activity { pr, result } => {
                 app.set_activity(&pr, result.map(|activity| *activity))
             }
@@ -497,6 +501,40 @@ fn perform(
         } => start_viewed_sync(session, pr, pull_request_id, path, viewed),
     }
     Ok(true)
+}
+
+/// Leaves renderers whose program is not on PATH out of the m cycle, and words the
+/// warning the diff footer shows once.
+fn check_renderers(config: &Config, app: &mut App) {
+    app.missing_renderers.clear();
+    let mut missing = Vec::new();
+    let mut installs = Vec::new();
+    for (index, renderer) in config.diff_renderers.iter().enumerate() {
+        let Some(program) = &renderer.requires else {
+            continue;
+        };
+        if repo::on_path(program) {
+            continue;
+        }
+        app.missing_renderers.insert(index);
+        missing.push(renderer.name.clone());
+        installs.extend(renderer.install.clone());
+    }
+    app.notice = renderer_warning(&missing, &installs);
+}
+
+/// "difftastic is not installed, so m skips it. To add it: brew install difftastic"
+fn renderer_warning(missing: &[String], installs: &[String]) -> Option<String> {
+    let (names, verb, them) = match missing {
+        [] => return None,
+        [one] => (one.clone(), "is", "it"),
+        [rest @ .., last] => (format!("{} and {last}", rest.join(", ")), "are", "them"),
+    };
+    let mut warning = format!("{names} {verb} not installed, so m skips {them}");
+    if !installs.is_empty() {
+        warning.push_str(&format!(". To add {them}: {}", installs.join("; ")));
+    }
+    Some(warning)
 }
 
 fn renderer_names(config: &Config) -> Vec<String> {
@@ -720,6 +758,7 @@ fn refresh(app: &mut App, session: &mut Session) {
     match config::load_or_init(&session.config_path) {
         Ok(config) => {
             app.renderer_names = renderer_names(&config);
+            check_renderers(&config, app);
             if config.theme != session.config.theme {
                 app.forget_colors();
             }
@@ -748,6 +787,11 @@ fn start_inbox_fetch(session: &Session, app: &mut App) {
         thread::spawn(move || {
             let result =
                 github::fetch_group(&group, updated_since).map_err(|error| format!("{error:#}"));
+            if result.is_err()
+                && let Some(problem) = github::gh_problem()
+            {
+                let _ = sender.send(Message::GhProblem(problem));
+            }
             // The receiver only goes away when the app exits, so a failed send needs no handling.
             let _ = sender.send(Message::Group {
                 generation,
@@ -901,4 +945,27 @@ fn wait_for_enter(message: &str) -> Result<()> {
         .read_line(&mut String::new())
         .context("read Enter")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_renderer_warning_names_what_is_missing_and_how_to_add_it() {
+        let names = |list: &[&str]| list.iter().map(|name| name.to_string()).collect::<Vec<_>>();
+        assert_eq!(renderer_warning(&[], &[]), None);
+        assert_eq!(
+            renderer_warning(
+                &names(&["difftastic"]),
+                &names(&["brew install difftastic"])
+            )
+            .unwrap(),
+            "difftastic is not installed, so m skips it. To add it: brew install difftastic"
+        );
+        assert_eq!(
+            renderer_warning(&names(&["delta", "difftastic"]), &[]).unwrap(),
+            "delta and difftastic are not installed, so m skips them"
+        );
+    }
 }

@@ -325,6 +325,18 @@ pub fn fill_template(template: &str, values: &[(&str, String)]) -> String {
 /// Runs a renderer command inside the clone and returns its colored output. With
 /// `whole_file`, git and difftastic show the whole file around the changes, so the
 /// renderer draws the full file with its changes marked.
+/// True when `program` is an executable file in one of PATH's folders.
+pub fn on_path(program: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        fs::metadata(dir.join(program))
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+    })
+}
+
 /// The words a renderer's error starts with when its command is missing; the app then
 /// leaves that renderer out of the m cycle.
 pub const NOT_INSTALLED: &str = "is not installed";

@@ -339,12 +339,25 @@ pub struct DetailView {
 }
 
 impl DetailView {
-    fn new(pr: PrRef, prefs: &ViewPrefs, renderer_names: &[String]) -> Self {
-        let renderer = prefs
+    /// A saved renderer that is not installed gives way to the first one that is; the
+    /// saved choice stays, for when it is installed later.
+    fn new(
+        pr: PrRef,
+        prefs: &ViewPrefs,
+        renderer_names: &[String],
+        missing: &HashSet<usize>,
+    ) -> Self {
+        let saved = prefs
             .renderer
             .as_ref()
             .and_then(|name| renderer_names.iter().position(|known| known == name))
             .unwrap_or(0);
+        let renderer = match missing.contains(&saved) {
+            false => saved,
+            true => (0..renderer_names.len())
+                .find(|index| !missing.contains(index))
+                .unwrap_or(saved),
+        };
         Self {
             pr,
             detail: None,
@@ -1619,6 +1632,12 @@ pub struct App {
     pub label_menu: Option<LabelMenu>,
     /// Renderers whose command is not installed; m skips them.
     pub missing_renderers: HashSet<usize>,
+    /// A warning for the diff footer, such as a renderer that is not installed.
+    pub notice: Option<String>,
+    /// The notice was drawn; the next key clears it.
+    pub notice_seen: bool,
+    /// gh is missing or logged out; the whole screen says how to fix it.
+    pub gh_problem: Option<crate::github::GhProblem>,
     /// A write to GitHub is running; the footer says what it saves.
     pub saving: Option<SaveNote>,
     /// The last write succeeded; the footer says so until the next key.
@@ -1667,6 +1686,9 @@ impl App {
             composer: None,
             label_menu: None,
             missing_renderers: HashSet::new(),
+            notice: None,
+            notice_seen: false,
+            gh_problem: None,
             saving: None,
             saved: None,
             reload_after_write: None,
@@ -1681,6 +1703,19 @@ impl App {
         }
     }
 
+    /// The renderer to save. While the saved one is not installed, the view shows a
+    /// stand-in, and the saved choice stays for when it is installed.
+    fn kept_renderer(&self, shown: usize) -> Option<String> {
+        let saved_is_missing = self.prefs.renderer.as_ref().is_some_and(|name| {
+            let index = self.renderer_names.iter().position(|known| known == name);
+            index.is_some_and(|index| self.missing_renderers.contains(&index))
+        });
+        match saved_is_missing {
+            true => self.prefs.renderer.clone(),
+            false => self.renderer_names.get(shown).cloned(),
+        }
+    }
+
     /// Takes the open PR's view toggles as the ones to keep. Returns true when they
     /// changed, so the caller saves them.
     pub fn sync_prefs(&mut self) -> bool {
@@ -1691,7 +1726,7 @@ impl App {
             newest_first: view.comments.newest_first,
             no_bots: view.comments.no_bots,
             diff_wrap: view.diff_wrap,
-            renderer: self.renderer_names.get(view.renderer).cloned(),
+            renderer: self.kept_renderer(view.renderer),
             tree_view: view.tree_view,
             hide_viewed: view.hide_viewed,
             file_list_hidden: view.file_list_hidden,
@@ -2106,6 +2141,19 @@ impl App {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
         self.saved = None;
+        if self.notice_seen {
+            self.notice = None;
+        }
+        if self.gh_problem.is_some() {
+            return match key.code {
+                KeyCode::Char('q') => Some(Action::Quit),
+                KeyCode::Char('r') => {
+                    self.gh_problem = None;
+                    Some(Action::Refresh)
+                }
+                _ => None,
+            };
+        }
         if self.composer.is_some() {
             return self.composer_key(key);
         }
@@ -2576,7 +2624,12 @@ impl App {
 
     fn open_pr(&mut self, pr: PrRef) -> Action {
         self.error = None;
-        let view = DetailView::new(pr.clone(), &self.prefs, &self.renderer_names);
+        let view = DetailView::new(
+            pr.clone(),
+            &self.prefs,
+            &self.renderer_names,
+            &self.missing_renderers,
+        );
         self.screen = Screen::Detail(Box::new(view));
         Action::FetchDetail(pr)
     }
@@ -2692,8 +2745,13 @@ impl App {
                 view.show_tab(Tab::ALL.get(index).copied().unwrap_or(view.tab));
             }
             KeyCode::Char('m') if diff_pane => {
-                view.renderer =
-                    next_renderer(view.renderer, renderer_count, &self.missing_renderers);
+                let next = next_renderer(view.renderer, renderer_count, &self.missing_renderers);
+                if next == view.renderer {
+                    self.notice = Some("no other renderer is installed".to_string());
+                    self.notice_seen = false;
+                    return None;
+                }
+                view.renderer = next;
                 view.diff_scroll = 0;
             }
             KeyCode::Char('J') if diff_pane => view.scroll_diff(3),
@@ -2761,7 +2819,7 @@ impl App {
     fn reload(view: &mut DetailView, prefs: &ViewPrefs, renderer_names: &[String]) -> Action {
         let tab = view.tab;
         let renderer = view.renderer;
-        *view = DetailView::new(view.pr.clone(), prefs, renderer_names);
+        *view = DetailView::new(view.pr.clone(), prefs, renderer_names, &HashSet::new());
         view.tab = tab;
         view.renderer = renderer;
         Action::FetchDetail(view.pr.clone())
@@ -3459,6 +3517,54 @@ mod tests {
 
     fn ctrl(character: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn a_saved_renderer_that_is_not_installed_gives_way_to_one_that_is() {
+        let names: Vec<String> = ["word", "delta", "difftastic"].map(String::from).to_vec();
+        let prefs = ViewPrefs {
+            renderer: Some("difftastic".to_string()),
+            ..ViewPrefs::default()
+        };
+        let pr = PrRef {
+            repo: "acme/app".to_string(),
+            number: 1,
+        };
+        let view = DetailView::new(pr.clone(), &prefs, &names, &HashSet::from([2]));
+        assert_eq!(view.renderer, 0);
+        let view = DetailView::new(pr, &prefs, &names, &HashSet::new());
+        assert_eq!(
+            view.renderer, 2,
+            "the saved choice returns once it is installed"
+        );
+    }
+
+    #[test]
+    fn a_stand_in_renderer_is_not_saved_over_the_missing_choice() {
+        let mut app = app_with(vec![group("A", &[7], false)]);
+        app.renderer_names = ["word", "difftastic"].map(String::from).to_vec();
+        app.missing_renderers = HashSet::from([1]);
+        app.prefs.renderer = Some("difftastic".to_string());
+        assert_eq!(app.kept_renderer(0).as_deref(), Some("difftastic"));
+        app.missing_renderers.clear();
+        assert_eq!(app.kept_renderer(0).as_deref(), Some("word"));
+    }
+
+    #[test]
+    fn the_gh_screen_takes_only_retry_and_quit() {
+        let mut app = app_with(vec![group("A", &[7], false)]);
+        app.gh_problem = Some(crate::github::GhProblem::Missing);
+        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
+        assert!(matches!(app.screen, Screen::Inbox));
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Char('q'))),
+            Some(Action::Quit)
+        ));
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Char('r'))),
+            Some(Action::Refresh)
+        ));
+        assert!(app.gh_problem.is_none(), "r clears it until the next check");
     }
 
     #[test]

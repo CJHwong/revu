@@ -446,6 +446,37 @@ fn split_repo(repo: &str) -> Result<(&str, &str)> {
         .with_context(|| format!("repo \"{repo}\" is not owner/name"))
 }
 
+/// Why gh cannot reach GitHub.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GhProblem {
+    /// gh is not on PATH.
+    Missing,
+    /// gh runs but has no working login; holds what gh said.
+    LoggedOut(String),
+}
+
+/// Asks gh whether it is installed and logged in. It runs only after a fetch fails, so
+/// a working setup pays nothing for it.
+pub fn gh_problem() -> Option<GhProblem> {
+    let output = match Command::new("gh").args(["auth", "status"]).output() {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Some(GhProblem::Missing);
+        }
+        // gh could not start for another reason; the fetch error already says so.
+        Err(_) => return None,
+        Ok(output) => output,
+    };
+    if output.status.success() {
+        return None;
+    }
+    let said = [output.stderr, output.stdout]
+        .iter()
+        .map(|bytes| String::from_utf8_lossy(bytes).trim().to_string())
+        .find(|text| !text.is_empty())
+        .unwrap_or_default();
+    Some(GhProblem::LoggedOut(said))
+}
+
 /// Returns the GraphQL `data` object. A GraphQL error fails the call even when gh exits 0.
 fn run_graphql(args: &[String]) -> Result<Value> {
     // -i adds the response headers, which carry the rate limit.

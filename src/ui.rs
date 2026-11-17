@@ -14,6 +14,7 @@ use crate::app::{
 };
 use crate::editor::Editor;
 use crate::file_tree::FileRow;
+use crate::github::GhProblem;
 use crate::line_diff::RowKind;
 use crate::model::{
     ChangedFile, CheckLine, CheckState, CheckSummary, CommitLine, Group, Label, Lifecycle,
@@ -52,8 +53,16 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: &Theme, now: DateTime<Utc
         view.clicks.clear();
     }
     frame.render_widget(Block::new().style(base), frame.area());
+    if let Some(problem) = &app.gh_problem {
+        render_gh_problem(frame, problem, paint);
+        return;
+    }
     if let Screen::Detail(view) = &mut app.screen {
-        let status = status_span(app.error.as_deref(), app.saving, app.saved, paint);
+        // A renderer warning waits for a tab that shows a diff, where it applies.
+        let diff_tab = matches!(view.tab, Tab::Files | Tab::Commits);
+        let notice = app.notice.as_deref().filter(|_| diff_tab);
+        app.notice_seen |= notice.is_some();
+        let status = status_span(app.error.as_deref(), app.saving, app.saved, notice, paint);
         render_detail(frame, view, status, &app.renderer_names, paint);
     } else {
         render_inbox(frame, app, paint);
@@ -1109,6 +1118,7 @@ fn status_span(
     error: Option<&str>,
     saving: Option<SaveNote>,
     saved: Option<&str>,
+    notice: Option<&str>,
     paint: Paint,
 ) -> Option<Span<'static>> {
     let theme = paint.theme;
@@ -1118,7 +1128,72 @@ fn status_span(
     if let Some(note) = saving {
         return Some(paint.span(format!("◷ {}", note.doing), theme.warning));
     }
-    saved.map(|done| paint.span(format!("✓ {done}"), theme.success))
+    if let Some(done) = saved {
+        return Some(paint.span(format!("✓ {done}"), theme.success));
+    }
+    notice.map(|text| paint.span(format!("! {text}"), theme.warning))
+}
+
+/// Without a working gh the app can fetch nothing, so the whole screen says what is
+/// wrong and the command that fixes it, instead of an inbox of empty groups.
+fn render_gh_problem(frame: &mut Frame, problem: &GhProblem, paint: Paint) {
+    let theme = paint.theme;
+    let command = |text: &str| Line::from(paint.span(format!("  {text}"), theme.accent));
+    let plain = |text: &str| Line::from(paint.span(text.to_string(), theme.foreground));
+    let (title, mut lines) = match problem {
+        GhProblem::Missing => (
+            " The GitHub CLI is not installed ",
+            vec![
+                plain("This app reads GitHub through the gh command, and gh is not on PATH."),
+                plain(""),
+                plain("Install it, then log in:"),
+                command("brew install gh"),
+                command("gh auth login"),
+            ],
+        ),
+        GhProblem::LoggedOut(said) => {
+            let mut lines = vec![
+                plain("gh is installed but cannot reach GitHub. gh says:"),
+                plain(""),
+            ];
+            lines.extend(
+                said.lines()
+                    .map(|line| Line::from(paint.span(format!("  {}", line.trim()), theme.muted))),
+            );
+            lines.extend([
+                plain(""),
+                plain("Log in, or log in again:"),
+                command("gh auth login"),
+            ]);
+            (" The GitHub CLI is not logged in ", lines)
+        }
+    };
+    lines.extend([
+        plain(""),
+        Line::from(paint.span("r checks again, q quits", theme.muted)),
+    ]);
+    let area = frame.area();
+    let width = lines
+        .iter()
+        .map(Line::width)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(4)
+        .min(usize::from(area.width)) as u16;
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let popup = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    };
+    let block = popup_block(title, paint);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
 }
 
 /// Comment mode: the file's plain diff with old and new line numbers, the cursor and

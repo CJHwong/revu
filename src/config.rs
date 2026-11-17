@@ -30,14 +30,19 @@ open_diff: "gh pr diff {number} -R {repo} | delta"
 # {added_bg} and {removed_bg} come from the app's theme, so a renderer that colors
 # code itself can match the others. Values are quoted for the shell, so write
 # {paths}, not "{paths}". highlight: true adds syntax colors from bat to a renderer
-# that has none of its own.
+# that has none of its own. requires names the program a renderer needs: when it is
+# not on PATH, m skips that renderer and the app says how to install it.
 diff_renderers:
   - name: word
     command: git diff --color=always --word-diff=color {base}...{head} -- {paths}
     highlight: true
   - name: delta
+    requires: delta
+    install: brew install git-delta
     command: git diff {base}...{head} -- {paths} | delta --paging=never --width={width} --syntax-theme={syntax_theme} --plus-style="syntax "{added_bg} --plus-emph-style="syntax "{added_bg} --plus-non-emph-style=syntax --minus-style="syntax "{removed_bg} --minus-emph-style="syntax "{removed_bg} --minus-non-emph-style=syntax
   - name: difftastic
+    requires: difft
+    install: brew install difftastic
     command: GIT_EXTERNAL_DIFF="difft --color=always --width={width}" git diff --ext-diff {base}...{head} -- {paths}
     highlight: true
 
@@ -76,6 +81,12 @@ pub struct Renderer {
     /// Add syntax colors from `bat` under the renderer's change colors.
     #[serde(default)]
     pub highlight: bool,
+    /// The program the renderer needs; m skips the renderer when it is not on PATH.
+    #[serde(default)]
+    pub requires: Option<String>,
+    /// How to install that program, for the warning.
+    #[serde(default)]
+    pub install: Option<String>,
 }
 
 /// The renderers in DEFAULT_CONFIG, for config files written before the key existed.
