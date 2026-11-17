@@ -611,6 +611,37 @@ impl DetailView {
             _ if forward => self.move_in_tab(chunk as isize),
             _ => self.move_in_tab(-(chunk as isize)),
         }
+        self.skip_empty_rows(forward);
+    }
+
+    /// A chunk step can land between paragraphs; the cursor goes on to the next row with
+    /// text, so it never rests on an empty line.
+    fn skip_empty_rows(&mut self, forward: bool) {
+        let Some(layout) = &self.overview else {
+            return;
+        };
+        let has_text = |row: &crate::markdown::TextRow| {
+            row.line
+                .spans
+                .iter()
+                .any(|span| span.content.chars().any(|char| !" │─╰╯".contains(char)))
+        };
+        let find = |forward: bool| {
+            if forward {
+                (self.cursor..layout.rows.len()).find(|index| has_text(&layout.rows[*index]))
+            } else {
+                (0..=self.cursor)
+                    .rev()
+                    .find(|index| has_text(&layout.rows[*index]))
+            }
+        };
+        if let Some(target) = find(forward) {
+            self.move_overview(target as isize - self.cursor as isize);
+        } else if let Some(target) = find(!forward) {
+            // At an end of the page there is no text ahead. The cursor steps back to the
+            // last text while the page stays put.
+            self.cursor = target;
+        }
     }
 
     /// Fold numbers follow the order on screen, so a new filter or order starts every fold
@@ -1284,6 +1315,19 @@ impl App {
                 view.hide_viewed = !view.hide_viewed;
                 view.clamp_file_selection();
             }
+            KeyCode::Char('j') | KeyCode::Down if view.tab == Tab::Overview => {
+                view.wheel_overview(true)
+            }
+            KeyCode::Char('k') | KeyCode::Up if view.tab == Tab::Overview => {
+                view.wheel_overview(false)
+            }
+            KeyCode::Char('n') if view.tab == Tab::Overview => {
+                let no_bots = !view.comments.no_bots;
+                view.set_comments(crate::overview::CommentView {
+                    no_bots,
+                    ..view.comments
+                });
+            }
             KeyCode::Char('j') | KeyCode::Down => view.move_in_tab(1),
             KeyCode::Char('k') | KeyCode::Up => view.move_in_tab(-1),
             KeyCode::Char(' ') | KeyCode::PageDown => view.move_in_tab(view.page_step()),
@@ -1620,7 +1664,9 @@ mod tests {
         let Screen::Detail(view) = &mut app.screen else {
             unreachable!()
         };
-        let mut rows: Vec<TextRow> = (0..120).map(|_| TextRow::blank()).collect();
+        let mut rows: Vec<TextRow> = (0..120)
+            .map(|_| TextRow::plain(ratatui::text::Line::from("text")))
+            .collect();
         for anchor in [0, 5, 100] {
             rows[anchor] = TextRow::anchor(ratatui::text::Line::from("card"));
         }
@@ -1659,21 +1705,23 @@ mod tests {
         detail.tab = Tab::Overview;
         detail.overview = Some(OverviewLayout {
             width: 60,
-            rows: (0..200).map(|_| TextRow::blank()).collect(),
+            rows: (0..200)
+                .map(|_| TextRow::plain(ratatui::text::Line::from("text")))
+                .collect(),
         });
         detail.page = 30;
         app.handle_key(key(KeyCode::Char('j')));
         assert_eq!(
             (view(&app).cursor, view(&app).scroll),
-            (1, 1),
-            "the first j scrolls"
+            (10, 10),
+            "with no card ahead, j reads on by a third"
         );
         app.handle_key(key(KeyCode::Char('G')));
         assert_eq!((view(&app).cursor, view(&app).scroll), (199, 170));
         app.handle_key(key(KeyCode::Char('k')));
         assert_eq!(
             (view(&app).cursor, view(&app).scroll),
-            (198, 169),
+            (189, 160),
             "the first k after G scrolls"
         );
         app.handle_key(key(KeyCode::Char('g')));

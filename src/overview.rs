@@ -19,6 +19,8 @@ use crate::ui::relative_time;
 pub struct CommentView {
     pub filter: CommentFilter,
     pub newest_first: bool,
+    /// Hide comments and reviews written by bots.
+    pub no_bots: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -71,12 +73,19 @@ impl CommentFilter {
         if threads.is_empty() && !mine {
             return None;
         }
+        // Under Mine, someone else's review shows only the threads you replied in.
+        let body = if self == Self::Mine && !comment.mine {
+            String::new()
+        } else {
+            comment.body.clone()
+        };
         Some(TimelineItem::Comment(Comment {
             threads: if mine {
                 comment.threads.clone()
             } else {
                 threads
             },
+            body,
             ..comment.clone()
         }))
     }
@@ -313,6 +322,7 @@ fn timeline_rows(context: &Context, width: usize, folds: &mut Folds) -> Vec<Text
     let mut items: Vec<TimelineItem> = activity
         .timeline
         .iter()
+        .filter(|item| !(context.comments.no_bots && is_bot(item)))
         .filter_map(|item| filter.apply(item))
         .collect();
     if items.is_empty() {
@@ -335,6 +345,10 @@ fn timeline_rows(context: &Context, width: usize, folds: &mut Folds) -> Vec<Text
 
 /// " Comments   All  Unresolved  Mine    Oldest first      f filter  F order", with the
 /// current filter as a chip.
+fn is_bot(item: &TimelineItem) -> bool {
+    matches!(item, TimelineItem::Comment(comment) if comment.author.bot)
+}
+
 fn comments_header(context: &Context) -> Line<'static> {
     let theme = context.theme;
     let mut spans = vec![context.bold(" Comments   ", theme.heading)];
@@ -355,7 +369,13 @@ fn comments_header(context: &Context) -> Line<'static> {
         "Oldest first"
     };
     spans.push(context.span(format!("    ↕ {order}"), theme.accent));
-    spans.push(context.span("      f filter  F order", theme.muted));
+    let bots = if context.comments.no_bots {
+        "    ☑ No bots"
+    } else {
+        "    ☐ No bots"
+    };
+    spans.push(context.span(bots, theme.accent));
+    spans.push(context.span("      f filter  F order  n bots", theme.muted));
     Line::from(spans)
 }
 
@@ -457,7 +477,8 @@ fn thread_block(context: &Context, thread: &ThreadLine) -> Block {
     Block::Details {
         summary,
         body,
-        open: !thread.resolved,
+        // Under Mine the threads are the point, so they start open even when resolved.
+        open: !thread.resolved || context.comments.filter == CommentFilter::Mine,
     }
 }
 
@@ -531,6 +552,7 @@ mod tests {
         let view = |filter, newest_first| CommentView {
             filter,
             newest_first,
+            no_bots: false,
         };
 
         let unresolved = rendered_with(&[], view(CommentFilter::Unresolved, false));
@@ -548,6 +570,16 @@ mod tests {
         let mine = rendered_with(&[], view(CommentFilter::Mine, false));
         assert!(shows(&mine, "Because."), "a thread I replied in shows");
         assert!(!shows(&mine, "Looks fine"));
+
+        let humans = rendered_with(
+            &[],
+            CommentView {
+                no_bots: true,
+                ..CommentView::default()
+            },
+        );
+        assert!(!shows(&humans, "Looks fine"), "the bot's comment is hidden");
+        assert!(shows(&humans, "lead requested"));
 
         let newest = rendered_with(&[], view(CommentFilter::All, true));
         let position = |lines: &[String], text: &str| {

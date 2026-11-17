@@ -50,10 +50,10 @@ Press `?` anywhere for this list.
 | Pull request | `g` / `G`, `Space` / `b` | Top, bottom, page down, page up |
 | Pull request | `s` | Search every file in the repo at the PR head, not only the changed ones. `Enter` opens the file at the match. It needs the local clone, which the Files changed or Commits tab finds first. |
 | Pull request | `r` | Fetch the pull request again |
-| Overview | `j` / `k` | Move the cursor. The cursor stays a third of the way down, so each move scrolls the page. |
+| Overview | `j` / `k` | Next or previous comment, review thread or folded block. Inside one taller than the screen, a third of a screen. The cursor never stops on an empty line. |
 | Overview | `Enter` | Open or close the card, review thread or `<details>` block under the cursor |
 | Overview | `]` / `[` | Next or previous card or folded block |
-| Overview | `f` / `F` | Filter the comments (All, Unresolved, Mine), flip oldest or newest first |
+| Overview | `f` / `F` / `n` | Filter the comments (All, Unresolved, Mine), flip oldest or newest first, hide bots. Mine shows only your own words, with the threads you replied in open. |
 | Files changed | `Enter` | Show the whole file at the PR head |
 | Files changed | `v` | Toggle Viewed. It syncs to GitHub's Viewed checkbox at once. |
 | Files changed | `H` | Hide viewed files |

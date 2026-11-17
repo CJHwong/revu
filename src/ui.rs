@@ -231,7 +231,7 @@ fn pad_span(span: Span<'static>, width: usize) -> Span<'static> {
 fn detail_help(tab: Tab) -> &'static str {
     match tab {
         Tab::Overview => {
-            "j/k move | enter fold | ]/[ next card | f/F filter, order | o browser | ? keys"
+            "j/k next comment | enter fold | f/F/n filter, order, bots | o browser | ? keys"
         }
         Tab::Checks => "j/k move | enter/o browser | r reload | esc back | ? keys",
         Tab::Commits => {
@@ -279,12 +279,15 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
     (
         "Overview",
         &[
-            ("j/k", "move the cursor"),
+            (
+                "j/k, wheel",
+                "next or previous comment, thread or fold; a long one by a third of a screen",
+            ),
             ("enter", "open or close the folded block under the cursor"),
             ("], [", "next or previous card or folded block"),
             (
-                "f, F",
-                "filter comments: all, unresolved, mine; flip the order",
+                "f, F, n",
+                "filter comments (all, unresolved, mine), flip the order, hide bots",
             ),
         ],
     ),
