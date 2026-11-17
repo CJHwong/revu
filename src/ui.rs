@@ -629,6 +629,7 @@ fn render_diff_pane(
     frame.render_widget(block, area);
     view.diff_width = inner.width;
     view.diff_left = area.x;
+    view.diff_height = inner.height;
 
     let notice = |text: String, color: Color| {
         Paragraph::new(paint.span(text, color)).wrap(Wrap { trim: false })

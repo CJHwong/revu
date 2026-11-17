@@ -203,6 +203,8 @@ pub struct DetailView {
     pub repo: RepoState,
     pub renderer: usize,
     pub diff_scroll: u16,
+    /// The diff pane's height at the last draw.
+    pub diff_height: u16,
     /// The diff pane's width at the last draw; diffs render to fit it.
     pub diff_width: u16,
     /// The diff pane's left column at the last draw. The mouse wheel scrolls the diff to
@@ -238,6 +240,7 @@ impl DetailView {
             diff_scroll: 0,
             diff_width: 0,
             diff_left: 0,
+            diff_height: 0,
             diffs: HashMap::new(),
             overlays: Vec::new(),
             find: None,
@@ -271,6 +274,56 @@ impl DetailView {
 
     fn scroll_diff(&mut self, delta: i16) {
         self.diff_scroll = self.diff_scroll.saturating_add_signed(delta);
+    }
+
+    /// One wheel tick over a diff: to the next or previous hunk, or a third of the pane
+    /// when that hunk is more than a pane away, so a long hunk can still be read.
+    fn wheel_diff(&mut self, forward: bool) {
+        let chunk = (self.diff_height / 3).max(3);
+        let current = self.diff_scroll as usize;
+        let starts = self.hunk_starts();
+        let target = if forward {
+            starts.into_iter().find(|start| *start > current)
+        } else {
+            starts.into_iter().rev().find(|start| *start < current)
+        };
+        match target {
+            Some(target) if target.abs_diff(current) <= self.diff_height as usize => {
+                self.diff_scroll = target as u16;
+            }
+            _ if forward => self.scroll_diff(chunk as i16),
+            _ => self.scroll_diff(-(chunk as i16)),
+        }
+        // The wheel stops at the last screen of the diff instead of scrolling into blank rows.
+        if let Some(DiffOutput::Done(Ok(text))) =
+            self.current_diff_key().and_then(|key| self.diffs.get(&key))
+        {
+            let last_screen = text.lines.len().saturating_sub(self.diff_height as usize);
+            self.diff_scroll = self.diff_scroll.min(last_screen as u16);
+        }
+    }
+
+    /// The lines where a hunk starts in the shown diff, in the shapes the default
+    /// renderers print. A custom renderer without them scrolls by chunks.
+    fn hunk_starts(&self) -> Vec<usize> {
+        let Some(DiffOutput::Done(Ok(text))) =
+            self.current_diff_key().and_then(|key| self.diffs.get(&key))
+        else {
+            return Vec::new();
+        };
+        text.lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| {
+                let plain: String = line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect();
+                is_hunk_start(&plain)
+            })
+            .map(|(index, _)| index)
+            .collect()
     }
 
     /// The clone folder and the PR's head commit, once the clone is ready.
@@ -1025,7 +1078,7 @@ impl App {
                 self.error = view.overlay_key(key).err();
             }
         } else if diff_pane && view.diff_left > 0 && column >= view.diff_left {
-            view.scroll_diff(3 * delta.signum() as i16);
+            view.wheel_diff(delta > 0);
         } else if view.tab == Tab::Overview {
             view.wheel_overview(delta > 0);
         } else {
@@ -1339,6 +1392,18 @@ impl App {
     }
 }
 
+/// git's "@@ -1,3 +1,4 @@", delta's box top "─────┐", or difftastic's "a.md --- 2/5 --- Text".
+fn is_hunk_start(line: &str) -> bool {
+    let line = line.trim_end();
+    let delta_box =
+        line.ends_with('┐') && line.trim_end_matches('┐').chars().all(|char| char == '─');
+    let difftastic = line.split(" --- ").nth(1).is_some_and(|part| {
+        part.split_once('/')
+            .is_some_and(|(at, of)| at.parse::<u32>().is_ok() && of.parse::<u32>().is_ok())
+    });
+    line.starts_with("@@") || delta_box || difftastic
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1613,6 +1678,19 @@ mod tests {
         );
         app.handle_key(key(KeyCode::Char('g')));
         assert_eq!((view(&app).cursor, view(&app).scroll), (0, 0));
+    }
+
+    #[test]
+    fn hunk_starts_are_found_in_each_default_renderer() {
+        assert!(is_hunk_start("@@ -254,10 +254,10 @@ Workflow:"));
+        assert!(is_hunk_start("─────────────────┐"));
+        assert!(is_hunk_start("prompts/a.md --- 2/5 --- Text"));
+        assert!(
+            !is_hunk_start("────────────────────"),
+            "delta's file rule is not a hunk"
+        );
+        assert!(!is_hunk_start("- a list item --- with dashes"));
+        assert!(!is_hunk_start("   and read files via `gh api`."));
     }
 
     #[test]
