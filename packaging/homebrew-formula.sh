@@ -20,8 +20,9 @@ cat <<EOF
 class Revu < Formula
   desc "Your GitHub pull requests, reviewed in the terminal"
   homepage "https://cjhwong.github.io/revu/"
-  version "${version}"
   license "MIT"
+
+  depends_on "gh"
 
   on_macos do
     on_arm do
@@ -44,8 +45,6 @@ class Revu < Formula
       sha256 "$(sha x86_64-unknown-linux-musl)"
     end
   end
-
-  depends_on "gh"
 
   def install
     bin.install "revu"
