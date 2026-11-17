@@ -19,6 +19,9 @@ pub enum CheckState {
     Failing,
     Pending,
     Passing,
+    /// A check whose conditions did not apply. GitHub greys it out; it neither passes
+    /// nor fails.
+    Skipped,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -920,14 +923,13 @@ fn check_summary(rollup: &Rollup) -> Option<CheckSummary> {
     if contexts.total_count == 0 {
         return None;
     }
-    let passed_runs = count_states(
-        &contexts.check_run_counts_by_state,
-        &["SUCCESS", "NEUTRAL", "SKIPPED"],
-    );
+    // Skipped checks count neither way, so a PR with many of them does not look greener.
+    let passed_runs = count_states(&contexts.check_run_counts_by_state, &["SUCCESS", "NEUTRAL"]);
+    let skipped = count_states(&contexts.check_run_counts_by_state, &["SKIPPED"]);
     let passed_statuses = count_states(&contexts.status_context_counts_by_state, &["SUCCESS"]);
     Some(CheckSummary {
         passed: passed_runs + passed_statuses,
-        total: contexts.total_count,
+        total: contexts.total_count.saturating_sub(skipped),
         state: rollup_state(&rollup.state),
     })
 }
@@ -1138,7 +1140,8 @@ fn check_run_state(status: &str, conclusion: Option<&str>) -> CheckState {
         return CheckState::Pending;
     }
     match conclusion {
-        Some("SUCCESS" | "NEUTRAL" | "SKIPPED") => CheckState::Passing,
+        Some("SUCCESS" | "NEUTRAL") => CheckState::Passing,
+        Some("SKIPPED") => CheckState::Skipped,
         _ => CheckState::Failing,
     }
 }
@@ -1627,6 +1630,13 @@ pub mod tests {
             (1, 1, 1, 1, 1)
         );
         assert_eq!((parsed.threads_total, parsed.threads_unresolved), (2, 1));
+    }
+
+    #[test]
+    fn a_skipped_check_neither_passes_nor_fails() {
+        assert_eq!(check_run_state("COMPLETED", Some("SKIPPED")), CheckState::Skipped);
+        assert_eq!(check_run_state("COMPLETED", Some("NEUTRAL")), CheckState::Passing);
+        assert!(CheckState::Passing < CheckState::Skipped, "skipped checks list last");
     }
 
     #[test]

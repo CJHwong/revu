@@ -143,13 +143,13 @@ fn composer_header(composer: &Composer, paint: Paint) -> (String, Vec<Line<'stat
     match &composer.kind {
         ComposeKind::Review {
             verdict,
-            own,
+            comment_only,
             drafts,
         } => {
             let mut choice = vec![paint.span(" ", theme.muted)];
-            let verdicts = match own {
-                true => &[Verdict::Comment][..],
-                false => &[Verdict::Comment, Verdict::Approve, Verdict::RequestChanges][..],
+            let verdicts = match comment_only {
+                Some(_) => &[Verdict::Comment][..],
+                None => &[Verdict::Comment, Verdict::Approve, Verdict::RequestChanges][..],
             };
             for option in verdicts {
                 let label = format!(" {} ", option.label());
@@ -165,10 +165,7 @@ fn composer_header(composer: &Composer, paint: Paint) -> (String, Vec<Line<'stat
                 });
                 choice.push(Span::raw(" "));
             }
-            let note = match own {
-                true => "  GitHub takes only Comment on your own PR",
-                false => "  tab switches",
-            };
+            let note = format!("  {}", comment_only.unwrap_or("tab switches"));
             choice.push(paint.span(note, theme.muted));
             let drafts = match drafts {
                 0 => " no line comments; c in Files changed adds them".to_string(),
@@ -410,6 +407,7 @@ fn check_symbol(state: CheckState, theme: &Theme) -> (&'static str, Color) {
         CheckState::Passing => ("✓", theme.success),
         CheckState::Pending => ("●", theme.warning),
         CheckState::Failing => ("✗", theme.danger),
+        CheckState::Skipped => ("○", theme.muted),
     }
 }
 
@@ -1786,6 +1784,7 @@ fn render_checks(
 /// "CI, took 2m 30s" for a finished check run; status contexts have no workflow.
 fn check_details(check: &CheckLine) -> String {
     let duration = match (check.started_at, check.completed_at) {
+        _ if check.state == CheckState::Skipped => Some("skipped".to_string()),
         (Some(start), Some(end)) => Some(format!("took {}", format_duration(end - start))),
         (Some(_), None) if check.state == CheckState::Pending => Some("running".to_string()),
         _ => None,

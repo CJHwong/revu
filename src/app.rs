@@ -16,8 +16,8 @@ use crate::repo::{GrepHit, LocalRepo};
 
 use crate::config::{GroupConfig, ViewPrefs};
 use crate::model::{
-    ChangedFile, Group, PrActivity, PrDetail, PrRef, PrSummary, Side, Verdict, ViewedState,
-    parse_pr_ref,
+    ChangedFile, Group, Lifecycle, PrActivity, PrDetail, PrRef, PrSummary, Side, Verdict,
+    ViewedState, parse_pr_ref,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1343,6 +1343,17 @@ impl LabelMenu {
     }
 }
 
+/// Why a review can only be a Comment: GitHub refuses your Approve and Request changes
+/// on your own PR, and a verdict means nothing once the PR is merged or closed.
+fn comment_only_reason(detail: &PrDetail) -> Option<&'static str> {
+    match detail.lifecycle {
+        Lifecycle::Merged { .. } => Some("the PR is merged, so only Comment applies"),
+        Lifecycle::Closed { .. } => Some("the PR is closed, so only Comment applies"),
+        _ if detail.viewer_is_author => Some("GitHub takes only Comment on your own PR"),
+        _ => None,
+    }
+}
+
 /// Comment mode's state: the file's numbered rows, the cursor, and a range's other end.
 #[derive(Debug)]
 pub struct LineMode {
@@ -1404,10 +1415,10 @@ pub struct LineTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComposeKind {
-    /// `own`: your own PR, where GitHub takes only Comment.
+    /// `comment_only`: why only Comment applies, on your own PR or a finished one.
     Review {
         verdict: Verdict,
-        own: bool,
+        comment_only: Option<&'static str>,
         drafts: usize,
     },
     LineComment(LineTarget),
@@ -1445,11 +1456,11 @@ impl Composer {
         }
     }
 
-    /// Tab: Comment, Approve, Request changes, in turn. Your own PR takes only Comment.
+    /// Tab: Comment, Approve, Request changes, in turn, unless only Comment applies.
     fn next_verdict(&mut self) {
         if let ComposeKind::Review {
             verdict,
-            own: false,
+            comment_only: None,
             ..
         } = &mut self.kind
         {
@@ -2482,7 +2493,7 @@ impl App {
         };
         let kind = ComposeKind::Review {
             verdict: Verdict::Comment,
-            own: detail.viewer_is_author,
+            comment_only: comment_only_reason(detail),
             drafts: activity.drafts.len(),
         };
         self.composer = Some(Composer::new(view.pr.clone(), detail, activity, kind));
