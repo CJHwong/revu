@@ -47,6 +47,8 @@ pub enum Action {
     /// A changed file in full, drawn by the diff renderer with its changes marked.
     ShowWholeDiff(DiffJob),
     SetWorkspace(String),
+    /// Apply a built-in theme and save it to the config.
+    SetTheme(&'static str),
     CloneRepo {
         pr: PrRef,
         dir: PathBuf,
@@ -888,6 +890,10 @@ pub struct App {
     pub inbox_clicks: Vec<ClickTarget>,
     /// GitHub's API budget after the latest call.
     pub rate_limit: Option<crate::model::RateLimit>,
+    /// The theme menu is open, with this entry of `THEME_NAMES` selected.
+    pub theme_menu: Option<usize>,
+    /// The theme in use, so the menu opens on it.
+    pub theme_name: &'static str,
     /// One flag per group: true while its search is running.
     pub group_loading: Vec<bool>,
     inbox_generation: u64,
@@ -916,6 +922,8 @@ impl App {
             show_help: false,
             inbox_clicks: Vec::new(),
             rate_limit: None,
+            theme_menu: None,
+            theme_name: crate::theme::THEME_NAMES[0],
             group_loading: Vec::new(),
             inbox_generation: 0,
             renderer_names: Vec::new(),
@@ -1279,6 +1287,17 @@ impl App {
             self.show_help = false;
             return None;
         }
+        if self.theme_menu.is_some() {
+            return self.theme_menu_key(key.code);
+        }
+        if key.code == KeyCode::Char('T') {
+            let names = crate::theme::THEME_NAMES;
+            self.theme_menu = names
+                .iter()
+                .position(|name| *name == self.theme_name)
+                .or(Some(0));
+            return None;
+        }
         if key.code == KeyCode::Char('?') {
             self.show_help = true;
             return None;
@@ -1291,6 +1310,26 @@ impl App {
             Screen::Inbox => self.inbox_key(key.code),
             Screen::Detail(_) => self.detail_key(key.code),
         }
+    }
+
+    fn theme_menu_key(&mut self, key: KeyCode) -> Option<Action> {
+        let names = crate::theme::THEME_NAMES;
+        let selected = self.theme_menu?;
+        match key {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.theme_menu = Some((selected + 1) % names.len())
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.theme_menu = Some((selected + names.len() - 1) % names.len());
+            }
+            KeyCode::Enter => {
+                self.theme_menu = None;
+                return Some(Action::SetTheme(names[selected]));
+            }
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('T') => self.theme_menu = None,
+            _ => {}
+        }
+        None
     }
 
     /// A paste goes into the open box, or opens the link box when none is open.
@@ -1971,6 +2010,21 @@ mod tests {
             app.take_diff_request().is_some(),
             "a new theme renders the diff again"
         );
+    }
+
+    #[test]
+    fn the_theme_menu_opens_on_the_current_theme_and_applies_the_pick() {
+        let mut app = app_with(vec![group("A", &[7], false)]);
+        app.theme_name = "terminal";
+        app.handle_key(key(KeyCode::Char('T')));
+        assert_eq!(app.theme_menu, Some(1));
+        app.handle_key(key(KeyCode::Char('j')));
+        let action = app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(action, Some(Action::SetTheme("dracula"))));
+        assert!(app.theme_menu.is_none());
+        app.handle_key(key(KeyCode::Char('T')));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.theme_menu.is_none(), "esc closes without a change");
     }
 
     #[test]

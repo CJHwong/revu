@@ -65,6 +65,9 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: &Theme, now: DateTime<Utc
     if let Some(limit) = app.rate_limit {
         render_rate_limit(frame, limit, paint);
     }
+    if let Some(selected) = app.theme_menu {
+        render_theme_menu(frame, selected, app.theme_name, paint);
+    }
     if app.show_help {
         render_help(frame, paint);
     }
@@ -262,6 +265,7 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
                 "ctrl-l, cmd-l, paste",
                 "open a pull request by link or owner/repo#123",
             ),
+            ("T", "pick a color theme; it is saved to the config"),
             ("?", "this list; any key closes it"),
         ],
     ),
@@ -1371,6 +1375,41 @@ fn reviewer_symbol(state: &str, theme: &Theme) -> (&'static str, Color) {
 }
 
 // ---- Text helpers ----
+
+/// A small box of the built-in themes. The current one has a dot; enter applies the
+/// selected one.
+fn render_theme_menu(frame: &mut Frame, selected: usize, current: &str, paint: Paint) {
+    let theme = paint.theme;
+    let lines: Vec<Line> = crate::theme::THEME_NAMES
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let mark = if *name == current { "●" } else { " " };
+            let line = Line::from(paint.span(format!(" {mark} {name} "), theme.foreground));
+            match index == selected {
+                true => line.style(Style::new().bg(theme.selection)),
+                false => line,
+            }
+        })
+        .collect();
+    let area = frame.area();
+    let width = 36.min(area.width);
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let box_area = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    };
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(theme.heading))
+        .title(paint.bold(" Theme ", theme.heading))
+        .title_bottom(paint.span(" j/k move, enter apply, esc ", theme.muted))
+        .style(Style::new().bg(theme.background).fg(theme.foreground));
+    frame.render_widget(Clear, box_area);
+    frame.render_widget(Paragraph::new(lines).block(block), box_area);
+}
 
 /// The API budget at the right end of the top line, on every screen. It turns yellow under
 /// a fifth left and red under a twentieth.

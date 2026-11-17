@@ -94,6 +94,20 @@ pub fn append_workspace_dir(path: &Path, workspace_dir: &str) -> Result<()> {
     fs::write(path, text).with_context(|| format!("write {}", path.display()))
 }
 
+/// Replaces the `theme:` line, or adds one, and leaves every other line as it was.
+pub fn save_theme(path: &Path, name: &str) -> Result<()> {
+    let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let setting = format!("theme: {name}");
+    let mut lines: Vec<&str> = text.lines().collect();
+    match lines.iter().position(|line| line.starts_with("theme:")) {
+        Some(index) => lines[index] = &setting,
+        None => lines.push(&setting),
+    }
+    let text = lines.join("\n") + "\n";
+    parse(&text).context("the config would no longer parse")?;
+    fs::write(path, text).with_context(|| format!("write {}", path.display()))
+}
+
 fn default_theme() -> Theme {
     theme::by_name("dracula").expect("dracula is a built-in theme")
 }
@@ -170,6 +184,23 @@ mod tests {
             .map(|renderer| renderer.name.as_str())
             .collect();
         assert_eq!(names, ["word", "delta", "difftastic"]);
+    }
+
+    #[test]
+    fn saving_the_theme_replaces_its_line_or_adds_one() {
+        let dir =
+            std::env::temp_dir().join(format!("rs-github-inbox-theme-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.yaml");
+        fs::write(&path, "# keep me\nopen_diff: x\ngroups: []").unwrap();
+        save_theme(&path, "terminal").unwrap();
+        save_theme(&path, "dracula").unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text,
+            "# keep me\nopen_diff: x\ngroups: []\ntheme: dracula\n"
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

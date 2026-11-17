@@ -115,6 +115,7 @@ fn main() -> Result<()> {
     };
     let mut app = App::new();
     app.renderer_names = renderer_names(&session.config);
+    app.theme_name = theme::name_of(&session.config.theme).unwrap_or(app.theme_name);
     start_inbox_fetch(&session, &mut app);
 
     let mut terminal = ratatui::init();
@@ -296,6 +297,7 @@ fn perform(
             });
         }
         Action::SetWorkspace(text) => set_workspace(app, session, text),
+        Action::SetTheme(name) => set_theme(app, session, name),
         Action::CloneRepo { pr, dir } => match session.pending_clone.take() {
             Some(job) if job.pr == pr => {
                 app.set_repo_state(RepoState::Busy(format!(
@@ -380,6 +382,25 @@ fn prepare_repo(app: &mut App, session: &mut Session, job: RepoJob) {
 }
 
 /// Saves the workspace folder, then lets the open PR look for its clone again.
+/// Applies the theme at once, redraws the diffs in its colors, and saves it.
+fn set_theme(app: &mut App, session: &mut Session, name: &'static str) {
+    let theme = match theme::by_name(name) {
+        Ok(theme) => theme,
+        Err(error) => {
+            app.error = Some(format!("{error:#}"));
+            return;
+        }
+    };
+    if theme != session.config.theme {
+        session.config.theme = theme;
+        app.forget_diffs();
+    }
+    app.theme_name = name;
+    if let Err(error) = config::save_theme(&session.config_path, name) {
+        app.error = Some(format!("theme applied but not saved: {error:#}"));
+    }
+}
+
 fn set_workspace(app: &mut App, session: &mut Session, text: String) {
     let dir = repo::expand_home(&text);
     if text.is_empty() || !dir.is_dir() {
@@ -498,6 +519,7 @@ fn refresh(app: &mut App, session: &mut Session) {
             if config.theme != session.config.theme {
                 app.forget_diffs();
             }
+            app.theme_name = theme::name_of(&config.theme).unwrap_or(app.theme_name);
             session.config = config;
         }
         Err(error) => {

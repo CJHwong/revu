@@ -70,6 +70,13 @@ pub fn color_name(color: Color) -> String {
     }
 }
 
+/// The built-in name of a theme, for marking the current one in the menu.
+pub fn name_of(theme: &Theme) -> Option<&'static str> {
+    THEME_NAMES
+        .into_iter()
+        .find(|name| by_name(name).is_ok_and(|named| named == *theme))
+}
+
 pub fn by_name(name: &str) -> Result<Theme> {
     match name {
         "dracula" => Ok(DRACULA),
