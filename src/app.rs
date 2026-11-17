@@ -629,26 +629,10 @@ impl DetailView {
     /// Selects the next (or previous) file that holds the find text, opening folders on the
     /// way, and finds in it once its diff is drawn.
     fn next_find_file(&mut self, forward: bool) -> Result<(), String> {
-        let Some(Ok(found)) = &self.find_files else {
-            return Ok(());
-        };
+        let order = self.find_order();
         let files = self
             .loaded_files()
             .ok_or("the file list is still loading")?;
-        let holds = |index: &usize| found.iter().any(|(path, _)| *path == files[*index].path);
-        let order: Vec<usize> = file_tree::rows(
-            files,
-            &self.visible_files(),
-            self.tree_view,
-            &HashSet::new(),
-        )
-        .into_iter()
-        .filter_map(|row| match row {
-            FileRow::File { index, .. } => Some(index),
-            FileRow::Dir { .. } => None,
-        })
-        .filter(holds)
-        .collect();
         let query = self.find.clone().unwrap_or_default();
         if order.is_empty() {
             return Err(format!("\"{query}\" is in no shown file"));
@@ -676,6 +660,7 @@ impl DetailView {
     /// Runs a find that waited for its file's diff, once the diff is drawn.
     pub fn settle_find(&mut self) {
         let Some(forward) = self.find_pending else {
+            self.follow_redraw();
             return;
         };
         let ready = self
@@ -697,17 +682,7 @@ impl DetailView {
             .find
             .clone()
             .ok_or("press / to find text in the diff")?;
-        let key = self.current_diff_key().ok_or("no diff here")?;
-        let Some(DiffOutput::Done(Ok(text))) = self.diffs.get(&key) else {
-            return Err("the diff is not ready".to_string());
-        };
-        let matches: Vec<usize> = text
-            .lines
-            .iter()
-            .enumerate()
-            .filter(|(_, line)| line_text(line).to_lowercase().contains(&query))
-            .map(|(index, _)| index)
-            .collect();
+        let (key, matches) = self.find_matches(&query)?;
         if matches.is_empty() {
             self.find_hit = None;
             return Err(format!("\"{query}\" is not in this file's diff"));
@@ -723,6 +698,27 @@ impl DetailView {
             let before = matches.iter().rposition(|line| *line < from);
             before.unwrap_or(matches.len() - 1)
         };
+        self.land_on(key, &matches, position);
+        Ok(())
+    }
+
+    /// The lines of the diff on screen that hold the text, with the diff's key.
+    fn find_matches(&self, query: &str) -> Result<(DiffKey, Vec<usize>), String> {
+        let key = self.current_diff_key().ok_or("no diff here")?;
+        let Some(DiffOutput::Done(Ok(text))) = self.diffs.get(&key) else {
+            return Err("the diff is not ready".to_string());
+        };
+        let matches = text
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line_text(line).to_lowercase().contains(query))
+            .map(|(index, _)| index)
+            .collect();
+        Ok((key, matches))
+    }
+
+    fn land_on(&mut self, key: DiffKey, matches: &[usize], position: usize) {
         let line = matches[position];
         self.diff_scroll = u16::try_from(line.saturating_sub(FIND_CONTEXT)).unwrap_or(u16::MAX);
         self.find_hit = Some(FindHit {
@@ -731,7 +727,66 @@ impl DetailView {
             ordinal: position + 1,
             total: matches.len(),
         });
-        Ok(())
+    }
+
+    /// A resize or another renderer draws the same file again under a new key; the find
+    /// stays on the same match there, by its number.
+    fn follow_redraw(&mut self) {
+        let (Some(query), Some(hit), Some(key)) = (
+            self.find.clone(),
+            self.find_hit.as_ref(),
+            self.current_diff_key(),
+        ) else {
+            return;
+        };
+        if hit.key == key || hit.key.target != key.target {
+            return;
+        }
+        let ordinal = hit.ordinal;
+        let Ok((key, matches)) = self.find_matches(&query) else {
+            return;
+        };
+        if matches.is_empty() {
+            self.find_hit = None;
+            return;
+        }
+        self.land_on(key, &matches, ordinal.min(matches.len()) - 1);
+    }
+
+    /// Files changed: the files that hold the find text, in the list's order, folders open.
+    fn find_order(&self) -> Vec<usize> {
+        let (Some(Ok(found)), Some(files)) = (&self.find_files, self.loaded_files()) else {
+            return Vec::new();
+        };
+        let holds = |index: &usize| found.iter().any(|(path, _)| *path == files[*index].path);
+        file_tree::rows(
+            files,
+            &self.visible_files(),
+            self.tree_view,
+            &HashSet::new(),
+        )
+        .into_iter()
+        .filter_map(|row| match row {
+            FileRow::File { index, .. } => Some(index),
+            FileRow::Dir { .. } => None,
+        })
+        .filter(holds)
+        .collect()
+    }
+
+    /// The selected file's place among the files that hold the find text, from 1, and
+    /// their count. The place is None when this file does not hold it.
+    pub fn find_file_place(&self) -> Option<(Option<usize>, usize)> {
+        let order = self.find_order();
+        if !matches!(self.find_files, Some(Ok(_))) {
+            return None;
+        }
+        let file = self.selected_file();
+        let place = order
+            .iter()
+            .position(|index| Some(*index) == file)
+            .map(|at| at + 1);
+        Some((place, order.len()))
     }
 
     /// The find's hit in the diff on screen, if the last find ran in it.
@@ -2972,6 +3027,35 @@ mod tests {
             view(&app).current_find_hit().map(|hit| hit.ordinal),
             Some(1)
         );
+    }
+
+    #[test]
+    fn a_resize_keeps_the_find_on_the_same_match() {
+        let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        ready_repo(&mut app, &pr);
+        let job = app.take_diff_request().unwrap();
+        let text = b"needle\nx\nneedle\nneedle\n";
+        app.set_diff(&pr, job.key, crate::highlight::to_text(text, None));
+        app.handle_key(key(KeyCode::Char('/')));
+        type_text(&mut app, "needle");
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Char('n')));
+        if let Screen::Detail(view) = &mut app.screen {
+            view.diff_width = 60;
+        }
+        assert!(
+            view(&app).current_find_hit().is_none(),
+            "the old width's hit"
+        );
+        let job = app
+            .take_diff_request()
+            .expect("drawn again at the new width");
+        app.set_diff(&pr, job.key, crate::highlight::to_text(text, None));
+        app.settle_find();
+        let hit = view(&app)
+            .current_find_hit()
+            .expect("followed to the new drawing");
+        assert_eq!((hit.ordinal, hit.line), (2, 2));
     }
 
     #[test]
