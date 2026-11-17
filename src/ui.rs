@@ -1507,14 +1507,18 @@ const TAB_LEFT: &str = "  ";
 const TAB_RIGHT: &str = " ";
 
 /// The sidebar shows when the terminal is wide enough to keep the main column readable.
-const SIDEBAR_WIDTH: u16 = 32;
+/// It takes what the main column does not need past a comfortable reading width.
+const SIDEBAR_MIN: u16 = 32;
+const SIDEBAR_MAX: u16 = 44;
 const SIDEBAR_MIN_TOTAL: u16 = 110;
+const READING_WIDTH: u16 = 104;
 
 fn render_overview(frame: &mut Frame, view: &mut DetailView, area: Rect, paint: Paint) {
-    let sidebar_width = if area.width >= SIDEBAR_MIN_TOTAL {
-        SIDEBAR_WIDTH
-    } else {
-        0
+    let sidebar_width = match area.width {
+        width if width >= SIDEBAR_MIN_TOTAL => width
+            .saturating_sub(READING_WIDTH)
+            .clamp(SIDEBAR_MIN, SIDEBAR_MAX),
+        _ => 0,
     };
     let [main, sidebar] =
         Layout::horizontal([Constraint::Min(20), Constraint::Length(sidebar_width)]).areas(area);
@@ -1886,7 +1890,7 @@ fn sidebar_lines(
     }
     if !detail.reviewers.is_empty() {
         lines.extend(section("Reviewers", paint));
-        lines.extend(reviewer_lines(&detail.reviewers, paint));
+        lines.extend(reviewer_lines(&detail.reviewers, width, paint));
     }
     if !detail.assignees.is_empty() {
         lines.extend(section("Assignees", paint));
@@ -1924,13 +1928,14 @@ fn since_lines(since: &SinceCounts, width: usize, paint: Paint) -> Vec<Line<'sta
     let title = if since.since.is_some() {
         "Since you last looked"
     } else {
-        "Activity"
+        "Activity so far"
     };
     let mut lines = section(title, paint);
-    if let Some(at) = since.since {
-        let when = format!("you last commented {}", relative_time(at, paint.now));
-        lines.push(Line::from(paint.span(when, theme.muted)));
-    }
+    let when = match since.since {
+        Some(at) => format!("you last commented {}", relative_time(at, paint.now)),
+        None => "counted since the PR opened".to_string(),
+    };
+    lines.push(Line::from(paint.span(when, theme.muted)));
     let counts = [
         ("Commits", since.commits),
         ("Force pushes", since.pushes),
@@ -1958,14 +1963,14 @@ fn since_lines(since: &SinceCounts, width: usize, paint: Paint) -> Vec<Line<'sta
 }
 
 /// One line per reviewer. A member who reviewed for a team sits under that team.
-fn reviewer_lines(reviewers: &[Reviewer], paint: Paint) -> Vec<Line<'static>> {
+fn reviewer_lines(reviewers: &[Reviewer], width: usize, paint: Paint) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for reviewer in reviewers.iter().filter(|reviewer| reviewer.team.is_none()) {
-        lines.push(reviewer_line(reviewer, "", paint));
+        lines.push(reviewer_line(reviewer, "", width, paint));
         let members = reviewers
             .iter()
             .filter(|member| member.team.as_ref() == Some(&reviewer.name));
-        lines.extend(members.map(|member| reviewer_line(member, "└ ", paint)));
+        lines.extend(members.map(|member| reviewer_line(member, "└ ", width, paint)));
     }
     // A team that reviewed through a member but has no request of its own.
     let mut teams: Vec<&String> = reviewers
@@ -1983,12 +1988,14 @@ fn reviewer_lines(reviewers: &[Reviewer], paint: Paint) -> Vec<Line<'static>> {
         let members = reviewers
             .iter()
             .filter(|member| member.team.as_ref() == Some(team));
-        lines.extend(members.map(|member| reviewer_line(member, "└ ", paint)));
+        lines.extend(members.map(|member| reviewer_line(member, "└ ", width, paint)));
     }
     lines
 }
 
-fn reviewer_line(reviewer: &Reviewer, indent: &str, paint: Paint) -> Line<'static> {
+/// The name gives way to the state when the sidebar is narrow, since the state is
+/// what the line is for.
+fn reviewer_line(reviewer: &Reviewer, indent: &str, width: usize, paint: Paint) -> Line<'static> {
     let theme = paint.theme;
     let (symbol, color) = reviewer_symbol(&reviewer.state, theme);
     let state = match reviewer.state.as_str() {
@@ -1999,9 +2006,11 @@ fn reviewer_line(reviewer: &Reviewer, indent: &str, paint: Paint) -> Line<'stati
     if reviewer.code_owner {
         note.push_str(", code owner");
     }
+    let used = display_width(indent) + 2 + display_width(&note);
+    let name = truncate_to_width(&reviewer.name, width.saturating_sub(used).max(6));
     Line::from(vec![
         paint.span(format!("{indent}{symbol} "), color),
-        paint.span(reviewer.name.clone(), theme.foreground),
+        paint.span(name, theme.foreground),
         paint.span(note, theme.muted),
     ])
 }
