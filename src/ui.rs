@@ -418,7 +418,7 @@ fn pad_span(span: Span<'static>, width: usize) -> Span<'static> {
 fn detail_help(tab: Tab) -> &'static str {
     match tab {
         Tab::Overview => {
-            "j/k next comment | enter fold | f/F/n filter, order, bots | o browser | h back | ? keys"
+            "j/k next comment | enter fold | e labels | f/F/n filter, order, bots | o browser | h back | ? keys"
         }
         Tab::Checks => "j/k move | enter/o browser | r reload | h back | ? keys",
         Tab::Commits => {
@@ -470,10 +470,6 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
                 "review: Comment, Approve or Request changes, with your line comments",
             ),
             ("X", "discard your pending review and its line comments"),
-            (
-                "e",
-                "labels: tick or untick the repo's labels, enter applies",
-            ),
         ],
     ),
     (
@@ -484,6 +480,10 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
                 "next or previous comment, thread or fold; a long one by a third of a screen",
             ),
             ("enter", "open or close the folded block under the cursor"),
+            (
+                "e",
+                "labels: tick or untick the repo's labels, enter applies",
+            ),
             ("], [", "next or previous card or folded block"),
             (
                 "f, F, n",
@@ -500,7 +500,7 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
             ("t, z", "tree or flat list, hide or show the list"),
             (
                 "c",
-                "comment mode: j/k pick a line, J/K or V a range, enter writes a comment into your pending review",
+                "comment mode: j/k pick a line, V a range, enter writes a comment into your pending review",
             ),
         ],
     ),
@@ -1015,7 +1015,7 @@ fn render_line_mode(frame: &mut Frame, view: &mut DetailView, area: Rect, paint:
         .border_style(Style::new().fg(theme.accent))
         .title(paint.bold(" comment mode ", theme.accent))
         .title(paint.span(
-            "j/k move, J/K or V range, enter comment, R review, esc back ",
+            "j/k move, V range, enter comment, R review, esc back ",
             theme.muted,
         ))
         .title(
