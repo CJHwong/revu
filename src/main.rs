@@ -74,6 +74,11 @@ enum Message {
         query: String,
         result: Result<Vec<repo::GrepHit>, String>,
     },
+    FindFiles {
+        pr: PrRef,
+        query: String,
+        result: Result<Vec<(String, usize)>, String>,
+    },
     File {
         pr: PrRef,
         path: String,
@@ -159,6 +164,7 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App, session: &mut Session) -> 
         app.rate_limit = github::rate_limit();
         terminal.draw(|frame| ui::render(frame, app, &session.config.theme, Utc::now()))?;
         apply_messages(app, &session.receiver);
+        app.settle_find();
         dispatch_requests(app, session);
         let mut input = next_input(Duration::from_millis(100))?;
         // Every input already waiting is handled before the next draw, so a long wheel
@@ -270,6 +276,7 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
             Message::Repo { pr, result } => app.set_repo(&pr, result),
             Message::Diff { pr, key, result } => app.set_diff(&pr, key, result),
             Message::Grep { pr, query, result } => app.set_grep(&pr, &query, result),
+            Message::FindFiles { pr, query, result } => app.set_find_files(&pr, &query, result),
             Message::File { pr, path, result } => app.set_file(&pr, &path, result),
         }
     }
@@ -302,6 +309,20 @@ fn perform(
                 let result =
                     repo::grep(&dir, &commit, &query).map_err(|error| format!("{error:#}"));
                 let _ = sender.send(Message::Grep { pr, query, result });
+            });
+        }
+        Action::FindFiles {
+            pr,
+            dir,
+            base,
+            head,
+            query,
+        } => {
+            let sender = session.sender.clone();
+            thread::spawn(move || {
+                let result = repo::files_with_text(&dir, &base, &head, &query)
+                    .map_err(|error| format!("{error:#}"));
+                let _ = sender.send(Message::FindFiles { pr, query, result });
             });
         }
         Action::ShowFile {

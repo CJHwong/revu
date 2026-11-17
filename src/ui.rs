@@ -788,9 +788,18 @@ fn find_note(view: &DetailView, paint: Paint) -> Line<'static> {
     let Some(query) = &view.find else {
         return Line::default();
     };
-    let place = match view.current_find_hit() {
-        Some(hit) => format!("{} of {} lines in this file", hit.ordinal, hit.total),
-        None => "n finds it in this file".to_string(),
+    let here = match view.current_find_hit() {
+        Some(hit) => format!("{} of {} lines here", hit.ordinal, hit.total),
+        None => "none here".to_string(),
+    };
+    let place = match (&view.find_files, view.tab) {
+        (_, tab) if tab != Tab::Files => here.replace("here", "in this commit"),
+        (None, _) => format!("{here}, looking in the other files..."),
+        (Some(Err(_)), _) => format!("{here}, other files not searched"),
+        (Some(Ok(found)), _) => {
+            let lines: usize = found.iter().map(|(_, count)| count).sum();
+            format!("{here}, {lines} lines in {} files", found.len())
+        }
     };
     Line::from(vec![
         paint.bold(format!(" /{query} "), paint.theme.warning),

@@ -345,6 +345,38 @@ pub fn run_renderer(dir: &Path, command: &str, whole_file: bool) -> Result<Vec<u
     bail!("renderer exited with {}: {}", output.status, stderr.trim())
 }
 
+/// The changed files whose diff holds `query`, ignoring case, each with the number of
+/// lines that hold it, in git's order. It reads the plain diff once, so it covers files
+/// no renderer has drawn yet.
+pub fn files_with_text(
+    dir: &Path,
+    base: &str,
+    head: &str,
+    query: &str,
+) -> Result<Vec<(String, usize)>> {
+    let range = format!("{base}...{head}");
+    let output = git(dir, &["diff", "--no-color", "--no-ext-diff", &range])?;
+    ensure_success(&output, "git diff")?;
+    let diff = String::from_utf8_lossy(&output.stdout);
+    Ok(count_lines_with(&diff, &query.to_lowercase()))
+}
+
+fn count_lines_with(diff: &str, query: &str) -> Vec<(String, usize)> {
+    let mut found: Vec<(String, usize)> = Vec::new();
+    for line in diff.lines() {
+        if let Some(paths) = line.strip_prefix("diff --git ") {
+            let path = paths.rsplit_once(" b/").map_or(paths, |(_, path)| path);
+            found.push((path.to_string(), 0));
+        } else if line.to_lowercase().contains(query)
+            && let Some((_, count)) = found.last_mut()
+        {
+            *count += 1;
+        }
+    }
+    found.retain(|(_, count)| *count > 0);
+    found
+}
+
 fn git(dir: &Path, args: &[&str]) -> Result<Output> {
     Command::new("git")
         .arg("-C")
@@ -365,6 +397,17 @@ fn ensure_success(output: &Output, what: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diff_matches_count_per_file_by_the_new_path() {
+        let diff = "diff --git a/a.py b/a.py\n+Invoice one\n-invoice two\n x\n\
+                    diff --git a/old.py b/new.py\n+nothing here\n\
+                    diff --git a/c.py b/c.py\n+an INVOICE\n";
+        assert_eq!(
+            count_lines_with(diff, "invoice"),
+            [("a.py".to_string(), 2), ("c.py".to_string(), 1)]
+        );
+    }
 
     #[test]
     fn remotes_normalize_across_protocols() {

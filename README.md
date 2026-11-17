@@ -64,7 +64,7 @@ Press `?` anywhere for this list.
 | Files changed, Commits | `J` / `K`, `Space` / `b` | Scroll the diff |
 | Files changed, Commits | `m` | Switch the diff renderer |
 | Files changed, Commits | `w` | Wrap long lines (the default) or not. Unwrapped, `H` / `L` scroll the diff sideways, as `J` / `K` scroll it down and up. |
-| Files changed, Commits | `/`, then `n` / `N` | Find text in the diff on screen, ignoring case: every match is marked, the current one stronger, and the pane title shows `/text  2 of 5 lines in this file`. It searches one file at a time; `s` searches the whole repo. |
+| Files changed, Commits | `/`, then `n` / `N` | Find text in the diff on screen, ignoring case: every match is marked, the current one stronger, and the pane title shows `/text  2 of 5 lines here, 519 lines in 63 files`. On Files changed, `n` past a file's last match goes on to the next file that holds the text, opening its folder; on Commits it searches the commit on screen. `s` searches the whole repo. |
 | Commits, Checks | `Enter` | Open the selected commit or check in the browser |
 | Inbox, pull request | `o` | Open in the browser |
 | Inbox, pull request | `d` | Run the `open_diff` command |

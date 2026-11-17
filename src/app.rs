@@ -36,6 +36,14 @@ pub enum Action {
         commit: String,
         query: String,
     },
+    /// Which changed files hold the find text.
+    FindFiles {
+        pr: PrRef,
+        dir: PathBuf,
+        base: String,
+        head: String,
+        query: String,
+    },
     /// A file at the PR head with syntax colors, the `line` marked (0 for none).
     ShowFile {
         pr: PrRef,
@@ -271,6 +279,12 @@ pub struct DetailView {
     /// The lowercased text that `n` and `N` look for in the diff.
     pub find: Option<String>,
     pub find_hit: Option<FindHit>,
+    /// On Files changed, the files that hold the find text and how many lines in each,
+    /// in the list's order; None while git looks.
+    pub find_files: Option<Result<Vec<(String, usize)>, String>>,
+    /// n or N moved to another file; the find runs there once its diff is drawn. True
+    /// goes to its first match, false to its last.
+    find_pending: Option<bool>,
 }
 
 impl DetailView {
@@ -320,6 +334,8 @@ impl DetailView {
             overlays: Vec::new(),
             find: None,
             find_hit: None,
+            find_files: None,
+            find_pending: None,
         }
     }
 
@@ -535,10 +551,114 @@ impl DetailView {
         Ok(None)
     }
 
-    fn start_find(&mut self, query: &str) -> Result<(), String> {
+    /// Finds the text in the diff on screen. On Files changed it also asks git which
+    /// other files hold it, so n and N can go on to them.
+    fn start_find(&mut self, query: &str) -> Result<Option<Action>, String> {
+        if query.trim().is_empty() {
+            return Err("type some text to find".to_string());
+        }
         self.find = Some(query.to_lowercase());
         self.find_hit = None;
-        self.find_in_diff(true, false)
+        self.find_files = None;
+        self.find_pending = None;
+        let here = self.find_in_diff(true, false);
+        if self.tab != Tab::Files {
+            return here.map(|()| None);
+        }
+        let (dir, head) = self.head_in_clone()?;
+        let base = self
+            .loaded()
+            .ok_or("the pull request is still loading")?
+            .base_oid
+            .clone();
+        Ok(Some(Action::FindFiles {
+            pr: self.pr.clone(),
+            dir,
+            base,
+            head,
+            query: query.to_lowercase(),
+        }))
+    }
+
+    /// n and N: the next or previous match. On Files changed, past this file's last match
+    /// (or with none here) it goes on to the next file that holds the text.
+    fn find_next(&mut self, forward: bool) -> Result<(), String> {
+        let in_file = self.tab == Tab::Files && matches!(self.find_files, Some(Ok(_)));
+        if !in_file {
+            return self.find_in_diff(forward, true);
+        }
+        let wraps = match self.current_find_hit() {
+            Some(hit) if forward => hit.ordinal == hit.total,
+            Some(hit) => hit.ordinal == 1,
+            None => true,
+        };
+        if !wraps {
+            return self.find_in_diff(forward, true);
+        }
+        self.next_find_file(forward)
+    }
+
+    /// Selects the next (or previous) file that holds the find text, opening folders on the
+    /// way, and finds in it once its diff is drawn.
+    fn next_find_file(&mut self, forward: bool) -> Result<(), String> {
+        let Some(Ok(found)) = &self.find_files else {
+            return Ok(());
+        };
+        let files = self
+            .loaded_files()
+            .ok_or("the file list is still loading")?;
+        let holds = |index: &usize| found.iter().any(|(path, _)| *path == files[*index].path);
+        let order: Vec<usize> = file_tree::rows(
+            files,
+            &self.visible_files(),
+            self.tree_view,
+            &HashSet::new(),
+        )
+        .into_iter()
+        .filter_map(|row| match row {
+            FileRow::File { index, .. } => Some(index),
+            FileRow::Dir { .. } => None,
+        })
+        .filter(holds)
+        .collect();
+        let query = self.find.clone().unwrap_or_default();
+        if order.is_empty() {
+            return Err(format!("\"{query}\" is in no shown file"));
+        }
+        let current = self.selected_file();
+        let at = current.and_then(|file| order.iter().position(|index| *index == file));
+        let next = match (at, forward) {
+            (Some(at), true) => order[(at + 1) % order.len()],
+            (Some(at), false) => order[(at + order.len() - 1) % order.len()],
+            (None, true) => order[0],
+            (None, false) => order[order.len() - 1],
+        };
+        let path = files[next].path.clone();
+        self.folded_dirs
+            .retain(|dir| !path.starts_with(&format!("{dir}/")));
+        self.file_list_top = None;
+        self.select_file_row(Some(next));
+        self.reset_diff_position();
+        self.find_hit = None;
+        self.find_pending = Some(forward);
+        self.settle_find();
+        Ok(())
+    }
+
+    /// Runs a find that waited for its file's diff, once the diff is drawn.
+    pub fn settle_find(&mut self) {
+        let Some(forward) = self.find_pending else {
+            return;
+        };
+        let ready = self
+            .current_diff_key()
+            .is_some_and(|key| matches!(self.diffs.get(&key), Some(DiffOutput::Done(_))));
+        if !ready {
+            return;
+        }
+        self.find_pending = None;
+        // A failed or empty diff has no match; the title says so.
+        let _ = self.find_in_diff(forward, false);
     }
 
     /// Scrolls the diff to the next (or previous) line holding the find text, a few lines
@@ -1137,6 +1257,28 @@ impl App {
     }
 
     /// Fills the search results that are still waiting for this query.
+    /// Keeps the files that hold the find text, unless a newer find replaced it.
+    pub fn set_find_files(
+        &mut self,
+        pr: &PrRef,
+        query: &str,
+        result: Result<Vec<(String, usize)>, String>,
+    ) {
+        let Some(view) = self.view_for(pr) else {
+            return;
+        };
+        if view.find.as_deref() == Some(query) {
+            view.find_files = Some(result);
+        }
+    }
+
+    /// Runs a find that waited for a diff, now that messages may have brought it.
+    pub fn settle_find(&mut self) {
+        if let Some(view) = self.open_view() {
+            view.settle_find();
+        }
+    }
+
     pub fn set_grep(&mut self, pr: &PrRef, query: &str, result: Result<Vec<GrepHit>, String>) {
         let Some(view) = self.view_for(pr) else {
             return;
@@ -1505,9 +1647,7 @@ impl App {
             PromptKind::Workspace => Some(Action::SetWorkspace(prompt.text.trim().to_string())),
             PromptKind::ConfirmClone { pr, dir } => self.submit_clone(pr, dir, &prompt.text),
             PromptKind::SearchRepo => self.in_view(|view| view.search(prompt.text).map(Some)),
-            PromptKind::FindInDiff => {
-                self.in_view(|view| view.start_find(&prompt.text).map(|()| None))
-            }
+            PromptKind::FindInDiff => self.in_view(|view| view.start_find(&prompt.text)),
         }
     }
 
@@ -1593,8 +1733,8 @@ impl App {
             return self.report(result);
         }
         let find_result = match key {
-            KeyCode::Char('n') if diff_pane => Some(view.find_in_diff(true, true)),
-            KeyCode::Char('N') if diff_pane => Some(view.find_in_diff(false, true)),
+            KeyCode::Char('n') if diff_pane => Some(view.find_next(true)),
+            KeyCode::Char('N') if diff_pane => Some(view.find_next(false)),
             _ => None,
         };
         if let Some(result) = find_result {
@@ -2715,6 +2855,55 @@ mod tests {
         assert_eq!(place(&app), (0, 1, 1, 2), "wraps to the first match");
         app.handle_key(key(KeyCode::Char('N')));
         assert_eq!(place(&app), (3, 6, 2, 2), "wraps back to the last match");
+    }
+
+    #[test]
+    fn n_goes_on_to_the_next_file_that_holds_the_text() {
+        let (mut app, pr) = files_tab(vec![
+            file("a.md", ViewedState::Unviewed),
+            file("b.md", ViewedState::Unviewed),
+        ]);
+        ready_repo(&mut app, &pr);
+        let job = app.take_diff_request().unwrap();
+        app.set_diff(&pr, job.key, crate::highlight::to_text(b"nothing\n", None));
+        app.handle_key(key(KeyCode::Char('/')));
+        type_text(&mut app, "needle");
+        let action = app.handle_key(key(KeyCode::Enter));
+        assert!(
+            matches!(action, Some(Action::FindFiles { .. })),
+            "{action:?}"
+        );
+        app.set_find_files(&pr, "needle", Ok(vec![("b.md".to_string(), 2)]));
+        app.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(view(&app).selected_file(), Some(1), "on to b.md");
+        assert!(
+            view(&app).current_find_hit().is_none(),
+            "waits for its diff"
+        );
+        let job = app.take_diff_request().unwrap();
+        app.set_diff(
+            &pr,
+            job.key,
+            crate::highlight::to_text(b"x\nneedle\nneedle\n", None),
+        );
+        app.settle_find();
+        let hit = view(&app).current_find_hit().expect("found once drawn");
+        assert_eq!((hit.line, hit.ordinal, hit.total), (1, 1, 2));
+        app.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(
+            view(&app).current_find_hit().map(|hit| hit.ordinal),
+            Some(2)
+        );
+        app.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(
+            view(&app).selected_file(),
+            Some(1),
+            "the only file: round to its first"
+        );
+        assert_eq!(
+            view(&app).current_find_hit().map(|hit| hit.ordinal),
+            Some(1)
+        );
     }
 
     #[test]
