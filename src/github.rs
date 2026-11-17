@@ -11,13 +11,33 @@ use crate::model::{
     self, ChangedFile, Group, PrActivity, PrDetail, RateLimit, Side, TIMELINE_LIMIT, Verdict,
 };
 
-/// The budget from the latest GraphQL response. Calls run on worker threads; the UI reads
-/// this before each draw.
-static RATE_LIMIT: Mutex<Option<RateLimit>> = Mutex::new(None);
+/// The GraphQL budgets the responses reported, one per reset time. GitHub reports two
+/// counters with different reset times for one token, picking one per response, so
+/// keeping only the latest made the count flip between them. Calls run on worker
+/// threads; the UI reads this before each draw.
+static RATE_LIMITS: Mutex<Vec<RateLimit>> = Mutex::new(Vec::new());
 
-/// The budget after the latest call, or None before the first one.
+/// The budget closest to running out, or None before the first call.
 pub fn rate_limit() -> Option<RateLimit> {
-    RATE_LIMIT.lock().map_or(None, |limit| *limit)
+    let limits = RATE_LIMITS.lock().ok()?;
+    limits.iter().min_by_key(|limit| limit.remaining).copied()
+}
+
+/// Adds a response's budget. Within one counter the count only falls, so a response that
+/// arrives late cannot raise it; a counter goes once its reset time passes.
+fn record_rate_limit(
+    limits: &mut Vec<RateLimit>,
+    latest: RateLimit,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    limits.retain(|limit| limit.reset_at > now);
+    match limits
+        .iter_mut()
+        .find(|limit| limit.reset_at == latest.reset_at)
+    {
+        Some(known) => known.remaining = known.remaining.min(latest.remaining),
+        None => limits.push(latest),
+    }
 }
 
 /// GitHub's maximum page size for a search connection.
@@ -437,9 +457,9 @@ fn run_graphql(args: &[String]) -> Result<Value> {
     let response = String::from_utf8_lossy(&output.stdout);
     let (headers, stdout) = split_headers(&response);
     if let Some(limit) = parse_rate_limit(headers)
-        && let Ok(mut latest) = RATE_LIMIT.lock()
+        && let Ok(mut limits) = RATE_LIMITS.lock()
     {
-        *latest = Some(limit);
+        record_rate_limit(&mut limits, limit, chrono::Utc::now());
     }
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -463,6 +483,29 @@ fn run_graphql(args: &[String]) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_budget_shown_never_flips_between_githubs_two_counters() {
+        let at = |minutes: i64| {
+            chrono::DateTime::from_timestamp(1_800_000_000 + minutes * 60, 0).unwrap()
+        };
+        let limit = |remaining: u64, reset: i64| RateLimit {
+            remaining,
+            limit: 5000,
+            reset_at: at(reset),
+        };
+        let mut limits = Vec::new();
+        record_rate_limit(&mut limits, limit(3838, 30), at(0));
+        record_rate_limit(&mut limits, limit(4992, 60), at(0));
+        record_rate_limit(&mut limits, limit(3840, 30), at(1));
+        let lowest = limits.iter().min_by_key(|limit| limit.remaining).unwrap();
+        assert_eq!(
+            lowest.remaining, 3838,
+            "the other counter and a late response do not raise it"
+        );
+        record_rate_limit(&mut limits, limit(4990, 60), at(31));
+        assert_eq!(limits, [limit(4990, 60)], "a counter goes once it resets");
+    }
 
     #[test]
     fn the_rate_limit_comes_from_the_response_headers() {
