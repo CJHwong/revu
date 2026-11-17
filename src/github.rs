@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::process::Command;
 
 use crate::config::GroupConfig;
-use crate::model::{self, ChangedFile, Group, PrActivity, PrDetail};
+use crate::model::{self, ChangedFile, Group, PrActivity, PrDetail, TIMELINE_LIMIT};
 
 /// GitHub's maximum page size for a search connection.
 const PAGE_SIZE: u32 = 100;
@@ -68,12 +68,12 @@ pub fn activity_document() -> String {
          commitList: commits(first: 100) {{ nodes {{ commit {{ \
            oid messageHeadline authoredDate url author {{ name user {{ login }} }} \
            statusCheckRollup {{ state }} }} }} }} \
-         timelineItems(last: 100, itemTypes: [ISSUE_COMMENT, PULL_REQUEST_REVIEW, PULL_REQUEST_COMMIT]) {{ nodes {{ __typename \
+         timelineItems(last: {TIMELINE_LIMIT}, itemTypes: [ISSUE_COMMENT, PULL_REQUEST_REVIEW, PULL_REQUEST_COMMIT]) {{ nodes {{ __typename \
            ... on IssueComment {{ author {{ __typename login }} createdAt body }} \
            ... on PullRequestReview {{ id author {{ __typename login }} state submittedAt createdAt body }} \
            ... on PullRequestCommit {{ commit {{ oid messageHeadline authoredDate }} }} }} }} \
          reviewThreads(first: 100) {{ nodes {{ isResolved path line originalLine startLine originalStartLine \
-           comments(first: 1) {{ nodes {{ pullRequestReview {{ id }} }} }} }} }} \
+           comments(first: 50) {{ nodes {{ pullRequestReview {{ id }} author {{ __typename login }} createdAt body }} }} }} }} \
          }} }} }}"
     )
 }

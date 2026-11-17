@@ -177,6 +177,15 @@ pub struct ThreadLine {
     /// "line 548" or "lines 827-830".
     pub lines: String,
     pub resolved: bool,
+    /// The thread's own comments, oldest first.
+    pub comments: Vec<ThreadComment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadComment {
+    pub author: Author,
+    pub at: DateTime<Utc>,
+    pub body: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,6 +217,8 @@ pub struct PrActivity {
     /// Oldest first, like GitHub's Commits tab. At most 100.
     pub commits: Vec<CommitLine>,
     pub timeline: Vec<TimelineItem>,
+    /// GitHub returned its limit of timeline items, so older ones are missing.
+    pub timeline_cut: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -474,6 +485,9 @@ struct RawThread {
 #[serde(rename_all = "camelCase")]
 struct RawThreadComment {
     pull_request_review: Option<RawId>,
+    author: Option<RawActor>,
+    created_at: DateTime<Utc>,
+    body: String,
 }
 
 #[derive(Deserialize)]
@@ -599,6 +613,9 @@ pub fn parse_detail(pull_request: &Value) -> Result<PrDetail> {
     })
 }
 
+/// The `last:` count in the activity query's `timelineItems`.
+pub const TIMELINE_LIMIT: usize = 100;
+
 /// `pull_request` is `data.repository.pullRequest` from the activity query.
 pub fn parse_activity(pull_request: &Value) -> Result<PrActivity> {
     let raw: RawActivity =
@@ -612,6 +629,7 @@ pub fn parse_activity(pull_request: &Value) -> Result<PrActivity> {
     Ok(PrActivity {
         checks: check_lines(latest_rollup(&raw.commits)),
         commits,
+        timeline_cut: raw.timeline_items.nodes.len() >= TIMELINE_LIMIT,
         timeline: timeline_from(raw.timeline_items.nodes, raw.review_threads.nodes),
     })
 }
@@ -799,12 +817,13 @@ fn timeline_from(items: Vec<RawTimelineItem>, threads: Vec<RawThread>) -> Vec<Ti
             .comments
             .nodes
             .first()
-            .and_then(|comment| comment.pull_request_review.as_ref());
+            .and_then(|comment| comment.pull_request_review.as_ref())
+            .map(|review| review.id.clone());
         if let Some(review) = review {
             threads_by_review
-                .entry(review.id.clone())
+                .entry(review)
                 .or_default()
-                .push(thread_line(&thread));
+                .push(thread_line(thread));
         }
     }
     items
@@ -882,7 +901,7 @@ fn review_verb(state: &str) -> &'static str {
 }
 
 /// A thread on an outdated diff has no current line, so it falls back to the original one.
-fn thread_line(thread: &RawThread) -> ThreadLine {
+fn thread_line(thread: RawThread) -> ThreadLine {
     let end = thread.line.or(thread.original_line);
     let start = thread.start_line.or(thread.original_start_line);
     let lines = match (start, end) {
@@ -890,10 +909,20 @@ fn thread_line(thread: &RawThread) -> ThreadLine {
         (_, Some(end)) => format!("line {end}"),
         _ => "the file".to_string(),
     };
+    let comments = thread
+        .comments
+        .nodes
+        .into_iter()
+        .map(|comment| ThreadComment {
+            author: author_from(comment.author),
+            at: comment.created_at,
+            body: comment.body,
+        });
     ThreadLine {
-        path: thread.path.clone(),
+        path: thread.path,
         lines,
         resolved: thread.is_resolved,
+        comments: comments.collect(),
     }
 }
 
@@ -1081,10 +1110,17 @@ pub mod tests {
             "reviewThreads": { "nodes": [
                 { "isResolved": true, "path": "a.md", "line": null, "originalLine": 830,
                   "startLine": null, "originalStartLine": 827,
-                  "comments": { "nodes": [{ "pullRequestReview": { "id": "R1" } }] } },
+                  "comments": { "nodes": [{ "pullRequestReview": { "id": "R1" },
+                      "author": { "__typename": "User", "login": "lead" },
+                      "createdAt": "2026-11-14T10:00:00Z", "body": "Rename this." }] } },
                 { "isResolved": false, "path": "b.md", "line": 12, "originalLine": 12,
                   "startLine": null, "originalStartLine": null,
-                  "comments": { "nodes": [{ "pullRequestReview": { "id": "R1" } }] } },
+                  "comments": { "nodes": [
+                      { "pullRequestReview": { "id": "R1" }, "author": { "__typename": "User", "login": "lead" },
+                        "createdAt": "2026-11-14T10:00:00Z", "body": "Why **here**?" },
+                      { "pullRequestReview": { "id": "R9" }, "author": { "__typename": "User", "login": "octo" },
+                        "createdAt": "2026-11-14T11:00:00Z", "body": "Because." },
+                  ]} },
             ]},
         })
     }

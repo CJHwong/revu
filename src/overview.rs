@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use std::collections::HashSet;
 use unicode_width::UnicodeWidthStr;
 
-use crate::markdown::{self, Folds, TextRow, line_width, truncate};
+use crate::markdown::{self, Block, Folds, TextRow, line_width, truncate};
 use crate::model::{
     CheckState, Comment, PrActivity, PrDetail, ReviewState, ThreadLine, TimelineItem,
 };
@@ -17,7 +17,8 @@ use crate::ui::relative_time;
 pub struct Context<'a> {
     pub detail: &'a PrDetail,
     pub activity: Option<&'a Result<PrActivity, String>>,
-    pub open: &'a HashSet<usize>,
+    /// Folds the user flipped from their default state.
+    pub toggled: &'a HashSet<usize>,
     pub theme: &'a Theme,
     pub now: DateTime<Utc>,
 }
@@ -38,7 +39,7 @@ impl Context<'_> {
 pub fn build(context: &Context, width: usize) -> Vec<TextRow> {
     let mut folds = Folds {
         next: 0,
-        open: context.open,
+        toggled: context.toggled,
     };
     let mut rows = status_card(context, width);
     rows.push(TextRow::blank());
@@ -193,11 +194,16 @@ fn timeline_rows(context: &Context, width: usize, folds: &mut Folds) -> Vec<Text
     if activity.timeline.is_empty() {
         return notice("No comments yet.".to_string(), theme.muted);
     }
-    activity
-        .timeline
-        .iter()
-        .flat_map(|item| item_rows(context, item, width, folds))
-        .collect()
+    let mut rows = Vec::new();
+    if activity.timeline_cut {
+        let text = "Older comments are not shown here. o opens the pull request on GitHub.";
+        rows.extend(notice(text.to_string(), theme.muted));
+        rows.push(TextRow::blank());
+    }
+    for item in &activity.timeline {
+        rows.extend(item_rows(context, item, width, folds));
+    }
+    rows
 }
 
 fn item_rows(
@@ -220,16 +226,17 @@ fn item_rows(
         ];
     }
     let inner = width.saturating_sub(4);
-    let mut content = body_rows(context, &comment.body, inner, folds, "No text.");
-    if !comment.threads.is_empty() {
+    let mut content = Vec::new();
+    // A review made only of inline comments has no text of its own to show.
+    if !comment.body.trim().is_empty() || comment.threads.is_empty() {
+        content = body_rows(context, &comment.body, inner, folds, "No text.");
         content.push(TextRow::blank());
-        content.extend(
-            comment
-                .threads
-                .iter()
-                .map(|thread| thread_row(context, thread, inner)),
-        );
     }
+    for thread in &comment.threads {
+        let block = thread_block(context, thread);
+        content.extend(markdown::layout(&[block], inner, folds, context.theme));
+    }
+    trim_blank_rows(&mut content);
     let mut rows = card(
         comment_title(context, comment),
         content,
@@ -261,24 +268,52 @@ fn comment_title(context: &Context, comment: &Comment) -> Vec<Span<'static>> {
     spans
 }
 
-/// "┊ prompts/_default.md  lines 827-830          ✓ Resolved"
-fn thread_row(context: &Context, thread: &ThreadLine, width: usize) -> TextRow {
+/// A review thread as a fold, like GitHub: the bar names the file, the lines and whether
+/// it is resolved, and the body holds the thread's comments. An unresolved thread starts
+/// open; a resolved one starts closed.
+fn thread_block(context: &Context, thread: &ThreadLine) -> Block {
     let theme = context.theme;
-    let (status, color) = if thread.resolved {
-        ("✓ Resolved", theme.success)
+    let status = if thread.resolved {
+        "✓ Resolved"
     } else {
-        ("● Unresolved", theme.warning)
+        "● Unresolved"
     };
-    let location = format!("{}  {}", thread.path, thread.lines);
-    let room = width.saturating_sub(status.width() + 4);
-    let location = truncate(&location, room);
-    let padding = room.saturating_sub(location.width());
-    TextRow::plain(Line::from(vec![
-        context.span("┊ ", theme.muted),
-        context.span(location, theme.accent),
-        Span::raw(" ".repeat(padding + 2)),
-        context.span(status, color),
-    ]))
+    // The status comes first, so a narrow bar cuts the path, not the status.
+    let summary = vec![Span::raw(format!(
+        "{status}   {}  {}",
+        thread.path, thread.lines
+    ))];
+    let mut body = Vec::new();
+    for comment in &thread.comments {
+        let title = vec![
+            context.bold(comment.author.login.clone(), theme.foreground),
+            context.span(
+                format!(" {}", relative_time(comment.at, context.now)),
+                theme.muted,
+            ),
+        ];
+        body.push(Block::Line {
+            spans: title,
+            indent: 0,
+        });
+        body.extend(markdown::parse(&comment.body, theme));
+        body.push(Block::Blank);
+    }
+    body.pop();
+    Block::Details {
+        summary,
+        body,
+        open: !thread.resolved,
+    }
+}
+
+fn trim_blank_rows(rows: &mut Vec<TextRow>) {
+    while rows
+        .last()
+        .is_some_and(|row| markdown::line_width(&row.line) == 0)
+    {
+        rows.pop();
+    }
 }
 
 fn commit_row(
@@ -315,7 +350,7 @@ mod tests {
         let context = Context {
             detail: &detail,
             activity: Some(&activity),
-            open: &open,
+            toggled: &open,
             theme: &theme,
             now,
         };
@@ -367,8 +402,21 @@ mod tests {
         );
         let thread = lines
             .iter()
-            .find(|line| line.contains("a.md  lines 827-830"))
+            .find(|line| line.contains("✓ Resolved   a.md"))
             .unwrap();
-        assert!(thread.contains("✓ Resolved"));
+        assert!(thread.contains("lines 8"), "{thread}");
+        assert!(
+            !lines.iter().any(|line| line.contains("Rename this.")),
+            "a resolved thread starts closed"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("│ Why here?")),
+            "an unresolved thread starts open"
+        );
+        assert!(lines.iter().any(|line| line.contains("│ Because.")));
+        assert!(
+            !lines.iter().any(|line| line.contains("No text.")),
+            "a review of only threads shows no placeholder"
+        );
     }
 }

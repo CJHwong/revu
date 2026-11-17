@@ -764,7 +764,7 @@ fn render_overview(frame: &mut Frame, view: &mut DetailView, area: Rect, paint: 
     let DetailView {
         detail: Some(Ok(detail)),
         activity,
-        open_folds,
+        toggled_folds,
         overview: layout,
         cursor,
         scroll,
@@ -779,7 +779,7 @@ fn render_overview(frame: &mut Frame, view: &mut DetailView, area: Rect, paint: 
         let context = overview::Context {
             detail,
             activity: activity.as_ref(),
-            open: open_folds,
+            toggled: toggled_folds,
             theme: paint.theme,
             now: paint.now,
         };

@@ -24,6 +24,8 @@ pub enum Block {
     Details {
         summary: Spans,
         body: Vec<Block>,
+        /// `<details open>`, or an unresolved review thread: shown open until toggled.
+        open: bool,
     },
     Table {
         header: Vec<Spans>,
@@ -68,10 +70,11 @@ impl TextRow {
 }
 
 /// Numbers folds in document order. A fold's number stays the same when an earlier fold
-/// opens or closes, so the open set stays valid across layouts.
+/// opens or closes, so the toggled set stays valid across layouts.
 pub struct Folds<'a> {
     pub next: usize,
-    pub open: &'a HashSet<usize>,
+    /// Folds the user flipped from their default state.
+    pub toggled: &'a HashSet<usize>,
 }
 
 pub fn parse(markdown: &str, theme: &Theme) -> Vec<Block> {
@@ -115,15 +118,18 @@ fn layout_block(
                     .map(TextRow::plain),
             );
         }
-        Block::Details { summary, body } => {
-            layout_details(summary, body, width, folds, theme, rows)
-        }
+        Block::Details {
+            summary,
+            body,
+            open,
+        } => layout_details(summary, body, *open, width, folds, theme, rows),
     }
 }
 
 fn layout_details(
     summary: &Spans,
     body: &[Block],
+    open_by_default: bool,
     width: usize,
     folds: &mut Folds,
     theme: &Theme,
@@ -131,7 +137,7 @@ fn layout_details(
 ) {
     let id = folds.next;
     folds.next += 1;
-    let open = folds.open.contains(&id);
+    let open = open_by_default != folds.toggled.contains(&id);
     // The body is laid out even when closed: the bar shows its line count, and the folds
     // inside it use up their numbers either way.
     let body_rows = layout(body, width.saturating_sub(2).max(1), folds, theme);
@@ -357,6 +363,7 @@ fn table_row(
 struct Container {
     blocks: Vec<Block>,
     summary: Spans,
+    open: bool,
 }
 
 #[derive(Default)]
@@ -708,7 +715,13 @@ impl<'t> Builder<'t> {
         match name.as_str() {
             "details" => {
                 self.flush();
-                self.containers.push(Container::default());
+                let open = attributes
+                    .split_whitespace()
+                    .any(|attribute| attribute == "open");
+                self.containers.push(Container {
+                    open,
+                    ..Container::default()
+                });
             }
             "/details" => self.close_details(),
             "summary" => {
@@ -800,6 +813,7 @@ impl<'t> Builder<'t> {
         self.add(Block::Details {
             summary: details.summary,
             body: details.blocks,
+            open: details.open,
         });
         self.add(Block::Blank);
     }
@@ -857,7 +871,7 @@ mod tests {
         let open: HashSet<usize> = open.iter().copied().collect();
         let mut folds = Folds {
             next: 0,
-            open: &open,
+            toggled: &open,
         };
         layout(&parse(markdown, &theme), width, &mut folds, &theme)
     }
@@ -914,6 +928,13 @@ mod tests {
         let opened = text(&render(markdown, 50, &[0]));
         assert!(opened.contains(&"│ Round 2 done.".to_string()));
         assert!(opened.contains(&"│ • two".to_string()));
+    }
+
+    #[test]
+    fn details_open_starts_open_and_a_toggle_closes_it() {
+        let markdown = "<details open>\n<summary>Shown</summary>\n\nbody\n\n</details>";
+        assert!(text(&render(markdown, 40, &[])).contains(&"│ body".to_string()));
+        assert!(!text(&render(markdown, 40, &[0])).contains(&"│ body".to_string()));
     }
 
     #[test]

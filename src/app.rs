@@ -185,7 +185,8 @@ pub struct DetailView {
     /// The Overview's cursor row and its first visible row.
     pub cursor: usize,
     pub scroll: usize,
-    pub open_folds: HashSet<usize>,
+    /// Folds the user opened or closed, away from their default state.
+    pub toggled_folds: HashSet<usize>,
     /// The Overview laid out at the last drawn width. Cleared when its content changes.
     pub overview: Option<OverviewLayout>,
     /// The Overview's visible height at the last draw, for paging.
@@ -218,7 +219,7 @@ impl DetailView {
             tab: Tab::Overview,
             cursor: 0,
             scroll: 0,
-            open_folds: HashSet::new(),
+            toggled_folds: HashSet::new(),
             overview: None,
             page: 20,
             commits: ListState::default().with_selected(Some(0)),
@@ -506,8 +507,8 @@ impl DetailView {
         let Some(id) = row.and_then(|row| row.fold) else {
             return;
         };
-        if !self.open_folds.remove(&id) {
-            self.open_folds.insert(id);
+        if !self.toggled_folds.remove(&id) {
+            self.toggled_folds.insert(id);
         }
         self.overview = None;
     }
