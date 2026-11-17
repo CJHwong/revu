@@ -54,6 +54,16 @@ enum Message {
         key: DiffKey,
         result: Result<Vec<u8>, String>,
     },
+    Grep {
+        pr: PrRef,
+        query: String,
+        result: Result<Vec<repo::GrepHit>, String>,
+    },
+    File {
+        pr: PrRef,
+        path: String,
+        result: Result<String, String>,
+    },
 }
 
 enum Input {
@@ -171,6 +181,8 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
             } => app.set_viewed_result(&pr, &path, viewed, result),
             Message::Repo { pr, result } => app.set_repo(&pr, result),
             Message::Diff { pr, key, result } => app.set_diff(&pr, key, result),
+            Message::Grep { pr, query, result } => app.set_grep(&pr, &query, result),
+            Message::File { pr, path, result } => app.set_file(&pr, &path, result),
         }
     }
 }
@@ -188,6 +200,32 @@ fn perform(
         Action::FetchDetail(pr) => start_detail_fetch(session, pr),
         Action::OpenBrowser(url) => open_browser(app, &url),
         Action::RunDiff(pr) => run_diff(terminal, app, session, &pr)?,
+        Action::Grep {
+            pr,
+            dir,
+            commit,
+            query,
+        } => {
+            let sender = session.sender.clone();
+            thread::spawn(move || {
+                let result =
+                    repo::grep(&dir, &commit, &query).map_err(|error| format!("{error:#}"));
+                let _ = sender.send(Message::Grep { pr, query, result });
+            });
+        }
+        Action::ShowFile {
+            pr,
+            dir,
+            commit,
+            path,
+        } => {
+            let sender = session.sender.clone();
+            thread::spawn(move || {
+                let result =
+                    repo::show_file(&dir, &commit, &path).map_err(|error| format!("{error:#}"));
+                let _ = sender.send(Message::File { pr, path, result });
+            });
+        }
         Action::SetWorkspace(text) => set_workspace(app, session, text),
         Action::CloneRepo { pr, dir } => match session.pending_clone.take() {
             Some(job) if job.pr == pr => {

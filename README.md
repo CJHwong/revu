@@ -47,6 +47,9 @@ A search shows at most 100 pull requests. A group with more matches shows a coun
 | Files changed | `H` | Hide viewed files |
 | Files changed, Commits | `J` / `K`, `Space` / `b` | Scroll the diff |
 | Files changed, Commits | `m` | Switch the diff renderer |
+| Files changed, Commits | `/`, then `n` / `N` | Find text in the diff, next and previous match |
+| Files changed | `e` | Show the whole file at the PR head |
+| Pull request | `s` | Search every file in the repo at the PR head, not only the changed ones. `Enter` opens the file at the match. |
 | Pull request | `j` / `k`, `Space` / `b` | Scroll the description, or move in a list |
 | Pull request | `Enter` | Open the selected commit or check in the browser |
 | Pull request | `r` | Fetch the pull request again |

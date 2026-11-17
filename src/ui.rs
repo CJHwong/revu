@@ -6,11 +6,14 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use unicode_width::UnicodeWidthChar;
 
-use crate::app::{App, DetailView, DiffOutput, Prompt, PromptKind, RepoState, Row, Screen, Tab};
+use crate::app::{
+    App, DetailView, DiffOutput, Overlay, Prompt, PromptKind, RepoState, Row, Screen, Tab,
+};
 use crate::model::{
     Activity, ChangedFile, CheckLine, CheckState, CheckSummary, Group, PrDetail, PrRef, PrSummary,
     ReviewState, ViewedState,
 };
+use crate::repo::{GrepHit, MAX_GREP_HITS};
 use crate::theme::Theme;
 
 const INBOX_HELP: &str = "j/k move | enter open | space fold | o browser | d diff | r refresh | ctrl-l open link | q quit";
@@ -220,10 +223,10 @@ fn detail_help(tab: Tab) -> &'static str {
             "tab/1-4 switch | j/k move | enter/o browser | d diff | r reload | ctrl-l open link | esc back"
         }
         Tab::Commits => {
-            "j/k commit | J/K, space/b scroll diff | m renderer | enter/o browser | r reload | esc back"
+            "j/k commit | J/K, space/b scroll | m renderer | / find, n/N | s search repo | o browser | esc back"
         }
         Tab::Files => {
-            "j/k file | J/K, space/b scroll diff | m renderer | v viewed | H hide viewed | o browser | esc back"
+            "j/k file | J/K, space/b scroll | m renderer | / find, n/N | v viewed | H hide | e file | s search | esc"
         }
     }
 }
@@ -246,7 +249,10 @@ fn render_detail(
     // An error, such as a failed Viewed sync, replaces the help line until the next action.
     let footer = match error {
         Some(message) => paint.span(message.to_string(), theme.danger),
-        None => paint.span(detail_help(view.tab), theme.muted),
+        None => paint.span(
+            overlay_help(view.overlays.last()).unwrap_or(detail_help(view.tab)),
+            theme.muted,
+        ),
     };
     frame.render_widget(Paragraph::new(footer), bottom);
 
@@ -261,6 +267,10 @@ fn render_detail(
     };
     frame.render_widget(Paragraph::new(detail_header(detail, paint)), top);
     frame.render_widget(Paragraph::new(tab_bar(view.tab, detail, paint)), tabs);
+    if let Some(overlay) = view.overlays.last_mut() {
+        render_overlay(frame, overlay, body, paint);
+        return;
+    }
     match view.tab {
         Tab::Overview => render_overview(frame, detail, view.scroll, body, paint),
         Tab::Checks => render_checks(frame, detail, &mut view.checks, body, paint),
@@ -276,6 +286,109 @@ fn render_detail(
             }
         }
     }
+}
+
+fn overlay_help(overlay: Option<&Overlay>) -> Option<&'static str> {
+    match overlay? {
+        Overlay::Search { .. } => Some("j/k move | enter open the file at the line | esc back"),
+        Overlay::File { .. } => Some("j/k, space/b scroll | g/G top/bottom | esc back"),
+    }
+}
+
+fn render_overlay(frame: &mut Frame, overlay: &mut Overlay, area: Rect, paint: Paint) {
+    let theme = paint.theme;
+    let width = area.width as usize;
+    match overlay {
+        Overlay::Search { query, hits, state } => {
+            let (title, items) = match hits {
+                None => (format!(" searching for \"{query}\"... "), Vec::new()),
+                Some(Err(error)) => (format!(" {error} "), Vec::new()),
+                Some(Ok(hits)) => {
+                    let capped = if hits.len() == MAX_GREP_HITS {
+                        "the first "
+                    } else {
+                        ""
+                    };
+                    let title = format!(
+                        " {capped}{} matches for \"{query}\" at the PR head ",
+                        hits.len()
+                    );
+                    let items = hits
+                        .iter()
+                        .map(|hit| grep_item(hit, width, paint))
+                        .collect();
+                    (title, items)
+                }
+            };
+            let list = List::new(items)
+                .highlight_style(Style::new().bg(theme.selection))
+                .block(Block::new().title(paint.bold(title, theme.heading)));
+            frame.render_stateful_widget(list, area, state);
+        }
+        Overlay::File {
+            path,
+            line,
+            lines,
+            scroll,
+        } => {
+            let block =
+                Block::new().title(paint.bold(format!(" {path} at the PR head "), theme.heading));
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            let text = match lines {
+                None => Text::from(paint.span(" loading...", theme.warning)),
+                Some(Err(error)) => Text::from(paint.span(format!(" {error}"), theme.danger)),
+                Some(Ok(lines)) => {
+                    file_text(lines, *line, *scroll as usize, inner.height as usize, paint)
+                }
+            };
+            frame.render_widget(Paragraph::new(text), inner);
+        }
+    }
+}
+
+/// "src/app.rs:12  let x = 1;", the location in accent and the code as found.
+fn grep_item(hit: &GrepHit, width: usize, paint: Paint) -> ListItem<'static> {
+    let theme = paint.theme;
+    let location = format!(" {}:{}  ", hit.path, hit.line);
+    let code = truncate_to_width(
+        &hit.text.replace('\t', "    "),
+        width.saturating_sub(display_width(&location)),
+    );
+    ListItem::new(Line::from(vec![
+        paint.span(location, theme.accent),
+        paint.span(code, theme.foreground),
+    ]))
+}
+
+/// The visible lines of a file with line numbers. The marked line gets the selection color.
+fn file_text(
+    lines: &[String],
+    marked: usize,
+    scroll: usize,
+    height: usize,
+    paint: Paint,
+) -> Text<'static> {
+    let theme = paint.theme;
+    let gutter = lines.len().to_string().len();
+    let visible = lines
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(height)
+        .map(|(index, code)| {
+            let number = index + 1;
+            let line = Line::from(vec![
+                paint.span(format!("{number:>gutter$} "), theme.muted),
+                paint.span(code.clone(), theme.foreground),
+            ]);
+            if number == marked {
+                line.style(Style::new().bg(theme.selection))
+            } else {
+                line
+            }
+        });
+    Text::from(visible.collect::<Vec<_>>())
 }
 
 fn split_for_diff(area: Rect) -> [Rect; 2] {
@@ -603,6 +716,14 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
             " Workspace folder ".to_string(),
             "the folder that holds your clones. enter saves it to the config, esc skips"
                 .to_string(),
+        ),
+        PromptKind::SearchRepo => (
+            " Search the repo at the PR head ".to_string(),
+            "finds text in every file, not only the changed ones. case-insensitive".to_string(),
+        ),
+        PromptKind::FindInDiff => (
+            " Find in the diff ".to_string(),
+            "jumps to the first line with this text. n next, N previous".to_string(),
         ),
         PromptKind::ConfirmClone { pr, dir } => (
             format!(" Clone {}? ", pr.repo),

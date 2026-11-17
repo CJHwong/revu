@@ -168,6 +168,64 @@ pub fn parse_renames(output: &[u8]) -> HashMap<String, String> {
     renames
 }
 
+/// One `git grep` match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrepHit {
+    pub path: String,
+    pub line: usize,
+    pub text: String,
+}
+
+/// Stops a search for a common word from filling memory and the screen.
+pub const MAX_GREP_HITS: usize = 1000;
+
+/// Searches every file at `commit`, case-insensitive and literal, without a checkout.
+pub fn grep(dir: &Path, commit: &str, query: &str) -> Result<Vec<GrepHit>> {
+    let args = [
+        "grep",
+        "-n",
+        "-I",
+        "-i",
+        "-F",
+        "-z",
+        "--no-color",
+        "-e",
+        query,
+        commit,
+    ];
+    let output = git(dir, &args)?;
+    // git grep exits 1 when nothing matches, which is a result, not a failure.
+    if output.status.code() == Some(1) && output.stderr.is_empty() {
+        return Ok(Vec::new());
+    }
+    ensure_success(&output, "git grep")?;
+    Ok(parse_grep(&output.stdout, commit))
+}
+
+/// Parses `git grep -n -z <commit>` output: `<commit>:<path>\0<line>\0<text>` per line.
+pub fn parse_grep(output: &[u8], commit: &str) -> Vec<GrepHit> {
+    let prefix = format!("{commit}:");
+    String::from_utf8_lossy(output)
+        .lines()
+        .filter_map(|record| {
+            let mut fields = record.splitn(3, '\0');
+            let path = fields.next()?.strip_prefix(&prefix)?.to_string();
+            let line = fields.next()?.parse().ok()?;
+            let text = fields.next().unwrap_or_default().to_string();
+            Some(GrepHit { path, line, text })
+        })
+        .take(MAX_GREP_HITS)
+        .collect()
+}
+
+/// The file's full text at `commit`, for reading code the diff does not show.
+pub fn show_file(dir: &Path, commit: &str, path: &str) -> Result<String> {
+    let object = format!("{commit}:{path}");
+    let output = git(dir, &["show", &object])?;
+    ensure_success(&output, "git show")?;
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 /// Single-quotes a value for `sh`, so a file name such as `$(rm -rf ~).md` stays text.
 pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
@@ -298,6 +356,44 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("broken")
+        );
+    }
+
+    #[test]
+    fn grep_output_splits_on_nul_and_keeps_colons_in_text() {
+        let output = b"abc:src/a.rs\x0012\x00let x: u8 = 1;\nabc:docs/b.md\x003\x00- a: b\n";
+        let hits = parse_grep(output, "abc");
+        assert_eq!(
+            hits,
+            [
+                GrepHit {
+                    path: "src/a.rs".to_string(),
+                    line: 12,
+                    text: "let x: u8 = 1;".to_string()
+                },
+                GrepHit {
+                    path: "docs/b.md".to_string(),
+                    line: 3,
+                    text: "- a: b".to_string()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn grep_finds_text_in_a_real_commit_and_reports_no_match_as_empty() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let head = String::from_utf8(git(dir, &["rev-parse", "HEAD"]).unwrap().stdout).unwrap();
+        let head = head.trim();
+        let hits = grep(dir, head, "rs-github-inbox").unwrap();
+        assert!(hits.iter().any(|hit| hit.path == "Cargo.toml"));
+        // Joined at run time, so the searched text never appears in this file at HEAD.
+        let absent = ["zz", "no-such-text", "zz"].join("-");
+        assert!(grep(dir, head, &absent).unwrap().is_empty());
+        assert!(
+            show_file(dir, head, "Cargo.toml")
+                .unwrap()
+                .contains("[package]")
         );
     }
 }

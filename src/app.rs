@@ -8,7 +8,7 @@ use ratatui::widgets::ListState;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::repo::LocalRepo;
+use crate::repo::{GrepHit, LocalRepo};
 
 use crate::model::{ChangedFile, Group, PrDetail, PrRef, PrSummary, ViewedState, parse_pr_ref};
 
@@ -26,6 +26,18 @@ pub enum Action {
     FetchDetail(PrRef),
     OpenBrowser(String),
     RunDiff(PrRef),
+    Grep {
+        pr: PrRef,
+        dir: PathBuf,
+        commit: String,
+        query: String,
+    },
+    ShowFile {
+        pr: PrRef,
+        dir: PathBuf,
+        commit: String,
+        path: String,
+    },
     SetWorkspace(String),
     CloneRepo {
         pr: PrRef,
@@ -118,6 +130,42 @@ pub struct RepoJob {
     pub head_oid: String,
 }
 
+/// A view over the tab, read from the clone at the PR's head. Esc goes back one level.
+pub enum Overlay {
+    Search {
+        query: String,
+        hits: Option<Result<Vec<GrepHit>, String>>,
+        state: ListState,
+    },
+    File {
+        path: String,
+        /// The line to mark, counted from 1. Zero marks none.
+        line: usize,
+        lines: Option<Result<Vec<String>, String>>,
+        scroll: u16,
+    },
+}
+
+/// How far a movement key moves a list or a page.
+fn step(key: KeyCode) -> Option<i16> {
+    match key {
+        KeyCode::Char('j') | KeyCode::Down => Some(1),
+        KeyCode::Char('k') | KeyCode::Up => Some(-1),
+        KeyCode::Char(' ') | KeyCode::PageDown => Some(20),
+        KeyCode::Char('b') | KeyCode::PageUp => Some(-20),
+        KeyCode::Char('g') | KeyCode::Home => Some(i16::MIN),
+        KeyCode::Char('G') | KeyCode::End => Some(i16::MAX),
+        _ => None,
+    }
+}
+
+fn line_text(line: &ratatui::text::Line) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
+}
+
 pub struct DetailView {
     pub pr: PrRef,
     /// `None` while the request runs.
@@ -138,6 +186,9 @@ pub struct DetailView {
     /// The diff pane's width at the last draw; diffs render to fit it.
     pub diff_width: u16,
     pub diffs: HashMap<DiffKey, DiffOutput>,
+    pub overlays: Vec<Overlay>,
+    /// The lowercased text that `n` and `N` look for in the diff.
+    pub find: Option<String>,
 }
 
 impl DetailView {
@@ -158,6 +209,8 @@ impl DetailView {
             diff_scroll: 0,
             diff_width: 0,
             diffs: HashMap::new(),
+            overlays: Vec::new(),
+            find: None,
         }
     }
 
@@ -188,6 +241,142 @@ impl DetailView {
 
     fn scroll_diff(&mut self, delta: i16) {
         self.diff_scroll = self.diff_scroll.saturating_add_signed(delta);
+    }
+
+    /// The clone folder and the PR's head commit, once the clone is ready.
+    fn head_in_clone(&self) -> Result<(PathBuf, String), String> {
+        let RepoState::Ready(repo) = &self.repo else {
+            return Err("the local clone is not ready; open Files changed first".to_string());
+        };
+        let detail = self.loaded().ok_or("the pull request is still loading")?;
+        Ok((repo.dir.clone(), detail.head_oid.clone()))
+    }
+
+    fn search(&mut self, query: String) -> Result<Action, String> {
+        let (dir, commit) = self.head_in_clone()?;
+        let state = ListState::default().with_selected(Some(0));
+        self.overlays.push(Overlay::Search {
+            query: query.clone(),
+            hits: None,
+            state,
+        });
+        Ok(Action::Grep {
+            pr: self.pr.clone(),
+            dir,
+            commit,
+            query,
+        })
+    }
+
+    fn open_file(&mut self, path: String, line: usize) -> Result<Action, String> {
+        let (dir, commit) = self.head_in_clone()?;
+        // Show a few lines of context above the marked line.
+        let scroll = u16::try_from(line.saturating_sub(6)).unwrap_or(u16::MAX);
+        self.overlays.push(Overlay::File {
+            path: path.clone(),
+            line,
+            lines: None,
+            scroll,
+        });
+        Ok(Action::ShowFile {
+            pr: self.pr.clone(),
+            dir,
+            commit,
+            path,
+        })
+    }
+
+    fn overlay_key(&mut self, key: KeyCode) -> Result<Option<Action>, String> {
+        let Some(overlay) = self.overlays.last_mut() else {
+            return Ok(None);
+        };
+        match (overlay, key) {
+            (_, KeyCode::Esc | KeyCode::Char('q' | 'h') | KeyCode::Left) => {
+                self.overlays.pop();
+            }
+            (
+                Overlay::Search {
+                    hits: Some(Ok(hits)),
+                    state,
+                    ..
+                },
+                KeyCode::Enter,
+            ) => {
+                if let Some(hit) = state.selected().and_then(|index| hits.get(index)).cloned() {
+                    return self.open_file(hit.path, hit.line).map(Some);
+                }
+            }
+            (
+                Overlay::Search {
+                    hits: Some(Ok(hits)),
+                    state,
+                    ..
+                },
+                code,
+            ) => {
+                if let (Some(delta), Some(last)) = (step(code), hits.len().checked_sub(1)) {
+                    let next = state
+                        .selected()
+                        .unwrap_or(0)
+                        .saturating_add_signed(delta.into());
+                    state.select(Some(next.min(last)));
+                }
+            }
+            (
+                Overlay::File {
+                    lines: Some(Ok(lines)),
+                    scroll,
+                    ..
+                },
+                code,
+            ) => {
+                if let Some(delta) = step(code) {
+                    let last = u16::try_from(lines.len().saturating_sub(1)).unwrap_or(u16::MAX);
+                    *scroll = scroll.saturating_add_signed(delta).min(last);
+                }
+            }
+            _ => {}
+        }
+        Ok(None)
+    }
+
+    fn start_find(&mut self, query: &str) -> Result<(), String> {
+        self.find = Some(query.to_lowercase());
+        self.find_in_diff(true, false)
+    }
+
+    /// Scrolls the diff so the next (or previous) line holding the find text is on top.
+    /// The search wraps around the end.
+    fn find_in_diff(&mut self, forward: bool, skip_top_line: bool) -> Result<(), String> {
+        let query = self
+            .find
+            .clone()
+            .ok_or("press / to find text in the diff")?;
+        let key = self.current_diff_key().ok_or("no diff here")?;
+        let Some(DiffOutput::Done(Ok(text))) = self.diffs.get(&key) else {
+            return Err("the diff is not ready".to_string());
+        };
+        let matches: Vec<usize> = text
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line_text(line).to_lowercase().contains(&query))
+            .map(|(index, _)| index)
+            .collect();
+        let top = self.diff_scroll as usize;
+        let next = if forward {
+            let after = |index: &&usize| **index > top || (!skip_top_line && **index == top);
+            matches.iter().find(after).or(matches.first())
+        } else {
+            matches
+                .iter()
+                .rev()
+                .find(|index| **index < top)
+                .or(matches.last())
+        };
+        let line = next.ok_or_else(|| format!("\"{query}\" is not in this diff"))?;
+        self.diff_scroll = u16::try_from(*line).unwrap_or(u16::MAX);
+        Ok(())
     }
 
     fn loaded(&self) -> Option<&PrDetail> {
@@ -311,6 +500,8 @@ pub enum PromptKind {
     #[default]
     OpenLink,
     Workspace,
+    SearchRepo,
+    FindInDiff,
     /// Asks before cloning the PR's repo into this folder.
     ConfirmClone {
         pr: PrRef,
@@ -455,6 +646,54 @@ impl App {
                 .map_err(|error| format!("bad renderer output: {error}"))
         });
         view.diffs.insert(key, DiffOutput::Done(text));
+    }
+
+    /// Fills the search results that are still waiting for this query.
+    pub fn set_grep(&mut self, pr: &PrRef, query: &str, result: Result<Vec<GrepHit>, String>) {
+        let Some(view) = self.view_for(pr) else {
+            return;
+        };
+        for overlay in &mut view.overlays {
+            match overlay {
+                Overlay::Search {
+                    query: shown,
+                    hits: hits @ None,
+                    state,
+                } if shown == query => {
+                    // Drawing the empty "searching" list cleared the selection.
+                    state.select(Some(0));
+                    *hits = Some(result);
+                    return;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Fills the file views that are still waiting for this path.
+    pub fn set_file(&mut self, pr: &PrRef, path: &str, result: Result<String, String>) {
+        let Some(view) = self.view_for(pr) else {
+            return;
+        };
+        // The terminal draws a tab as one cell, so expand it like an editor would.
+        let lines = result.map(|text| {
+            text.lines()
+                .map(|line| line.replace('\t', "    "))
+                .collect::<Vec<_>>()
+        });
+        for overlay in &mut view.overlays {
+            match overlay {
+                Overlay::File {
+                    path: shown,
+                    lines: slot @ None,
+                    ..
+                } if shown == path => {
+                    *slot = Some(lines);
+                    return;
+                }
+                _ => {}
+            }
+        }
     }
 
     pub fn ask(&mut self, kind: PromptKind, text: &str) {
@@ -612,7 +851,23 @@ impl App {
             PromptKind::OpenLink => self.submit_link(prompt),
             PromptKind::Workspace => Some(Action::SetWorkspace(prompt.text.trim().to_string())),
             PromptKind::ConfirmClone { pr, dir } => self.submit_clone(pr, dir, &prompt.text),
+            PromptKind::SearchRepo => self.in_view(|view| view.search(prompt.text).map(Some)),
+            PromptKind::FindInDiff => {
+                self.in_view(|view| view.start_find(&prompt.text).map(|()| None))
+            }
         }
+    }
+
+    /// Runs a step on the open PR, and shows its error in the footer.
+    fn in_view(
+        &mut self,
+        step: impl FnOnce(&mut DetailView) -> Result<Option<Action>, String>,
+    ) -> Option<Action> {
+        let view = self.open_view()?;
+        step(view).unwrap_or_else(|error| {
+            self.error = Some(error);
+            None
+        })
     }
 
     fn submit_clone(&mut self, pr: PrRef, dir: PathBuf, answer: &str) -> Option<Action> {
@@ -669,7 +924,48 @@ impl App {
             return None;
         };
         let diff_pane = matches!(view.tab, Tab::Files | Tab::Commits);
+        // An error stays in the footer until the next key.
+        self.error = None;
+        if !view.overlays.is_empty() {
+            return view.overlay_key(key).unwrap_or_else(|error| {
+                self.error = Some(error);
+                None
+            });
+        }
+        let find_result = match key {
+            KeyCode::Char('n') if diff_pane => Some(view.find_in_diff(true, true)),
+            KeyCode::Char('N') if diff_pane => Some(view.find_in_diff(false, true)),
+            _ => None,
+        };
+        if let Some(result) = find_result {
+            self.error = result.err();
+            return None;
+        }
         match key {
+            KeyCode::Char('s') => {
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::SearchRepo,
+                    ..Prompt::default()
+                });
+            }
+            KeyCode::Char('/') if diff_pane => {
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::FindInDiff,
+                    ..Prompt::default()
+                });
+            }
+            KeyCode::Char('e') if view.tab == Tab::Files => {
+                let path = view
+                    .loaded_files()
+                    .and_then(|files| Some(files.get(view.selected_file()?)?.path.clone()));
+                return view.open_file(path?, 0).map_or_else(
+                    |error| {
+                        self.error = Some(error);
+                        None
+                    },
+                    Some,
+                );
+            }
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Left => {
                 self.screen = Screen::Inbox;
                 self.error = None;
@@ -1136,5 +1432,102 @@ mod tests {
         app.handle_key(key(KeyCode::Char('H')));
         assert_eq!(view(&app).visible_files(), [1]);
         assert_eq!(view(&app).selected_file(), Some(1));
+    }
+
+    fn view_mut(app: &mut App) -> &mut DetailView {
+        match &mut app.screen {
+            Screen::Detail(view) => view,
+            Screen::Inbox => panic!("expected detail screen"),
+        }
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for character in text.chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+    }
+
+    #[test]
+    fn search_needs_the_clone() {
+        let (mut app, _) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        app.handle_key(key(KeyCode::Char('s')));
+        type_text(&mut app, "Foo");
+        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
+        assert!(app.error.as_deref().unwrap().contains("clone is not ready"));
+    }
+
+    #[test]
+    fn search_lists_hits_and_enter_opens_the_file_at_the_line() {
+        let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        ready_repo(&mut app, &pr);
+        app.handle_key(key(KeyCode::Char('s')));
+        type_text(&mut app, "Foo");
+        let Some(Action::Grep { commit, query, .. }) = app.handle_key(key(KeyCode::Enter)) else {
+            panic!("expected a grep");
+        };
+        assert_eq!((commit.as_str(), query.as_str()), ("head999", "Foo"));
+        let hit = |path: &str, line| GrepHit {
+            path: path.to_string(),
+            line,
+            text: "Foo".to_string(),
+        };
+        let Some(Overlay::Search { state, .. }) = view_mut(&mut app).overlays.last_mut() else {
+            panic!("expected search results");
+        };
+        // What ratatui does when it draws the list while it is still empty.
+        state.select(None);
+        app.set_grep(&pr, "Foo", Ok(vec![hit("x.py", 3), hit("y.py", 40)]));
+        let Some(Overlay::Search { state, .. }) = view(&app).overlays.last() else {
+            panic!("expected search results");
+        };
+        assert_eq!(state.selected(), Some(0), "enter must open the first hit");
+        app.handle_key(key(KeyCode::Char('j')));
+        let Some(Action::ShowFile { path, .. }) = app.handle_key(key(KeyCode::Enter)) else {
+            panic!("expected a file");
+        };
+        assert_eq!(path, "y.py");
+        let text = (1..=50)
+            .map(|number| format!("line {number}\n"))
+            .collect::<String>();
+        app.set_file(&pr, "y.py", Ok(text));
+        let Some(Overlay::File {
+            line,
+            scroll,
+            lines: Some(Ok(lines)),
+            ..
+        }) = view(&app).overlays.last()
+        else {
+            panic!("expected a loaded file");
+        };
+        assert_eq!((*line, *scroll, lines.len()), (40, 34, 50));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(matches!(
+            view(&app).overlays.last(),
+            Some(Overlay::Search { .. })
+        ));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(view(&app).overlays.is_empty());
+    }
+
+    #[test]
+    fn find_jumps_to_matching_lines_and_wraps() {
+        let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        ready_repo(&mut app, &pr);
+        let job = app.take_diff_request().unwrap();
+        app.set_diff(
+            &pr,
+            job.key,
+            Ok(b"one\nNeedle two\nthree\nneedle four\n".to_vec()),
+        );
+        app.handle_key(key(KeyCode::Char('/')));
+        type_text(&mut app, "needle");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(view(&app).diff_scroll, 1);
+        app.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(view(&app).diff_scroll, 3);
+        app.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(view(&app).diff_scroll, 1, "wraps to the first match");
+        app.handle_key(key(KeyCode::Char('N')));
+        assert_eq!(view(&app).diff_scroll, 3, "wraps back to the last match");
     }
 }
