@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -54,7 +54,7 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: &Theme, now: DateTime<Utc
     }
     frame.render_widget(Block::new().style(base), frame.area());
     if let Some(problem) = &app.gh_problem {
-        render_gh_problem(frame, problem, paint);
+        render_gh_problem(frame, problem, app.gh_checked_at, paint);
         return;
     }
     if let Screen::Detail(view) = &mut app.screen {
@@ -1136,7 +1136,12 @@ fn status_span(
 
 /// Without a working gh the app can fetch nothing, so the whole screen says what is
 /// wrong and the command that fixes it, instead of an inbox of empty groups.
-fn render_gh_problem(frame: &mut Frame, problem: &GhProblem, paint: Paint) {
+fn render_gh_problem(
+    frame: &mut Frame,
+    problem: &GhProblem,
+    checked_at: Option<DateTime<Utc>>,
+    paint: Paint,
+) {
     let theme = paint.theme;
     let command = |text: &str| Line::from(paint.span(format!("  {text}"), theme.accent));
     let plain = |text: &str| Line::from(paint.span(text.to_string(), theme.foreground));
@@ -1168,9 +1173,16 @@ fn render_gh_problem(frame: &mut Frame, problem: &GhProblem, paint: Paint) {
             (" The GitHub CLI is not logged in ", lines)
         }
     };
+    // The time changes on every r, so a retry that fails again still shows it ran.
+    let checked = checked_at.map_or(String::new(), |at| {
+        format!(
+            "checked at {}. ",
+            at.with_timezone(&Local).format("%H:%M:%S")
+        )
+    });
     lines.extend([
         plain(""),
-        Line::from(paint.span("r checks again, q quits", theme.muted)),
+        Line::from(paint.span(format!("{checked}r checks again, q quits"), theme.muted)),
     ]);
     let area = frame.area();
     let width = lines

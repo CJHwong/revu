@@ -302,7 +302,10 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
                 result,
                 fetched_at,
             } => app.set_group(generation, index, result, fetched_at),
-            Message::GhProblem(problem) => app.gh_problem = Some(problem),
+            Message::GhProblem(problem) => {
+                app.gh_problem = Some(problem);
+                app.gh_checked_at = Some(Utc::now());
+            }
             Message::Activity { pr, result } => {
                 app.set_activity(&pr, result.map(|activity| *activity))
             }

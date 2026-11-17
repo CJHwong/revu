@@ -1638,6 +1638,8 @@ pub struct App {
     pub notice_seen: bool,
     /// gh is missing or logged out; the whole screen says how to fix it.
     pub gh_problem: Option<crate::github::GhProblem>,
+    /// When gh was last found broken, so r shows that it checked again.
+    pub gh_checked_at: Option<DateTime<Utc>>,
     /// A write to GitHub is running; the footer says what it saves.
     pub saving: Option<SaveNote>,
     /// The last write succeeded; the footer says so until the next key.
@@ -1689,6 +1691,7 @@ impl App {
             notice: None,
             notice_seen: false,
             gh_problem: None,
+            gh_checked_at: None,
             saving: None,
             saved: None,
             reload_after_write: None,
