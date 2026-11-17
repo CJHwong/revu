@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use crate::editor::{Editor, Outcome};
 use crate::file_tree::{self, FileRow};
+use crate::github::RepoLabel;
 use crate::line_diff::{DiffRow, RowKind};
 use crate::markdown::TextRow;
 use crate::repo::{GrepHit, LocalRepo};
@@ -94,6 +95,17 @@ pub enum Action {
     },
     /// Read one file's plain diff for comment mode.
     LineDiff(DiffJob),
+    /// Load the repo's labels for the label menu.
+    FetchLabels {
+        pr: PrRef,
+    },
+    /// Add and remove labels on a PR, by label id.
+    SetLabels {
+        pr: PrRef,
+        pull_request_id: String,
+        add: Vec<String>,
+        remove: Vec<String>,
+    },
     CloneRepo {
         pr: PrRef,
         dir: PathBuf,
@@ -1233,6 +1245,74 @@ pub enum PromptKind {
     },
 }
 
+/// The label checklist: the repo's labels, ticked for the ones the PR will have.
+#[derive(Debug)]
+pub struct LabelMenu {
+    pub pr: PrRef,
+    pub pull_request_id: String,
+    /// `None` while the repo's labels load.
+    pub labels: Option<Result<Vec<RepoLabel>, String>>,
+    /// The PR's labels when the menu opened.
+    pub current: HashSet<String>,
+    /// The labels the PR will have after enter.
+    pub chosen: HashSet<String>,
+    /// Typed text; only labels holding it show.
+    pub filter: String,
+    /// The cursor, among the shown labels.
+    pub selected: usize,
+}
+
+impl LabelMenu {
+    /// The labels holding the filter, ignoring case.
+    pub fn shown(&self) -> Vec<&RepoLabel> {
+        let Some(Ok(labels)) = &self.labels else {
+            return Vec::new();
+        };
+        let filter = self.filter.to_lowercase();
+        let holds = |label: &&RepoLabel| label.name.to_lowercase().contains(&filter);
+        labels.iter().filter(holds).collect()
+    }
+
+    fn toggle(&mut self) {
+        let Some(name) = self
+            .shown()
+            .get(self.selected)
+            .map(|label| label.name.clone())
+        else {
+            return;
+        };
+        if !self.chosen.remove(&name) {
+            self.chosen.insert(name);
+        }
+    }
+
+    /// The adds and removes, by label id; nothing when the ticks match the PR.
+    fn change(self) -> Option<Action> {
+        let Some(Ok(labels)) = &self.labels else {
+            return None;
+        };
+        let ids = |names: Vec<&String>| -> Vec<String> {
+            let id_of = |name: &&String| labels.iter().find(|label| &&label.name == name);
+            names
+                .iter()
+                .filter_map(id_of)
+                .map(|label| label.id.clone())
+                .collect()
+        };
+        let add = ids(self.chosen.difference(&self.current).collect());
+        let remove = ids(self.current.difference(&self.chosen).collect());
+        if add.is_empty() && remove.is_empty() {
+            return None;
+        }
+        Some(Action::SetLabels {
+            pr: self.pr,
+            pull_request_id: self.pull_request_id,
+            add,
+            remove,
+        })
+    }
+}
+
 /// Comment mode's state: the file's numbered rows, the cursor, and a range's other end.
 #[derive(Debug)]
 pub struct LineMode {
@@ -1483,6 +1563,8 @@ pub struct App {
     pub theme_menu: Option<usize>,
     /// The text box for a review or a line comment, while it is open.
     pub composer: Option<Composer>,
+    /// The label checklist, while it is open.
+    pub label_menu: Option<LabelMenu>,
     /// A write succeeded, so this PR loads again to show it.
     pub reload_after_write: Option<PrRef>,
     /// The settings panel's selected row, while it is open.
@@ -1524,6 +1606,7 @@ impl App {
             rate_limit: None,
             theme_menu: None,
             composer: None,
+            label_menu: None,
             reload_after_write: None,
             settings_menu: None,
             workspace_dir: None,
@@ -1958,6 +2041,9 @@ impl App {
         if self.composer.is_some() {
             return self.composer_key(key);
         }
+        if self.label_menu.is_some() {
+            return self.label_menu_key(key.code);
+        }
         if self.prompt.is_some() {
             return self.prompt_key(key.code);
         }
@@ -2265,6 +2351,66 @@ impl App {
         mode.rows = Some(rows);
     }
 
+    /// e: the label checklist, ticked with the PR's labels; the repo's list loads next.
+    fn open_label_menu(&mut self) -> Option<Action> {
+        let Screen::Detail(view) = &self.screen else {
+            return None;
+        };
+        let Some(Ok(detail)) = &view.detail else {
+            self.error = Some("wait for the PR to load before labeling it".to_string());
+            return None;
+        };
+        let current: HashSet<String> = detail
+            .labels
+            .iter()
+            .map(|label| label.name.clone())
+            .collect();
+        self.label_menu = Some(LabelMenu {
+            pr: view.pr.clone(),
+            pull_request_id: detail.id.clone(),
+            labels: None,
+            chosen: current.clone(),
+            current,
+            filter: String::new(),
+            selected: 0,
+        });
+        Some(Action::FetchLabels {
+            pr: view.pr.clone(),
+        })
+    }
+
+    pub fn set_repo_labels(&mut self, pr: &PrRef, result: Result<Vec<RepoLabel>, String>) {
+        if let Some(menu) = self.label_menu.as_mut().filter(|menu| &menu.pr == pr) {
+            menu.labels = Some(result);
+        }
+    }
+
+    /// Typing filters, up and down move, space ticks, enter applies, esc closes.
+    fn label_menu_key(&mut self, key: KeyCode) -> Option<Action> {
+        let menu = self.label_menu.as_mut()?;
+        let shown = menu.shown().len();
+        match key {
+            KeyCode::Esc => self.label_menu = None,
+            KeyCode::Down => menu.selected = (menu.selected + 1).min(shown.saturating_sub(1)),
+            KeyCode::Up => menu.selected = menu.selected.saturating_sub(1),
+            KeyCode::Char(' ') => menu.toggle(),
+            KeyCode::Backspace => {
+                menu.filter.pop();
+                menu.selected = 0;
+            }
+            KeyCode::Char(character) => {
+                menu.filter.push(character);
+                menu.selected = 0;
+            }
+            KeyCode::Enter => {
+                let menu = self.label_menu.take()?;
+                return menu.change();
+            }
+            _ => {}
+        }
+        None
+    }
+
     /// R: a review of the open PR, carrying the pending line comments.
     fn open_review(&mut self) -> Result<(), String> {
         let Screen::Detail(view) = &self.screen else {
@@ -2406,6 +2552,7 @@ impl App {
                 let result = self.ask_discard();
                 self.error = result.err();
             }
+            KeyCode::Char('e') => return self.open_label_menu(),
             KeyCode::Char('s') => {
                 self.prompt = Some(Prompt {
                     kind: PromptKind::SearchRepo,
@@ -3218,6 +3365,38 @@ mod tests {
 
     fn ctrl(character: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn the_label_menu_filters_ticks_and_sends_only_the_changes() {
+        let label = |id: &str, name: &str| RepoLabel {
+            id: id.to_string(),
+            name: name.to_string(),
+            color: "ededed".to_string(),
+        };
+        let (mut app, pr) = files_tab(vec![file("a.rs", ViewedState::Unviewed)]);
+        let action = app.handle_key(key(KeyCode::Char('e')));
+        assert!(matches!(action, Some(Action::FetchLabels { .. })));
+        let current = app.label_menu.as_ref().unwrap().current.clone();
+        let kept = current.iter().next().cloned().unwrap_or_default();
+        let labels = vec![label("L1", &kept), label("L2", "docs"), label("L3", "bug")];
+        app.set_repo_labels(&pr, Ok(labels));
+        type_text(&mut app, "do");
+        assert_eq!(
+            app.label_menu.as_ref().unwrap().shown().len(),
+            1,
+            "only docs holds do"
+        );
+        app.handle_key(key(KeyCode::Char(' ')));
+        let action = app.handle_key(key(KeyCode::Enter));
+        let Some(Action::SetLabels { add, remove, .. }) = action else {
+            panic!("enter applies the change");
+        };
+        assert_eq!(
+            (add, remove),
+            (vec!["L2".to_string()], Vec::<String>::new())
+        );
+        assert!(app.label_menu.is_none());
     }
 
     #[test]

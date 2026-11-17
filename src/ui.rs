@@ -9,7 +9,7 @@ use ratatui::widgets::{
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::{
-    App, Click, ClickTarget, ComposeKind, Composer, DetailView, DiffOutput, Overlay,
+    App, Click, ClickTarget, ComposeKind, Composer, DetailView, DiffOutput, LabelMenu, Overlay,
     OverviewLayout, Prompt, PromptKind, RepoState, Row, SETTINGS, Screen, Tab,
 };
 use crate::editor::Editor;
@@ -70,6 +70,9 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: &Theme, now: DateTime<Utc
     }
     if let Some(selected) = app.settings_menu {
         render_settings(frame, app, selected, paint);
+    }
+    if let Some(menu) = &app.label_menu {
+        render_label_menu(frame, menu, paint);
     }
     if let Some(selected) = app.theme_menu {
         render_theme_menu(frame, selected, app.theme_name, paint);
@@ -467,6 +470,10 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
                 "review: Comment, Approve or Request changes, with your line comments",
             ),
             ("X", "discard your pending review and its line comments"),
+            (
+                "e",
+                "labels: tick or untick the repo's labels, enter applies",
+            ),
         ],
     ),
     (
@@ -1980,6 +1987,68 @@ fn reviewer_symbol(state: &str, theme: &Theme) -> (&'static str, Color) {
 
 /// A small box of the built-in themes. The current one has a dot; enter applies the
 /// selected one.
+/// The label checklist: a filter line, then each label with its tick and color.
+fn render_label_menu(frame: &mut Frame, menu: &LabelMenu, paint: Paint) {
+    let theme = paint.theme;
+    let area = frame.area();
+    let width = 50.min(area.width);
+    let height = (area.height * 3 / 5).max(8).min(area.height);
+    let box_area = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    };
+    let mut lines = vec![Line::from(vec![
+        paint.span("> ", theme.accent),
+        Span::from(menu.filter.clone()),
+        paint.span("▏", theme.accent),
+    ])];
+    match &menu.labels {
+        None => lines.push(Line::from(
+            paint.span(" loading the repo's labels...", theme.warning),
+        )),
+        Some(Err(error)) => lines.push(Line::from(paint.span(format!(" {error}"), theme.danger))),
+        Some(Ok(_)) => {
+            let shown = menu.shown();
+            let visible = usize::from(height.saturating_sub(3)).max(1);
+            let first = (menu.selected + 1).saturating_sub(visible);
+            if shown.is_empty() {
+                lines.push(Line::from(
+                    paint.span(" no label holds that text", theme.muted),
+                ));
+            }
+            for (index, label) in shown.iter().enumerate().skip(first).take(visible) {
+                let tick = match menu.chosen.contains(&label.name) {
+                    true => "[x] ",
+                    false => "[ ] ",
+                };
+                let (color, _) = markdown::label_colors(&label.color);
+                let line = Line::from(vec![
+                    paint.span(format!(" {tick}"), theme.foreground),
+                    Span::styled("● ", Style::new().fg(color)),
+                    paint.span(label.name.clone(), theme.foreground),
+                ]);
+                lines.push(match index == menu.selected {
+                    true => line.style(Style::new().bg(theme.selection)),
+                    false => line,
+                });
+            }
+        }
+    }
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(theme.heading))
+        .title(paint.bold(" Labels ", theme.heading))
+        .title_bottom(paint.span(
+            " type to filter, up/down move, space ticks, enter applies, esc ",
+            theme.muted,
+        ))
+        .style(Style::new().bg(theme.background).fg(theme.foreground));
+    frame.render_widget(Clear, box_area);
+    frame.render_widget(Paragraph::new(lines).block(block), box_area);
+}
+
 /// The settings, each with its value; Enter edits the selected one.
 fn render_settings(frame: &mut Frame, app: &App, selected: usize, paint: Paint) {
     let theme = paint.theme;

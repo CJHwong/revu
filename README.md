@@ -33,6 +33,8 @@ A search shows at most 100 pull requests. A group with more matches shows a coun
 
 ## Keys
 
+Text boxes (reviews and comments) are multi-line: `Enter` adds a line, `shift`+arrows select, `alt`+arrows move by word, `ctrl+a` selects everything, `ctrl+c` and `ctrl+x` copy and cut to the clipboard, a paste replaces the selection, and `esc` twice throws the text away. Copying uses OSC 52 and `pbcopy`; inside tmux, OSC 52 needs `set -g set-clipboard on`.
+
 Press `?` anywhere for this list.
 
 | Where | Key | Action |
@@ -52,6 +54,9 @@ Press `?` anywhere for this list.
 | Pull request | `g` / `G`, `Space` / `b` | Top, bottom, page down, page up |
 | Pull request | `s` | Search every file in the repo at the PR head, not only the changed ones. `Enter` opens the file at the match, with syntax colors from `bat` when it is installed. It needs the local clone, which the Files changed or Commits tab finds first. |
 | Pull request | `r` | Fetch the pull request again |
+| Pull request | `R` | Review: `Tab` picks Comment, Approve or Request changes (only Comment on your own PR, as GitHub requires). `ctrl+s` asks to confirm and `y` sends. Your pending line comments go with it. Request changes needs a comment; Comment needs a comment or line comments. |
+| Pull request | `X` | Discard your pending review and every line comment in it, after a `y`. |
+| Pull request | `e` | Labels: type to filter, `↑`/`↓` move, `Space` ticks, `Enter` applies the changes to GitHub. |
 | Overview | `j` / `k` | Next or previous comment, review thread or folded block. Inside one taller than the screen, a third of a screen. The cursor never stops on an empty line. |
 | Overview | `Enter` | Open or close the card, review thread or `<details>` block under the cursor |
 | Overview | `]` / `[` | Next or previous card or folded block |
@@ -61,6 +66,7 @@ Press `?` anywhere for this list.
 | Files changed | `z` | Hide or show the list, so the diff gets the full width |
 | Files changed | `v` | Toggle Viewed. It syncs to GitHub's Viewed checkbox at once. |
 | Files changed | `V` | Hide viewed files |
+| Files changed | `c` | Comment mode on the selected file: its plain diff with line numbers. `j`/`k` move, `V` marks a range (on one side only, as GitHub requires), `Enter` writes a comment, `esc` goes back. The comment joins your pending review on GitHub, which only you see until `R` submits it; a dot marks lines it already covers. |
 | Files changed | `]` / `[` | Next or previous unviewed file |
 | Files changed, Commits | `J` / `K`, `Space` / `b` | Scroll the diff |
 | Files changed, Commits | `m` | Switch the diff renderer |

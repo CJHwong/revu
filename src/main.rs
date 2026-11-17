@@ -39,6 +39,11 @@ use repo::{CloneLookup, LocalRepo};
 
 /// Results from the fetch threads. Errors are strings because they only get displayed.
 enum Message {
+    /// The repo's labels, for the label menu.
+    Labels {
+        pr: PrRef,
+        result: Result<Vec<github::RepoLabel>, String>,
+    },
     /// One file's plain diff, for comment mode.
     LineDiff {
         pr: PrRef,
@@ -298,6 +303,7 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
             Message::Files { pr, result } => app.set_files(&pr, result),
             Message::Written { pr, result } => app.set_written(&pr, result),
             Message::LineDiff { pr, path, result } => app.set_line_rows(&pr, &path, result),
+            Message::Labels { pr, result } => app.set_repo_labels(&pr, result),
             Message::FilesProgress { pr, loaded, total } => {
                 app.set_files_progress(&pr, loaded, total)
             }
@@ -451,6 +457,21 @@ fn perform(
                 });
             });
         }
+        Action::FetchLabels { pr } => {
+            let sender = session.sender.clone();
+            thread::spawn(move || {
+                let result = github::repo_labels(&pr.repo).map_err(|error| format!("{error:#}"));
+                let _ = sender.send(Message::Labels { pr, result });
+            });
+        }
+        Action::SetLabels {
+            pr,
+            pull_request_id,
+            add,
+            remove,
+        } => start_write(session, pr, move || {
+            github::set_labels(&pull_request_id, &add, &remove)
+        }),
         Action::DiscardReview { pr, pending_review } => {
             start_write(session, pr, move || github::discard_review(&pending_review))
         }
