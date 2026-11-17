@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod editor;
 mod file_tree;
 mod find;
 mod github;
@@ -37,6 +38,11 @@ use repo::{CloneLookup, LocalRepo};
 
 /// Results from the fetch threads. Errors are strings because they only get displayed.
 enum Message {
+    /// A write to GitHub finished: a review, a line comment, or a discard.
+    Written {
+        pr: PrRef,
+        result: Result<(), String>,
+    },
     Group {
         generation: u64,
         index: usize,
@@ -225,8 +231,11 @@ fn handle_input(
             None
         }
         Input::Click(column, row) => app.handle_click(column, row),
+        // In the text box ctrl+c copies; everywhere else it quits.
         Input::Key(key)
-            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) =>
+            if key.code == KeyCode::Char('c')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+                && app.composer.is_none() =>
         {
             return Ok(false);
         }
@@ -280,6 +289,7 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
             }
             Message::Detail { pr, result } => app.set_detail(&pr, result.map(|detail| *detail)),
             Message::Files { pr, result } => app.set_files(&pr, result),
+            Message::Written { pr, result } => app.set_written(&pr, result),
             Message::FilesProgress { pr, loaded, total } => {
                 app.set_files_progress(&pr, loaded, total)
             }
@@ -393,6 +403,36 @@ fn perform(
         Action::SetWorkspace(text) => set_workspace(app, session, text),
         Action::SetTheme(name) => set_theme(app, session, name),
         Action::SetUpdatedWithin(days) => set_updated_within(app, session, days),
+        Action::Copy(text) => copy_to_clipboard(app, &text),
+        Action::SubmitReview {
+            pr,
+            pull_request_id,
+            pending_review,
+            verdict,
+            body,
+        } => start_write(session, pr, move || {
+            github::submit_review(&pull_request_id, pending_review.as_deref(), verdict, &body)
+        }),
+        Action::AddComment {
+            pr,
+            pull_request_id,
+            pending_review,
+            target,
+            body,
+        } => start_write(session, pr, move || {
+            let comment = github::NewComment {
+                path: &target.path,
+                side: target.side,
+                line: target.line,
+                start_line: target.start_line,
+                body: &body,
+            };
+            github::add_line_comment(&pull_request_id, pending_review.as_deref(), &comment)
+                .map(|_| ())
+        }),
+        Action::DiscardReview { pr, pending_review } => {
+            start_write(session, pr, move || github::discard_review(&pending_review))
+        }
         Action::CloneRepo { pr, dir } => match session.pending_clone.take() {
             Some(job) if job.pr == pr => {
                 app.set_repo_state(RepoState::Busy(format!(
@@ -424,6 +464,10 @@ fn renderer_names(config: &Config) -> Vec<String> {
 
 /// Starts whatever the screen now needs: a file list, a local clone, or a diff.
 fn dispatch_requests(app: &mut App, session: &mut Session) {
+    if let Some(pr) = app.reload_after_write.take() {
+        start_activity_fetch(session, pr.clone());
+        start_detail_fetch(session, pr);
+    }
     if let Some(pr) = app.take_files_request() {
         start_files_fetch(session, pr);
     }
@@ -704,6 +748,41 @@ fn start_files_fetch(session: &Session, pr: PrRef) {
             .map_err(|error| format!("{error:#}"));
         let _ = sender.send(Message::Files { pr, result });
     });
+}
+
+/// Runs a write to GitHub off the UI thread; the PR reloads when it succeeds.
+fn start_write(
+    session: &Session,
+    pr: PrRef,
+    write: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
+) {
+    let sender = session.sender.clone();
+    thread::spawn(move || {
+        let result = write().map_err(|error| format!("{error:#}"));
+        let _ = sender.send(Message::Written { pr, result });
+    });
+}
+
+/// OSC 52 asks the terminal to set the clipboard, which also works over ssh; pbcopy
+/// covers a terminal or tmux that ignores it. Neither reports a failure, so both run.
+fn copy_to_clipboard(app: &mut App, text: &str) {
+    let mut stdout = std::io::stdout();
+    let osc = execute!(
+        stdout,
+        crossterm::clipboard::CopyToClipboard::to_clipboard_from(text)
+    );
+    let pbcopy = Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            if let Some(mut input) = child.stdin.take() {
+                input.write_all(text.as_bytes())?;
+            }
+            child.wait()
+        });
+    if osc.is_err() && pbcopy.is_err() {
+        app.error = Some("could not reach the clipboard".to_string());
+    }
 }
 
 fn start_viewed_sync(

@@ -7,7 +7,9 @@ use std::process::Command;
 use std::sync::Mutex;
 
 use crate::config::GroupConfig;
-use crate::model::{self, ChangedFile, Group, PrActivity, PrDetail, RateLimit, TIMELINE_LIMIT};
+use crate::model::{
+    self, ChangedFile, Group, PrActivity, PrDetail, RateLimit, Side, TIMELINE_LIMIT, Verdict,
+};
 
 /// The budget from the latest GraphQL response. Calls run on worker threads; the UI reads
 /// this before each draw.
@@ -57,7 +59,7 @@ pub fn detail_document() -> String {
     format!(
         "query({PR_VARIABLES}) {{ \
          repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ \
-         {ROW_FIELDS} id baseRefOid headRefOid body createdAt additions deletions changedFiles baseRefName headRefName \
+         {ROW_FIELDS} id viewerDidAuthor baseRefOid headRefOid body createdAt additions deletions changedFiles baseRefName headRefName \
          commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 0) {{ {ROLLUP_COUNTS} }} }} }} }} }} \
          commitCount: commits {{ totalCount }} \
          labels(first: 20) {{ nodes {{ name color }} }} \
@@ -92,7 +94,8 @@ pub fn activity_document() -> String {
            ... on HeadRefForcePushedEvent {{ createdAt }} ... on BaseRefChangedEvent {{ createdAt }} \
            ... on BaseRefForcePushedEvent {{ createdAt }} ... on ReviewRequestedEvent {{ createdAt }} }} }} \
          reviewThreads(first: 100) {{ nodes {{ isResolved path line originalLine startLine originalStartLine \
-           comments(first: 50) {{ nodes {{ pullRequestReview {{ id }} viewerDidAuthor author {{ __typename login }} createdAt body }} }} }} }} \
+           diffSide comments(first: 50) {{ nodes {{ pullRequestReview {{ id state }} viewerDidAuthor author {{ __typename login }} createdAt body }} }} }} }} \
+         pendingReviews: reviews(first: 1, states: PENDING) {{ nodes {{ id }} }} \
          }} }} }}"
     )
 }
@@ -198,6 +201,194 @@ pub fn set_viewed(pull_request_id: &str, path: &str, viewed: bool) -> Result<()>
         format!("path={path}"),
     ];
     run_graphql(&args)?;
+    Ok(())
+}
+
+/// A line comment to add to your pending review.
+pub struct NewComment<'a> {
+    pub path: &'a str,
+    pub side: Side,
+    pub line: u64,
+    pub start_line: Option<u64>,
+    pub body: &'a str,
+}
+
+/// A label of the repo, with the node id the label mutations take.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoLabel {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+}
+
+/// `-f` sends a string variable and `-F` a typed one, such as a number.
+fn graphql_args(document: &str, strings: &[(&str, &str)], numbers: &[(&str, u64)]) -> Vec<String> {
+    let mut args = vec!["-f".to_string(), format!("query={document}")];
+    for (name, value) in strings {
+        args.extend(["-f".to_string(), format!("{name}={value}")]);
+    }
+    for (name, value) in numbers {
+        args.extend(["-F".to_string(), format!("{name}={value}")]);
+    }
+    args
+}
+
+/// Creates your pending review: a review with no verdict, which GitHub keeps hidden
+/// from others until you submit it. GitHub allows one per person per PR.
+fn start_pending_review(pull_request_id: &str) -> Result<String> {
+    let document = "mutation($pr: ID!) { addPullRequestReview(input: { pullRequestId: $pr }) \
+                    { pullRequestReview { id } } }";
+    let response = run_graphql(&graphql_args(document, &[("pr", pull_request_id)], &[]))?;
+    let id = response.pointer("/addPullRequestReview/pullRequestReview/id");
+    id.and_then(Value::as_str)
+        .map(str::to_string)
+        .context("GitHub did not create the pending review")
+}
+
+/// Your pending review on the PR, asked fresh: the app's copy may predate a comment you
+/// just added, or a review you started on the web.
+fn find_pending_review(pull_request_id: &str) -> Result<Option<String>> {
+    let document = "query($pr: ID!) { node(id: $pr) { ... on PullRequest { \
+                    reviews(first: 1, states: PENDING) { nodes { id } } } } }";
+    let response = run_graphql(&graphql_args(document, &[("pr", pull_request_id)], &[]))?;
+    let id = response.pointer("/node/reviews/nodes/0/id");
+    Ok(id.and_then(Value::as_str).map(str::to_string))
+}
+
+/// Adds a line comment to your pending review, creating the review first when there is
+/// none. Returns the pending review's id.
+pub fn add_line_comment(
+    pull_request_id: &str,
+    pending_review: Option<&str>,
+    comment: &NewComment,
+) -> Result<String> {
+    let review = match pending_review {
+        Some(review) => review.to_string(),
+        None => match find_pending_review(pull_request_id)? {
+            Some(review) => review,
+            None => start_pending_review(pull_request_id)?,
+        },
+    };
+    let document = "mutation($review: ID!, $path: String!, $body: String!, $side: DiffSide!, \
+                    $line: Int!, $startLine: Int) { addPullRequestReviewThread(input: { \
+                    pullRequestReviewId: $review, path: $path, body: $body, side: $side, \
+                    line: $line, startLine: $startLine, startSide: $side }) { thread { id } } }";
+    let strings = [
+        ("review", review.as_str()),
+        ("path", comment.path),
+        ("body", comment.body),
+        ("side", comment.side.graphql()),
+    ];
+    let mut numbers = vec![("line", comment.line)];
+    numbers.extend(comment.start_line.map(|start| ("startLine", start)));
+    let response = run_graphql(&graphql_args(document, &strings, &numbers))?;
+    // A line outside the diff gets a null thread and no error at all.
+    if response
+        .pointer("/addPullRequestReviewThread/thread")
+        .is_none_or(Value::is_null)
+    {
+        bail!(
+            "GitHub did not take the comment on {} line {}: only lines in the diff take comments",
+            comment.path,
+            comment.line
+        );
+    }
+    Ok(review)
+}
+
+/// Submits your pending review with a verdict, or sends a new review in one step when
+/// there is no pending one.
+pub fn submit_review(
+    pull_request_id: &str,
+    pending_review: Option<&str>,
+    verdict: Verdict,
+    body: &str,
+) -> Result<()> {
+    let found = match pending_review {
+        Some(review) => Some(review.to_string()),
+        None => find_pending_review(pull_request_id)?,
+    };
+    let args = match found.as_deref() {
+        Some(review) => graphql_args(
+            "mutation($review: ID!, $event: PullRequestReviewEvent!, $body: String) { \
+             submitPullRequestReview(input: { pullRequestReviewId: $review, event: $event, \
+             body: $body }) { pullRequestReview { id } } }",
+            &[
+                ("review", review),
+                ("event", verdict.graphql()),
+                ("body", body),
+            ],
+            &[],
+        ),
+        None => graphql_args(
+            "mutation($pr: ID!, $event: PullRequestReviewEvent!, $body: String) { \
+             addPullRequestReview(input: { pullRequestId: $pr, event: $event, body: $body }) \
+             { pullRequestReview { id } } }",
+            &[
+                ("pr", pull_request_id),
+                ("event", verdict.graphql()),
+                ("body", body),
+            ],
+            &[],
+        ),
+    };
+    run_graphql(&args)?;
+    Ok(())
+}
+
+/// Deletes your pending review and every line comment in it.
+pub fn discard_review(pending_review: &str) -> Result<()> {
+    let document = "mutation($review: ID!) { deletePullRequestReview(input: { \
+                    pullRequestReviewId: $review }) { pullRequestReview { id } } }";
+    run_graphql(&graphql_args(document, &[("review", pending_review)], &[]))?;
+    Ok(())
+}
+
+/// Every label of the repo, by name. One page holds 100; more are rare.
+pub fn repo_labels(repo: &str) -> Result<Vec<RepoLabel>> {
+    let (owner, name) = repo.split_once('/').context("repo is not owner/name")?;
+    let document = "query($owner: String!, $name: String!) { repository(owner: $owner, \
+                    name: $name) { labels(first: 100, orderBy: { field: NAME, direction: ASC }) \
+                    { nodes { id name color } } } }";
+    let response = run_graphql(&graphql_args(
+        document,
+        &[("owner", owner), ("name", name)],
+        &[],
+    ))?;
+    let nodes = response
+        .pointer("/repository/labels/nodes")
+        .and_then(Value::as_array)
+        .context("GitHub returned no labels")?;
+    let label = |node: &Value| {
+        let field = |key: &str| node.get(key).and_then(Value::as_str).map(str::to_string);
+        Some(RepoLabel {
+            id: field("id")?,
+            name: field("name")?,
+            color: field("color").unwrap_or_default(),
+        })
+    };
+    Ok(nodes.iter().filter_map(label).collect())
+}
+
+/// Adds and removes labels on a PR, one call each.
+pub fn set_labels(pull_request_id: &str, add: &[String], remove: &[String]) -> Result<()> {
+    for (mutation, ids) in [
+        ("addLabelsToLabelable", add),
+        ("removeLabelsFromLabelable", remove),
+    ] {
+        if ids.is_empty() {
+            continue;
+        }
+        let document = format!(
+            "mutation($id: ID!, $labels: [ID!]!) {{ {mutation}(input: {{ labelableId: $id, \
+             labelIds: $labels }}) {{ clientMutationId }} }}"
+        );
+        let mut args = graphql_args(&document, &[("id", pull_request_id)], &[]);
+        for label in ids {
+            args.extend(["-f".to_string(), format!("labels[]={label}")]);
+        }
+        run_graphql(&args)?;
+    }
     Ok(())
 }
 

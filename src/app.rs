@@ -7,13 +7,15 @@ use ratatui::widgets::ListState;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use crate::editor::{Editor, Outcome};
 use crate::file_tree::{self, FileRow};
 use crate::markdown::TextRow;
 use crate::repo::{GrepHit, LocalRepo};
 
 use crate::config::{GroupConfig, ViewPrefs};
 use crate::model::{
-    ChangedFile, Group, PrActivity, PrDetail, PrRef, PrSummary, ViewedState, parse_pr_ref,
+    ChangedFile, Group, PrActivity, PrDetail, PrRef, PrSummary, Side, Verdict, ViewedState,
+    parse_pr_ref,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +68,29 @@ pub enum Action {
     SetTheme(&'static str),
     /// Save how many days back the inbox looks, and reload it.
     SetUpdatedWithin(u32),
+    /// Put text on the system clipboard.
+    Copy(String),
+    /// Send a review, or submit the pending one, with a verdict.
+    SubmitReview {
+        pr: PrRef,
+        pull_request_id: String,
+        pending_review: Option<String>,
+        verdict: Verdict,
+        body: String,
+    },
+    /// Add a line comment to the pending review, starting one when there is none.
+    AddComment {
+        pr: PrRef,
+        pull_request_id: String,
+        pending_review: Option<String>,
+        target: LineTarget,
+        body: String,
+    },
+    /// Delete the pending review and its line comments.
+    DiscardReview {
+        pr: PrRef,
+        pending_review: String,
+    },
     CloneRepo {
         pr: PrRef,
         dir: PathBuf,
@@ -1169,11 +1194,152 @@ pub enum PromptKind {
     SearchRepo,
     FindInDiff,
     UpdatedWithin,
+    /// Asks before deleting your pending review and its line comments.
+    ConfirmDiscard {
+        pr: PrRef,
+        pending_review: String,
+    },
     /// Asks before cloning the PR's repo into this folder.
     ConfirmClone {
         pr: PrRef,
         dir: PathBuf,
     },
+}
+
+/// Where a line comment goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineTarget {
+    pub path: String,
+    pub side: Side,
+    pub line: u64,
+    /// The first line of a range; None for one line.
+    pub start_line: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ComposeKind {
+    /// `own`: your own PR, where GitHub takes only Comment.
+    Review {
+        verdict: Verdict,
+        own: bool,
+        drafts: usize,
+    },
+    LineComment(LineTarget),
+}
+
+/// The text box for a review or a line comment, and what it sends.
+#[derive(Debug)]
+pub struct Composer {
+    pub pr: PrRef,
+    pub pull_request_id: String,
+    pub pending_review: Option<String>,
+    pub kind: ComposeKind,
+    pub editor: Editor,
+    pub error: Option<String>,
+    /// ctrl+s was pressed; y sends.
+    pub confirming: bool,
+    /// The request is on its way; keys wait for it.
+    pub sending: bool,
+    /// esc was pressed on text; a second esc throws it away.
+    pub cancel_asked: bool,
+}
+
+impl Composer {
+    pub fn new(pr: PrRef, detail: &PrDetail, activity: &PrActivity, kind: ComposeKind) -> Self {
+        Composer {
+            pr,
+            pull_request_id: detail.id.clone(),
+            pending_review: activity.pending_review.clone(),
+            kind,
+            editor: Editor::default(),
+            error: None,
+            confirming: false,
+            sending: false,
+            cancel_asked: false,
+        }
+    }
+
+    /// Tab: Comment, Approve, Request changes, in turn. Your own PR takes only Comment.
+    fn next_verdict(&mut self) {
+        if let ComposeKind::Review {
+            verdict,
+            own: false,
+            ..
+        } = &mut self.kind
+        {
+            *verdict = match verdict {
+                Verdict::Comment => Verdict::Approve,
+                Verdict::Approve => Verdict::RequestChanges,
+                Verdict::RequestChanges => Verdict::Comment,
+            };
+        }
+    }
+
+    /// What GitHub would refuse, caught before sending.
+    fn check(&self) -> Result<(), String> {
+        let empty = self.editor.text.trim().is_empty();
+        match &self.kind {
+            ComposeKind::Review {
+                verdict: Verdict::RequestChanges,
+                ..
+            } if empty => Err("Request changes needs a comment saying what to change".to_string()),
+            ComposeKind::Review {
+                verdict: Verdict::Comment,
+                drafts: 0,
+                ..
+            } if empty => Err("write a comment, or add line comments first".to_string()),
+            ComposeKind::LineComment(_) if empty => Err("write the comment first".to_string()),
+            _ => Ok(()),
+        }
+    }
+
+    /// The question ctrl+s asks before sending.
+    pub fn confirm_text(&self) -> String {
+        match &self.kind {
+            ComposeKind::Review {
+                verdict, drafts, ..
+            } => {
+                let drafts = match drafts {
+                    0 => String::new(),
+                    1 => " with 1 line comment".to_string(),
+                    count => format!(" with {count} line comments"),
+                };
+                format!(
+                    "send {}{drafts} to GitHub? y sends, any other key goes back",
+                    verdict.label()
+                )
+            }
+            ComposeKind::LineComment(_) => {
+                "add this to your pending review on GitHub? y adds it, any other key goes back"
+                    .to_string()
+            }
+        }
+    }
+
+    fn action(&self) -> Action {
+        let body = self.editor.text.trim_end().to_string();
+        let (pr, pull_request_id, pending_review) = (
+            self.pr.clone(),
+            self.pull_request_id.clone(),
+            self.pending_review.clone(),
+        );
+        match &self.kind {
+            ComposeKind::Review { verdict, .. } => Action::SubmitReview {
+                pr,
+                pull_request_id,
+                pending_review,
+                verdict: *verdict,
+                body,
+            },
+            ComposeKind::LineComment(target) => Action::AddComment {
+                pr,
+                pull_request_id,
+                pending_review,
+                target: target.clone(),
+                body,
+            },
+        }
+    }
 }
 
 /// A row of the settings panel.
@@ -1239,6 +1405,10 @@ pub struct App {
     pub rate_limit: Option<crate::model::RateLimit>,
     /// The theme menu is open, with this entry of `THEME_NAMES` selected.
     pub theme_menu: Option<usize>,
+    /// The text box for a review or a line comment, while it is open.
+    pub composer: Option<Composer>,
+    /// A write succeeded, so this PR loads again to show it.
+    pub reload_after_write: Option<PrRef>,
     /// The settings panel's selected row, while it is open.
     pub settings_menu: Option<usize>,
     /// The config values the settings panel shows.
@@ -1277,6 +1447,8 @@ impl App {
             inbox_clicks: Vec::new(),
             rate_limit: None,
             theme_menu: None,
+            composer: None,
+            reload_after_write: None,
             settings_menu: None,
             workspace_dir: None,
             updated_within_days: None,
@@ -1707,6 +1879,9 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+        if self.composer.is_some() {
+            return self.composer_key(key);
+        }
         if self.prompt.is_some() {
             return self.prompt_key(key.code);
         }
@@ -1826,6 +2001,10 @@ impl App {
 
     /// A paste goes into the open box, or opens the link box when none is open.
     pub fn handle_paste(&mut self, text: &str) {
+        if let Some(composer) = self.composer.as_mut() {
+            composer.editor.insert(text);
+            return;
+        }
         let prompt = self.prompt.get_or_insert_with(Prompt::default);
         prompt.text.push_str(text.trim());
         prompt.error = None;
@@ -1872,6 +2051,11 @@ impl App {
             PromptKind::SearchRepo => self.in_view(|view| view.search(prompt.text).map(Some)),
             PromptKind::FindInDiff => self.in_view(|view| view.start_find(&prompt.text)),
             PromptKind::UpdatedWithin => self.submit_updated_within(&prompt.text),
+            PromptKind::ConfirmDiscard { pr, pending_review } => prompt
+                .text
+                .trim()
+                .eq_ignore_ascii_case("y")
+                .then_some(Action::DiscardReview { pr, pending_review }),
         }
     }
 
@@ -1891,6 +2075,102 @@ impl App {
         let view = self.open_view()?;
         let result = step(view);
         self.report(result)
+    }
+
+    /// The review and comment box: text keys go to the editor, Tab picks the verdict,
+    /// ctrl+s asks to confirm, and y sends.
+    fn composer_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let composer = self.composer.as_mut()?;
+        if composer.sending {
+            return None;
+        }
+        if composer.confirming {
+            composer.confirming = false;
+            if matches!(key.code, KeyCode::Char('y') | KeyCode::Enter) {
+                composer.sending = true;
+                return Some(composer.action());
+            }
+            return None;
+        }
+        if key.code == KeyCode::Tab {
+            composer.next_verdict();
+            return None;
+        }
+        let outcome = composer.editor.key(key);
+        let cancel_asked = std::mem::take(&mut composer.cancel_asked);
+        composer.error = None;
+        match outcome {
+            Outcome::Handled => None,
+            Outcome::Copy(text) => Some(Action::Copy(text)),
+            Outcome::Submit => {
+                match composer.check() {
+                    Ok(()) => composer.confirming = true,
+                    Err(error) => composer.error = Some(error),
+                }
+                None
+            }
+            Outcome::Cancel if cancel_asked || composer.editor.text.trim().is_empty() => {
+                self.composer = None;
+                None
+            }
+            Outcome::Cancel => {
+                composer.cancel_asked = true;
+                None
+            }
+        }
+    }
+
+    /// R: a review of the open PR, carrying the pending line comments.
+    fn open_review(&mut self) -> Result<(), String> {
+        let Screen::Detail(view) = &self.screen else {
+            return Ok(());
+        };
+        let (Some(Ok(detail)), Some(Ok(activity))) = (&view.detail, &view.activity) else {
+            return Err("wait for the PR to load before reviewing it".to_string());
+        };
+        let kind = ComposeKind::Review {
+            verdict: Verdict::Comment,
+            own: detail.viewer_is_author,
+            drafts: activity.drafts.len(),
+        };
+        self.composer = Some(Composer::new(view.pr.clone(), detail, activity, kind));
+        Ok(())
+    }
+
+    /// X: asks before deleting the pending review.
+    fn ask_discard(&mut self) -> Result<(), String> {
+        let Screen::Detail(view) = &self.screen else {
+            return Ok(());
+        };
+        let pending = match &view.activity {
+            Some(Ok(activity)) => activity.pending_review.clone(),
+            _ => None,
+        };
+        let Some(pending_review) = pending else {
+            return Err("you have no pending review on this PR".to_string());
+        };
+        let kind = PromptKind::ConfirmDiscard {
+            pr: view.pr.clone(),
+            pending_review,
+        };
+        self.ask(kind, "");
+        Ok(())
+    }
+
+    /// A write finished: a sent box closes, a failed one shows why and keeps the text.
+    pub fn set_written(&mut self, pr: &PrRef, result: Result<(), String>) {
+        if result.is_ok() {
+            self.reload_after_write = Some(pr.clone());
+        }
+        let Some(composer) = self.composer.as_mut().filter(|composer| &composer.pr == pr) else {
+            self.error = result.err();
+            return;
+        };
+        composer.sending = false;
+        match result {
+            Ok(()) => self.composer = None,
+            Err(error) => composer.error = Some(error),
+        }
     }
 
     fn submit_clone(&mut self, pr: PrRef, dir: PathBuf, answer: &str) -> Option<Action> {
@@ -1966,6 +2246,14 @@ impl App {
             return None;
         }
         match key {
+            KeyCode::Char('R') => {
+                let result = self.open_review();
+                self.error = result.err();
+            }
+            KeyCode::Char('X') => {
+                let result = self.ask_discard();
+                self.error = result.err();
+            }
             KeyCode::Char('s') => {
                 self.prompt = Some(Prompt {
                     kind: PromptKind::SearchRepo,
@@ -2774,6 +3062,81 @@ mod tests {
             change: "modified".to_string(),
             viewed,
         }
+    }
+
+    fn ctrl(character: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn a_review_picks_its_verdict_confirms_and_sends() {
+        let (mut app, pr) = files_tab(vec![file("a.rs", ViewedState::Unviewed)]);
+        app.handle_key(key(KeyCode::Char('R')));
+        app.handle_key(ctrl('s'));
+        let error = app.composer.as_ref().unwrap().error.clone();
+        assert!(
+            error.unwrap().contains("write a comment"),
+            "an empty Comment is refused"
+        );
+        app.handle_key(key(KeyCode::Tab));
+        type_text(&mut app, "ship it");
+        app.handle_key(ctrl('s'));
+        assert!(app.composer.as_ref().unwrap().confirming);
+        let action = app.handle_key(key(KeyCode::Char('y')));
+        let Some(Action::SubmitReview { verdict, body, .. }) = action else {
+            panic!("y sends the review");
+        };
+        assert_eq!((verdict, body.as_str()), (Verdict::Approve, "ship it"));
+        app.set_written(&pr, Err("GitHub said no".to_string()));
+        let composer = app.composer.as_ref().expect("a failed send keeps the text");
+        assert_eq!(composer.editor.text, "ship it");
+        app.set_written(&pr, Ok(()));
+        assert!(app.composer.is_none());
+        assert_eq!(
+            app.reload_after_write,
+            Some(pr),
+            "the PR loads again to show the review"
+        );
+    }
+
+    #[test]
+    fn your_own_pr_takes_only_comment_and_esc_asks_before_dropping_text() {
+        let (mut app, _) = files_tab(vec![file("a.rs", ViewedState::Unviewed)]);
+        if let Screen::Detail(view) = &mut app.screen
+            && let Some(Ok(detail)) = &mut view.detail
+        {
+            detail.viewer_is_author = true;
+        }
+        app.handle_key(key(KeyCode::Char('R')));
+        app.handle_key(key(KeyCode::Tab));
+        let kind = &app.composer.as_ref().unwrap().kind;
+        assert!(matches!(
+            kind,
+            ComposeKind::Review {
+                verdict: Verdict::Comment,
+                ..
+            }
+        ));
+        type_text(&mut app, "draft");
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.composer.is_some(), "the first esc asks");
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.composer.is_none());
+    }
+
+    #[test]
+    fn ctrl_c_in_the_box_copies_the_selection() {
+        let (mut app, _) = files_tab(vec![file("a.rs", ViewedState::Unviewed)]);
+        app.handle_key(key(KeyCode::Char('R')));
+        type_text(&mut app, "one two");
+        app.handle_key(KeyEvent::new(
+            KeyCode::Left,
+            KeyModifiers::SHIFT | KeyModifiers::ALT,
+        ));
+        let action = app.handle_key(ctrl('c'));
+        assert!(matches!(action, Some(Action::Copy(text)) if text == "two"));
+        app.handle_paste("2");
+        assert_eq!(app.composer.as_ref().unwrap().editor.text, "one 2");
     }
 
     /// An open PR with its detail loaded and the Files tab showing.

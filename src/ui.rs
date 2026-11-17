@@ -9,14 +9,15 @@ use ratatui::widgets::{
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::{
-    App, Click, ClickTarget, DetailView, DiffOutput, Overlay, OverviewLayout, Prompt, PromptKind,
-    RepoState, Row, SETTINGS, Screen, Tab,
+    App, Click, ClickTarget, ComposeKind, Composer, DetailView, DiffOutput, Overlay,
+    OverviewLayout, Prompt, PromptKind, RepoState, Row, SETTINGS, Screen, Tab,
 };
+use crate::editor::Editor;
 use crate::file_tree::FileRow;
 use crate::model::{
     ChangedFile, CheckLine, CheckState, CheckSummary, CommitLine, Group, Label, Lifecycle,
-    PrActivity, PrDetail, PrRef, PrSummary, RateLimit, ReviewState, Reviewer, SinceCounts,
-    ViewedState,
+    PrActivity, PrDetail, PrRef, PrSummary, RateLimit, ReviewState, Reviewer, Side, SinceCounts,
+    Verdict, ViewedState,
 };
 use crate::repo::{GrepHit, MAX_GREP_HITS};
 use crate::theme::{ON_STATE, PrState, Theme};
@@ -78,6 +79,171 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: &Theme, now: DateTime<Utc
     if let Some(prompt) = &app.prompt {
         render_prompt(frame, prompt, paint);
     }
+    if let Some(composer) = &app.composer {
+        render_composer(frame, composer, paint);
+    }
+}
+
+/// The review or line-comment box: what it sends, the text, and the keys.
+fn render_composer(frame: &mut Frame, composer: &Composer, paint: Paint) {
+    let theme = paint.theme;
+    let area = frame.area();
+    let width = area.width.saturating_sub(4).min(100);
+    let height = (area.height * 3 / 5).max(10).min(area.height);
+    let box_area = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    };
+    let (title, header) = composer_header(composer, paint);
+    let footer = match (&composer.error, composer.sending, composer.confirming) {
+        (Some(error), ..) => paint.span(format!(" {error}"), theme.danger),
+        (None, true, _) => paint.span(" sending to GitHub...", theme.warning),
+        (None, false, true) => paint.bold(format!(" {}", composer.confirm_text()), theme.warning),
+        _ if composer.cancel_asked => paint.span(
+            " esc again throws the text away; any other key keeps it",
+            theme.warning,
+        ),
+        _ => paint.span(
+            " ctrl+s send, esc cancel, shift+arrows select, ctrl+a all, ctrl+c copy, ctrl+x cut",
+            theme.muted,
+        ),
+    };
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(theme.heading))
+        .title(paint.bold(title, theme.heading))
+        .style(Style::new().bg(theme.background).fg(theme.foreground));
+    let inner = block.inner(box_area);
+    frame.render_widget(Clear, box_area);
+    frame.render_widget(block, box_area);
+    let [header_area, text_area, footer_area] = Layout::vertical([
+        Constraint::Length(header.len() as u16 + 1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    frame.render_widget(Paragraph::new(header), header_area);
+    let (lines, cursor_row) = editor_lines(&composer.editor, text_area.width, paint);
+    let scroll = cursor_row.saturating_sub(text_area.height.saturating_sub(1));
+    let text = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
+    frame.render_widget(text, text_area);
+    frame.render_widget(Paragraph::new(Line::from(footer)), footer_area);
+}
+
+/// The box's title and the lines above the text: the verdict choice for a review.
+fn composer_header(composer: &Composer, paint: Paint) -> (String, Vec<Line<'static>>) {
+    let theme = paint.theme;
+    match &composer.kind {
+        ComposeKind::Review {
+            verdict,
+            own,
+            drafts,
+        } => {
+            let mut choice = vec![paint.span(" ", theme.muted)];
+            let verdicts = match own {
+                true => &[Verdict::Comment][..],
+                false => &[Verdict::Comment, Verdict::Approve, Verdict::RequestChanges][..],
+            };
+            for option in verdicts {
+                let label = format!(" {} ", option.label());
+                choice.push(match option == verdict {
+                    true => Span::styled(
+                        label,
+                        Style::new()
+                            .fg(theme.background)
+                            .bg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    false => paint.span(label, theme.muted),
+                });
+                choice.push(Span::raw(" "));
+            }
+            let note = match own {
+                true => "  GitHub takes only Comment on your own PR",
+                false => "  tab switches",
+            };
+            choice.push(paint.span(note, theme.muted));
+            let drafts = match drafts {
+                0 => " no line comments; c in Files changed adds them".to_string(),
+                1 => " 1 line comment from your pending review goes with it".to_string(),
+                count => format!(" {count} line comments from your pending review go with it"),
+            };
+            let header = vec![
+                Line::from(choice),
+                Line::from(paint.span(drafts, theme.muted)),
+            ];
+            (" Review ".to_string(), header)
+        }
+        ComposeKind::LineComment(target) => {
+            let lines = match target.start_line {
+                Some(start) => format!("lines {start}-{}", target.line),
+                None => format!("line {}", target.line),
+            };
+            let side = match target.side {
+                Side::Left => ", the old side",
+                Side::Right => "",
+            };
+            let title = format!(" Comment on {} {lines}{side} ", target.path);
+            let note = " it joins your pending review; R submits the review";
+            (title, vec![Line::from(paint.span(note, theme.muted))])
+        }
+    }
+}
+
+/// The editor's text with the selection and the cursor marked, and the row the cursor
+/// is on once wrapped to `width`, so the box can scroll to it.
+fn editor_lines(editor: &Editor, width: u16, paint: Paint) -> (Vec<Line<'static>>, u16) {
+    let theme = paint.theme;
+    let selected = Style::new().bg(theme.selection).fg(theme.foreground);
+    let cursor = Style::new().fg(theme.background).bg(theme.accent);
+    let plain = Style::new().fg(theme.foreground);
+    let selection = editor.selection();
+    let width = usize::from(width.max(1));
+    let (mut lines, mut cursor_row, mut rows_before) = (Vec::new(), 0, 0);
+    let mut offset = 0;
+    for text in editor.text.split('\n') {
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut columns = 0;
+        for (index, character) in text.char_indices() {
+            let at = offset + index;
+            let style = match selection {
+                _ if at == editor.cursor => cursor,
+                Some((start, end)) if (start..end).contains(&at) => selected,
+                _ => plain,
+            };
+            if at == editor.cursor {
+                cursor_row = rows_before + columns / width;
+            }
+            columns += character.width().unwrap_or(0);
+            push_char(&mut spans, character, style);
+        }
+        let end = offset + text.len();
+        if editor.cursor == end {
+            cursor_row = rows_before + columns / width;
+            spans.push(Span::styled(" ", cursor));
+            columns += 1;
+        }
+        rows_before += columns.div_ceil(width).max(1);
+        lines.push(Line::from(spans));
+        offset = end + 1;
+    }
+    (lines, cursor_row as u16)
+}
+
+/// Adds a character to the last span when it has the same style, so a line stays a
+/// few spans long.
+fn push_char(spans: &mut Vec<Span<'static>>, character: char, style: Style) {
+    if let Some(last) = spans.last_mut()
+        && last.style == style
+    {
+        last.content.to_mut().push(character);
+        return;
+    }
+    spans.push(Span::styled(character.to_string(), style));
 }
 
 // ---- Inbox ----
@@ -295,6 +461,11 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
             ("g/G, space/b", "top, bottom, page down, page up"),
             ("s", "search every file in the repo at the PR head"),
             ("o, d, r", "open in the browser, run open_diff, fetch again"),
+            (
+                "R",
+                "review: Comment, Approve or Request changes, with your line comments",
+            ),
+            ("X", "discard your pending review and its line comments"),
         ],
     ),
     (
@@ -1476,6 +1647,11 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
         PromptKind::FindInDiff => (
             " Find in the diff ".to_string(),
             "tab completes a word from the diff. enter finds it in every changed file; n next, N previous"
+                .to_string(),
+        ),
+        PromptKind::ConfirmDiscard { .. } => (
+            " Discard your pending review? ".to_string(),
+            "y and enter deletes it and every line comment in it on GitHub; esc keeps it"
                 .to_string(),
         ),
         PromptKind::ConfirmClone { pr, dir } => (

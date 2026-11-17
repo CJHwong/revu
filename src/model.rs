@@ -263,6 +263,63 @@ pub struct PrActivity {
     pub threads_total: u64,
     pub threads_unresolved: u64,
     pub since: SinceCounts,
+    /// Your pending review on GitHub, which line comments collect into until you submit.
+    pub pending_review: Option<String>,
+    /// The line comments in your pending review. Only you see them.
+    pub drafts: Vec<Draft>,
+}
+
+/// A line comment in your pending review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Draft {
+    pub path: String,
+    pub side: Side,
+    pub line: u64,
+    /// The first line of a range; None for one line.
+    pub start_line: Option<u64>,
+    pub body: String,
+}
+
+/// Which side of the diff a line comment is on: the base (LEFT) or the head (RIGHT).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Side {
+    Left,
+    Right,
+}
+
+impl Side {
+    pub fn graphql(self) -> &'static str {
+        match self {
+            Side::Left => "LEFT",
+            Side::Right => "RIGHT",
+        }
+    }
+}
+
+/// The verdict a submitted review carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Comment,
+    Approve,
+    RequestChanges,
+}
+
+impl Verdict {
+    pub fn graphql(self) -> &'static str {
+        match self {
+            Verdict::Comment => "COMMENT",
+            Verdict::Approve => "APPROVE",
+            Verdict::RequestChanges => "REQUEST_CHANGES",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Verdict::Comment => "Comment",
+            Verdict::Approve => "Approve",
+            Verdict::RequestChanges => "Request changes",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -289,6 +346,8 @@ pub struct PrDetail {
     pub milestone: Option<String>,
     pub linked_issues: Vec<LinkedIssue>,
     pub lifecycle: Lifecycle,
+    /// You opened this PR, so GitHub refuses your Approve and Request changes.
+    pub viewer_is_author: bool,
 }
 
 /// Where the PR is in its life, as GitHub's state pill shows it.
@@ -463,6 +522,8 @@ struct RawDetail {
     #[serde(flatten)]
     row: RawRow,
     id: String,
+    #[serde(default)]
+    viewer_did_author: bool,
     base_ref_oid: String,
     head_ref_oid: String,
     commit_count: RawCount,
@@ -534,6 +595,7 @@ struct RawActivity {
     timeline_items: Nodes<RawTimelineItem>,
     review_threads: Nodes<RawThread>,
     events: Option<Nodes<RawEvent>>,
+    pending_reviews: Option<Nodes<RawId>>,
 }
 
 #[derive(Deserialize)]
@@ -574,7 +636,18 @@ struct RawThread {
     original_line: Option<u64>,
     start_line: Option<u64>,
     original_start_line: Option<u64>,
+    #[serde(default)]
+    diff_side: Option<String>,
     comments: Nodes<RawThreadComment>,
+}
+
+impl RawThread {
+    /// GitHub lists your pending review's threads with the others, but only you see them.
+    fn is_pending(&self) -> bool {
+        let review = self.comments.nodes.first();
+        let state = review.and_then(|comment| comment.pull_request_review.as_ref());
+        state.and_then(|review| review.state.as_deref()) == Some("PENDING")
+    }
 }
 
 #[derive(Deserialize)]
@@ -591,6 +664,8 @@ struct RawThreadComment {
 #[derive(Deserialize)]
 struct RawId {
     id: String,
+    #[serde(default)]
+    state: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -716,6 +791,7 @@ pub fn parse_detail(pull_request: &Value) -> Result<PrDetail> {
         _ => Lifecycle::Open,
     };
     Ok(PrDetail {
+        viewer_is_author: raw.viewer_did_author,
         lifecycle,
         merge_state: raw.merge_state_status.unwrap_or_default(),
         check_counts,
@@ -757,9 +833,18 @@ pub fn parse_activity(pull_request: &Value) -> Result<PrActivity> {
     let raw: RawActivity =
         serde_json::from_value(pull_request.clone()).context("parse pull request activity")?;
     let since = since_counts(&raw);
-    let threads = &raw.review_threads.nodes;
+    let (pending, threads): (Vec<RawThread>, Vec<RawThread>) = raw
+        .review_threads
+        .nodes
+        .into_iter()
+        .partition(RawThread::is_pending);
     let threads_total = threads.len() as u64;
     let threads_unresolved = threads.iter().filter(|thread| !thread.is_resolved).count() as u64;
+    let pending_review = raw
+        .pending_reviews
+        .and_then(|reviews| reviews.nodes.into_iter().next())
+        .map(|review| review.id);
+    let drafts = pending.into_iter().filter_map(draft_from).collect();
     let commits = raw
         .commit_list
         .nodes
@@ -767,13 +852,31 @@ pub fn parse_activity(pull_request: &Value) -> Result<PrActivity> {
         .map(|node| commit_line(node.commit))
         .collect();
     Ok(PrActivity {
+        pending_review,
+        drafts,
         threads_total,
         threads_unresolved,
         since,
         checks: check_lines(latest_rollup(&raw.commits)),
         commits,
         timeline_cut: raw.timeline_items.nodes.len() >= TIMELINE_LIMIT,
-        timeline: timeline_from(raw.timeline_items.nodes, raw.review_threads.nodes),
+        timeline: timeline_from(raw.timeline_items.nodes, threads),
+    })
+}
+
+fn draft_from(thread: RawThread) -> Option<Draft> {
+    let line = thread.line?;
+    let side = match thread.diff_side.as_deref() {
+        Some("LEFT") => Side::Left,
+        _ => Side::Right,
+    };
+    let body = thread.comments.nodes.into_iter().next()?.body;
+    Some(Draft {
+        path: thread.path,
+        side,
+        line,
+        start_line: thread.start_line.filter(|start| *start != line),
+        body,
     })
 }
 
@@ -1160,6 +1263,10 @@ fn timeline_item(
             body,
         } => {
             let threads = threads_by_review.remove(&id).unwrap_or_default();
+            // A pending review is a draft, not part of the conversation yet.
+            if state == "PENDING" {
+                return None;
+            }
             if state == "COMMENTED" && body.trim().is_empty() && threads.is_empty() {
                 return None;
             }
