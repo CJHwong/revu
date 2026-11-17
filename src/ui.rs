@@ -12,6 +12,7 @@ use crate::app::{
     App, DetailView, DiffOutput, Overlay, OverviewLayout, Prompt, PromptKind, RepoState, Row,
     Screen, Tab,
 };
+use crate::file_tree::FileRow;
 use crate::model::{
     ChangedFile, CheckLine, CheckState, CheckSummary, CommitLine, Group, Label, PrActivity,
     PrDetail, PrRef, PrSummary, ReviewState, ViewedState,
@@ -400,7 +401,7 @@ fn render_detail(
     frame.render_widget(Paragraph::new(detail_header(detail, paint)), top);
     let tab_lines = vec![
         tab_bar(view.tab, detail, paint),
-        tab_rule(tabs.width, paint),
+        tab_rule(view.tab, detail, tabs.width, paint),
     ];
     frame.render_widget(Paragraph::new(tab_lines), tabs);
     if let Some(overlay) = view.overlays.last_mut() {
@@ -414,7 +415,11 @@ fn render_detail(
             other => render_activity_state(frame, other.as_ref(), body, paint),
         },
         Tab::Commits => {
-            let [list_area, diff_area] = split_for_diff(body);
+            // The full message shows above the diff, so the list needs only the subjects.
+            let list_width = (body.width / 4).max(30).min(body.width / 2);
+            let [list_area, diff_area] =
+                Layout::horizontal([Constraint::Length(list_width), Constraint::Fill(1)])
+                    .areas(body);
             let Some(Ok(activity)) = &view.activity else {
                 render_activity_state(frame, view.activity.as_ref(), list_area, paint);
                 return;
@@ -438,8 +443,16 @@ fn render_detail(
             render_diff_pane(frame, view, diff_area, renderer_names, paint);
         }
         Tab::Files => {
-            let [list_area, diff_area] = split_for_diff(body);
-            if render_file_list(frame, view, list_area, paint) {
+            let list_width = if view.file_list_hidden {
+                0
+            } else {
+                file_list_width(view, body.width)
+            };
+            let [list_area, diff_area] =
+                Layout::horizontal([Constraint::Length(list_width), Constraint::Fill(1)])
+                    .areas(body);
+            let listed = view.file_list_hidden || render_file_list(frame, view, list_area, paint);
+            if listed && view.loaded_files().is_some() {
                 render_diff_pane(frame, view, diff_area, renderer_names, paint);
             }
         }
@@ -566,14 +579,9 @@ fn render_activity_state(
     frame.render_widget(Paragraph::new(message).wrap(Wrap { trim: false }), area);
 }
 
-fn split_for_diff(area: Rect) -> [Rect; 2] {
-    Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)]).areas(area)
-}
-
 /// Draws the file list. Returns false when there is no list yet, so no diff pane either.
 fn render_file_list(frame: &mut Frame, view: &mut DetailView, area: Rect, paint: Paint) -> bool {
     let theme = paint.theme;
-    let visible = view.visible_files();
     let files = match &view.files {
         None => {
             frame.render_widget(
@@ -599,9 +607,11 @@ fn render_file_list(frame: &mut Frame, view: &mut DetailView, area: Rect, paint:
         ""
     };
     let title = format!(" {viewed}/{} viewed{hidden_note} ", files.len());
-    let items: Vec<ListItem> = visible
+    let width = area.width as usize;
+    let items: Vec<ListItem> = view
+        .file_rows()
         .iter()
-        .map(|index| ListItem::new(file_line(&files[*index], area.width as usize, paint)))
+        .map(|row| ListItem::new(file_row_line(row, files, view.tree_view, width, paint)))
         .collect();
     let list = List::new(items)
         .highlight_style(Style::new().bg(theme.selection))
@@ -627,7 +637,8 @@ fn render_diff_pane(
         .borders(Borders::LEFT)
         .border_style(Style::new().fg(theme.muted))
         .title(paint.bold(format!(" {renderer} "), theme.heading))
-        .title(paint.span("m switches ", theme.muted));
+        .title(paint.span("m switches ", theme.muted))
+        .title(paint.bold(diff_pane_path(view), theme.foreground));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     view.diff_width = inner.width;
@@ -637,6 +648,11 @@ fn render_diff_pane(
     let notice = |text: String, color: Color| {
         Paragraph::new(paint.span(text, color)).wrap(Wrap { trim: false })
     };
+    if view.tab == Tab::Files && view.selected_file().is_none() {
+        let text = " a folder: enter folds or opens it".to_string();
+        frame.render_widget(notice(text, theme.muted), inner);
+        return;
+    }
     let content = match &view.repo {
         RepoState::Unknown => notice(" looking for a local clone...".to_string(), theme.warning),
         RepoState::Busy(message) => notice(format!(" {message}..."), theme.warning),
@@ -663,14 +679,96 @@ fn render_diff_pane(
 }
 
 /// "✓ src/app/ main.rs  +3 -1", with the directory muted so the file name stands out.
-fn file_line(file: &ChangedFile, width: usize, paint: Paint) -> Line<'static> {
+/// With the file list hidden, the diff pane names the file it shows.
+fn diff_pane_path(view: &DetailView) -> String {
+    let path = view
+        .loaded_files()
+        .zip(view.selected_file())
+        .and_then(|(files, index)| files.get(index));
+    match path {
+        Some(file) if view.tab == Tab::Files && view.file_list_hidden => format!(" {} ", file.path),
+        _ => String::new(),
+    }
+}
+
+/// The list sizes itself to its longest row, up to 40% of the screen, so short paths leave
+/// the diff more room.
+fn file_list_width(view: &DetailView, total: u16) -> u16 {
+    let Some(files) = view.loaded_files() else {
+        return total / 3;
+    };
+    let longest = view
+        .file_rows()
+        .iter()
+        .map(|row| match row {
+            FileRow::Dir { label, depth, .. } => depth * 2 + display_width(label) + 4,
+            FileRow::File { index, depth } => {
+                let file = &files[*index];
+                let name = if view.tree_view {
+                    file_name(&file.path)
+                } else {
+                    &file.path
+                };
+                let counts = format!(" +{} -{}", file.additions, file.deletions);
+                depth * 2 + 3 + display_width(name) + display_width(&counts) + 2
+            }
+        })
+        .max()
+        .unwrap_or(0)
+        .max(24);
+    (longest as u16).min(total * 2 / 5)
+}
+
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+fn file_row_line(
+    row: &FileRow,
+    files: &[ChangedFile],
+    tree: bool,
+    width: usize,
+    paint: Paint,
+) -> Line<'static> {
+    let theme = paint.theme;
+    match row {
+        FileRow::Dir {
+            label,
+            depth,
+            folded,
+            ..
+        } => {
+            let chevron = if *folded { "▸" } else { "▾" };
+            Line::from(vec![
+                Span::raw(format!(" {}", "  ".repeat(*depth))),
+                paint.span(format!("{chevron} "), theme.fold),
+                paint.span(format!("{label}/"), theme.accent),
+            ])
+        }
+        FileRow::File { index, depth } => {
+            let indent = "  ".repeat(*depth);
+            let mut line = file_line(
+                &files[*index],
+                tree,
+                width.saturating_sub(indent.len()),
+                paint,
+            );
+            line.spans.insert(0, Span::raw(indent));
+            line
+        }
+    }
+}
+
+fn file_line(file: &ChangedFile, tree: bool, width: usize, paint: Paint) -> Line<'static> {
     let theme = paint.theme;
     let (marker, marker_color) = match file.viewed {
         ViewedState::Viewed => ("✓", theme.success),
         ViewedState::Dismissed => ("!", theme.warning),
         ViewedState::Unviewed => (" ", theme.muted),
     };
+    // In the tree the folder rows carry the directory.
     let (directory, name) = match file.path.rsplit_once('/') {
+        Some((_, name)) if tree => (String::new(), name.to_string()),
         Some((directory, name)) => (format!("{directory}/"), name.to_string()),
         None => (String::new(), file.path.clone()),
     };
@@ -731,37 +829,83 @@ fn detail_header(detail: &PrDetail, paint: Paint) -> Text<'static> {
     ])
 }
 
+/// GitHub's tab bar: the title, then a count badge, or the check state for Checks. The
+/// digit keys still switch tabs; `?` lists them.
 fn tab_bar(current: Tab, detail: &PrDetail, paint: Paint) -> Line<'static> {
     let theme = paint.theme;
-    let spans = Tab::ALL.iter().enumerate().map(|(index, tab)| {
-        let count = match tab {
-            Tab::Overview => String::new(),
-            Tab::Commits => format!(" {}", detail.commit_count),
-            Tab::Checks => detail
-                .summary
-                .checks
-                .as_ref()
-                .map_or(String::new(), |checks| format!(" {}", checks.total)),
-            Tab::Files => format!(" {}", detail.changed_files),
-        };
-        let label = format!(" {} {}{count} ", index + 1, tab.title());
-        if *tab == current {
-            let style = Style::new()
-                .fg(theme.heading)
-                .bg(theme.selection)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
-            Span::styled(label, style)
+    let mut spans = Vec::new();
+    for tab in Tab::ALL {
+        let selected = tab == current;
+        let title_style = if selected {
+            Style::new().fg(theme.heading).add_modifier(Modifier::BOLD)
         } else {
-            paint.span(label, theme.muted)
-        }
-    });
-    Line::from(spans.collect::<Vec<_>>())
+            Style::new().fg(theme.foreground)
+        };
+        spans.push(Span::styled(format!("  {}", tab.title()), title_style));
+        spans.extend(tab_badge(tab, detail, paint));
+        spans.push(Span::raw("  "));
+    }
+    Line::from(spans)
 }
 
-fn tab_rule(width: u16, paint: Paint) -> Line<'static> {
-    paint
-        .span("─".repeat(width as usize), paint.theme.selection)
-        .into()
+fn tab_badge(tab: Tab, detail: &PrDetail, paint: Paint) -> Vec<Span<'static>> {
+    let theme = paint.theme;
+    let badge = |count: u64| {
+        vec![
+            Span::raw(" "),
+            Span::styled(
+                format!(" {count} "),
+                Style::new().fg(theme.foreground).bg(theme.selection),
+            ),
+        ]
+    };
+    match tab {
+        Tab::Overview => Vec::new(),
+        Tab::Commits => badge(detail.commit_count),
+        Tab::Files => badge(detail.changed_files),
+        Tab::Checks => match &detail.summary.checks {
+            None => Vec::new(),
+            Some(checks) => {
+                let (symbol, color) = check_symbol(checks.state, theme);
+                vec![paint.span(
+                    format!(" {symbol} {}/{}", checks.passed, checks.total),
+                    color,
+                )]
+            }
+        },
+    }
+}
+
+/// A thin rule with a thick bar under the current tab, like GitHub's underline.
+fn tab_rule(current: Tab, detail: &PrDetail, width: u16, paint: Paint) -> Line<'static> {
+    let theme = paint.theme;
+    let mut start = 0;
+    let mut bar = 0;
+    for tab in Tab::ALL {
+        let label_width: usize = tab_bar_width(tab, detail, paint);
+        if tab == current {
+            // Under the title and badge, not the padding around them.
+            start += 2;
+            bar = label_width.saturating_sub(4);
+            break;
+        }
+        start += label_width;
+    }
+    let rest = (width as usize).saturating_sub(start + bar);
+    Line::from(vec![
+        paint.span("─".repeat(start), theme.selection),
+        paint.span("━".repeat(bar), theme.heading),
+        paint.span("─".repeat(rest), theme.selection),
+    ])
+}
+
+/// The width of one tab's label in the bar, so the underline sits under it.
+fn tab_bar_width(tab: Tab, detail: &PrDetail, paint: Paint) -> usize {
+    let badge: usize = tab_badge(tab, detail, paint)
+        .iter()
+        .map(|span| display_width(&span.content))
+        .sum();
+    2 + display_width(tab.title()) + badge + 2
 }
 
 /// The sidebar shows when the terminal is wide enough to keep the main column readable.

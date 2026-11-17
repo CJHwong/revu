@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod file_tree;
 mod github;
 mod markdown;
 mod model;

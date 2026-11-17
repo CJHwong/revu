@@ -8,6 +8,7 @@ use ratatui::widgets::ListState;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use crate::file_tree::{self, FileRow};
 use crate::markdown::TextRow;
 use crate::repo::{GrepHit, LocalRepo};
 
@@ -200,6 +201,12 @@ pub struct DetailView {
     /// Indexes into the visible files, not into `files`.
     pub file_state: ListState,
     pub hide_viewed: bool,
+    /// Files changed lists folders as a tree, like GitHub, or flat paths.
+    pub tree_view: bool,
+    /// Tree folders the user folded, by path.
+    pub folded_dirs: HashSet<String>,
+    /// Files changed hides its list so the diff gets the full width.
+    pub file_list_hidden: bool,
     pub repo: RepoState,
     pub renderer: usize,
     pub diff_scroll: u16,
@@ -234,6 +241,9 @@ impl DetailView {
             files: None,
             files_requested: false,
             file_state: ListState::default().with_selected(Some(0)),
+            tree_view: true,
+            folded_dirs: HashSet::new(),
+            file_list_hidden: false,
             hide_viewed: false,
             repo: RepoState::Unknown,
             renderer: 0,
@@ -487,10 +497,50 @@ impl DetailView {
         visible.map(|(index, _)| index).collect()
     }
 
+    /// The Files changed list as shown: folder and file rows in tree view, files in flat.
+    pub fn file_rows(&self) -> Vec<FileRow> {
+        let Some(files) = self.loaded_files() else {
+            return Vec::new();
+        };
+        file_tree::rows(
+            files,
+            &self.visible_files(),
+            self.tree_view,
+            &self.folded_dirs,
+        )
+    }
+
+    /// The file under the list cursor. None on a folder row.
     pub fn selected_file(&self) -> Option<usize> {
-        self.visible_files()
-            .get(self.file_state.selected()?)
-            .copied()
+        match self.file_rows().get(self.file_state.selected()?)? {
+            FileRow::File { index, .. } => Some(*index),
+            FileRow::Dir { .. } => None,
+        }
+    }
+
+    /// Puts the list cursor on the given file, or on the first file when it is not listed.
+    fn select_file_row(&mut self, file: Option<usize>) {
+        let rows = self.file_rows();
+        let is_file = |row: &FileRow| matches!(row, FileRow::File { .. });
+        let target = rows
+            .iter()
+            .position(|row| matches!(row, FileRow::File { index, .. } if Some(*index) == file))
+            .or_else(|| rows.iter().position(is_file));
+        self.file_state.select(Some(target.unwrap_or(0)));
+    }
+
+    /// Enter on a folder row folds or opens it. Returns false on a file row.
+    fn toggle_folder(&mut self) -> bool {
+        let rows = self.file_rows();
+        let Some(FileRow::Dir { path, .. }) =
+            self.file_state.selected().and_then(|row| rows.get(row))
+        else {
+            return false;
+        };
+        if !self.folded_dirs.remove(path) {
+            self.folded_dirs.insert(path.clone());
+        }
+        true
     }
 
     fn show_tab(&mut self, tab: Tab) {
@@ -524,7 +574,7 @@ impl DetailView {
     }
 
     fn clamp_file_selection(&mut self) {
-        let last = self.visible_files().len().saturating_sub(1);
+        let last = self.file_rows().len().saturating_sub(1);
         let current = self.file_state.selected().unwrap_or(0);
         self.file_state.select(Some(current.min(last)));
     }
@@ -553,7 +603,7 @@ impl DetailView {
             Tab::Overview => 0,
             Tab::Commits => activity.map_or(0, |activity| activity.commits.len()),
             Tab::Checks => activity.map_or(0, |activity| activity.checks.len()),
-            Tab::Files => self.visible_files().len(),
+            Tab::Files => self.file_rows().len(),
         }
     }
 
@@ -672,11 +722,11 @@ impl DetailView {
         let Some(files) = self.loaded_files() else {
             return;
         };
-        let visible = self.visible_files();
+        let rows = self.file_rows();
         let current = self.file_state.selected().unwrap_or(0);
-        let unviewed = |position: &usize| files[visible[*position]].viewed != ViewedState::Viewed;
+        let unviewed = |position: &usize| matches!(rows[*position], FileRow::File { index, .. } if files[index].viewed != ViewedState::Viewed);
         let target = if forward {
-            (current + 1..visible.len()).find(unviewed)
+            (current + 1..rows.len()).find(unviewed)
         } else {
             (0..current).rev().find(unviewed)
         };
@@ -1058,7 +1108,8 @@ impl App {
     pub fn set_files(&mut self, pr: &PrRef, result: Result<Vec<ChangedFile>, String>) {
         if let Some(view) = self.view_for(pr) {
             view.files = Some(result);
-            view.clamp_file_selection();
+            // The tree starts on a folder row; the cursor goes to the first file.
+            view.select_file_row(None);
         }
     }
 
@@ -1108,7 +1159,7 @@ impl App {
             for _ in 0..3 {
                 self.error = view.overlay_key(key).err();
             }
-        } else if diff_pane && view.diff_left > 0 && column >= view.diff_left {
+        } else if diff_pane && column >= view.diff_left {
             view.wheel_diff(delta > 0);
         } else if view.tab == Tab::Overview {
             view.wheel_overview(delta > 0);
@@ -1284,6 +1335,17 @@ impl App {
                     kind: PromptKind::FindInDiff,
                     ..Prompt::default()
                 });
+            }
+            KeyCode::Enter if view.tab == Tab::Files && view.toggle_folder() => {
+                view.clamp_file_selection()
+            }
+            KeyCode::Char('t') if view.tab == Tab::Files => {
+                let file = view.selected_file();
+                view.tree_view = !view.tree_view;
+                view.select_file_row(file);
+            }
+            KeyCode::Char('z') if view.tab == Tab::Files => {
+                view.file_list_hidden = !view.file_list_hidden
             }
             KeyCode::Enter if view.tab == Tab::Files => {
                 let path = view
@@ -1739,6 +1801,39 @@ mod tests {
         );
         assert!(!is_hunk_start("- a list item --- with dashes"));
         assert!(!is_hunk_start("   and read files via `gh api`."));
+    }
+
+    #[test]
+    fn the_file_tree_folds_switches_to_flat_and_hides() {
+        let files = vec![
+            file("src/a.rs", ViewedState::Unviewed),
+            file("src/b.rs", ViewedState::Unviewed),
+            file("README.md", ViewedState::Unviewed),
+        ];
+        let (mut app, _) = files_tab(files);
+        assert_eq!(
+            view(&app).selected_file(),
+            Some(0),
+            "the cursor starts on a file, not the folder"
+        );
+        app.handle_key(key(KeyCode::Char('j')));
+        app.handle_key(key(KeyCode::Char('t')));
+        assert!(!view(&app).tree_view);
+        assert_eq!(
+            view(&app).selected_file(),
+            Some(1),
+            "switching views keeps the file"
+        );
+        app.handle_key(key(KeyCode::Char('t')));
+        app.handle_key(key(KeyCode::Char('g')));
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            view(&app).file_rows().len(),
+            2,
+            "the folded src/ shows as one row"
+        );
+        app.handle_key(key(KeyCode::Char('z')));
+        assert!(view(&app).file_list_hidden);
     }
 
     #[test]
