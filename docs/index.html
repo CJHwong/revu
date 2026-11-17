@@ -150,10 +150,11 @@
       <em>revu</em> collects the GitHub pull requests that wait on you, opens each one the way GitHub's Overview does, and shows the diff the way you like to read it. Review, comment on lines and label without opening the browser.
     </p>
     <div class="install">
-      <div class="cmd"><code id="install-cmd">cargo install --git https://github.com/CJHwong/revu</code><button class="copy" data-copy="install-cmd">copy</button></div>
+      <div class="cmd"><code id="install-cmd">curl -fsSL https://cjhwong.github.io/revu/install.sh | sh</code><button class="copy" data-copy="install-cmd">copy</button></div>
       <a class="button" href="https://github.com/CJHwong/revu">View on GitHub &rarr;</a>
     </div>
-    <p class="needs">Needs the GitHub CLI (<code>gh</code>), logged in, and git. revu stores no token of its own.</p>
+    <p class="needs">or: <code>brew install CJHwong/tap/revu</code>, or <code>cargo install --git https://github.com/CJHwong/revu</code></p>
+    <p class="needs">macOS and Linux. Needs the GitHub CLI (<code>gh</code>), logged in, and git. revu stores no token of its own.</p>
 
     <div class="window">
       <div class="titlebar"><i class="dot"></i><i class="dot"></i><i class="dot"></i><span>revu</span></div>
@@ -241,13 +242,17 @@
 
   <section id="install">
     <h2>install</h2>
-    <p class="sub">built from source with cargo</p>
+    <p class="sub">a single binary for macOS and Linux</p>
     <ol class="steps">
       <li>Install and log in to the GitHub CLI.
         <div class="cmd"><code>gh auth login</code></div>
       </li>
-      <li>Install revu.
-        <div class="cmd"><code id="install-cmd-2">cargo install --git https://github.com/CJHwong/revu</code><button class="copy" data-copy="install-cmd-2">copy</button></div>
+      <li>Install revu. The script puts it in <code>~/.local/bin</code>; set <code>REVU_INSTALL_DIR</code> to pick another folder.
+        <div class="cmd"><code id="install-cmd-2">curl -fsSL https://cjhwong.github.io/revu/install.sh | sh</code><button class="copy" data-copy="install-cmd-2">copy</button></div>
+        <p class="needs">or with Homebrew:</p>
+        <div class="cmd"><code id="install-cmd-3">brew install CJHwong/tap/revu</code><button class="copy" data-copy="install-cmd-3">copy</button></div>
+        <p class="needs">or from source, with Rust:</p>
+        <div class="cmd"><code id="install-cmd-4">cargo install --git https://github.com/CJHwong/revu</code><button class="copy" data-copy="install-cmd-4">copy</button></div>
       </li>
       <li>Run it. The first run writes <code>~/.config/revu/config.yaml</code>. Set <code>workspace_dir</code> to the folder that holds your clones, so the diffs can load.
         <div class="cmd"><code>revu</code></div>

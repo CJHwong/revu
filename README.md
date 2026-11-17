@@ -6,11 +6,17 @@ Your GitHub pull requests, reviewed in the terminal. revu collects the pull requ
 
 ## Install
 
-You need the GitHub CLI (`gh`), logged in, git, and Rust to build revu.
+revu runs on macOS and Linux. It needs the GitHub CLI (`gh`), logged in, and git.
 
 ```bash
-cargo install --git https://github.com/CJHwong/revu
-revu
+curl -fsSL https://cjhwong.github.io/revu/install.sh | sh
+```
+
+The script installs the latest release to `~/.local/bin`, after checking its checksum. Set `REVU_INSTALL_DIR` to pick another folder. Or:
+
+```bash
+brew install CJHwong/tap/revu                        # Homebrew
+cargo install --git https://github.com/CJHwong/revu  # from source, with Rust
 ```
 
 The first run writes `~/.config/revu/config.yaml`. Set `workspace_dir` in it to the folder that holds your clones, so the diffs can load.

@@ -13,9 +13,11 @@ gh auth login
 ## 2. Install and start revu
 
 ```bash
-cargo install --git https://github.com/CJHwong/revu
+curl -fsSL https://cjhwong.github.io/revu/install.sh | sh
 revu
 ```
+
+If `revu` is not found, add `~/.local/bin` to your PATH, or install with `brew install CJHwong/tap/revu` instead.
 
 The inbox opens. It shows the pull requests that ask for your review or your team's, your drafts, your own that wait on others, and the ones you reviewed, in groups like GitHub's own inbox. Move with `j` and `k`, and fold a group with `Space`.
 
