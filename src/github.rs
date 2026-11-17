@@ -62,9 +62,12 @@ pub fn detail_document() -> String {
          commitCount: commits {{ totalCount }} \
          labels(first: 20) {{ nodes {{ name color }} }} \
          assignees(first: 10) {{ nodes {{ login }} }} \
-         reviewRequests(first: 20) {{ nodes {{ requestedReviewer {{ \
+         reviewRequests(first: 20) {{ nodes {{ asCodeOwner requestedReviewer {{ \
            ... on User {{ login }} ... on Bot {{ login }} ... on Mannequin {{ login }} ... on Team {{ name }} }} }} }} \
          latestOpinionatedReviews(first: 20) {{ nodes {{ author {{ login }} state }} }} \
+         latestReviews(first: 30) {{ nodes {{ author {{ login }} state onBehalfOf(first: 5) {{ nodes {{ name }} }} }} }} \
+         mergeStateStatus milestone {{ title }} \
+         closingIssuesReferences(first: 10) {{ nodes {{ number title url }} }} \
          }} }} }}"
     )
 }
@@ -80,12 +83,15 @@ pub fn activity_document() -> String {
                checkSuite {{ workflowRun {{ workflow {{ name }} }} }} }} \
              ... on StatusContext {{ context state targetUrl createdAt }} }} }} }} }} }} }} \
          commitList: commits(first: 100) {{ nodes {{ commit {{ \
-           oid message authoredDate url author {{ name user {{ login }} }} \
+           oid message authoredDate committedDate url author {{ name user {{ login }} }} \
            statusCheckRollup {{ state }} }} }} }} \
          timelineItems(last: {TIMELINE_LIMIT}, itemTypes: [ISSUE_COMMENT, PULL_REQUEST_REVIEW, PULL_REQUEST_COMMIT]) {{ nodes {{ __typename \
            ... on IssueComment {{ author {{ __typename login }} createdAt body viewerDidAuthor }} \
            ... on PullRequestReview {{ id viewerDidAuthor author {{ __typename login }} state submittedAt createdAt body }} \
            ... on PullRequestCommit {{ commit {{ oid messageHeadline authoredDate }} }} }} }} \
+         events: timelineItems(last: {TIMELINE_LIMIT}, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT, BASE_REF_CHANGED_EVENT, BASE_REF_FORCE_PUSHED_EVENT, REVIEW_REQUESTED_EVENT]) {{ nodes {{ __typename \
+           ... on HeadRefForcePushedEvent {{ createdAt }} ... on BaseRefChangedEvent {{ createdAt }} \
+           ... on BaseRefForcePushedEvent {{ createdAt }} ... on ReviewRequestedEvent {{ createdAt }} }} }} \
          reviewThreads(first: 100) {{ nodes {{ isResolved path line originalLine startLine originalStartLine \
            comments(first: 50) {{ nodes {{ pullRequestReview {{ id }} viewerDidAuthor author {{ __typename login }} createdAt body }} }} }} }} \
          }} }} }}"

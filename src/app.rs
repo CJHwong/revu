@@ -663,6 +663,26 @@ impl DetailView {
     }
 
     /// Opens or closes the `<details>` block under the Overview cursor.
+    /// Enter or a click on an Overview row: run the row's action, or open or close its
+    /// fold.
+    fn press_row(&mut self) {
+        let row = self
+            .overview
+            .as_ref()
+            .and_then(|layout| layout.rows.get(self.cursor));
+        match row.and_then(|row| row.action) {
+            Some(crate::markdown::RowAction::ChecksTab) => self.show_tab(Tab::Checks),
+            Some(crate::markdown::RowAction::UnresolvedComments) => {
+                let filter = crate::overview::CommentFilter::Unresolved;
+                self.set_comments(crate::overview::CommentView {
+                    filter,
+                    ..self.comments
+                });
+            }
+            None => self.toggle_fold(),
+        }
+    }
+
     fn toggle_fold(&mut self) {
         let row = self
             .overview
@@ -695,7 +715,7 @@ impl DetailView {
                     .as_ref()
                     .map_or(0, |layout| layout.rows.len().saturating_sub(1));
                 self.cursor = (first + (row - target.area.y) as usize).min(last);
-                self.toggle_fold();
+                self.press_row();
             }
             Click::Row(index) if !self.overlays.is_empty() => {
                 if let Some(Overlay::Search { state, .. }) = self.overlays.last_mut() {
@@ -1538,7 +1558,7 @@ impl App {
             KeyCode::Char('b') | KeyCode::PageUp => view.move_in_tab(-view.page_step()),
             KeyCode::Char('g') | KeyCode::Home => view.move_in_tab(-1_000_000),
             KeyCode::Char('G') | KeyCode::End => view.move_in_tab(1_000_000),
-            KeyCode::Enter if view.tab == Tab::Overview => view.toggle_fold(),
+            KeyCode::Enter if view.tab == Tab::Overview => view.press_row(),
             KeyCode::Char(']') if view.tab == Tab::Overview => view.jump_anchor(true),
             KeyCode::Char('f') if view.tab == Tab::Overview => {
                 let filter = view.comments.filter.next();

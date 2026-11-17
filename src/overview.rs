@@ -7,10 +7,10 @@ use ratatui::text::{Line, Span};
 use std::collections::HashSet;
 use unicode_width::UnicodeWidthStr;
 
-use crate::markdown::{self, Block, FoldId, Folds, TextRow, fold_key, line_width, truncate};
-use crate::model::{
-    CheckState, Comment, PrActivity, PrDetail, ReviewState, ThreadLine, TimelineItem,
+use crate::markdown::{
+    self, Block, FoldId, Folds, RowAction, TextRow, fold_key, line_width, truncate,
 };
+use crate::model::{Comment, PrActivity, PrDetail, ReviewState, ThreadLine, TimelineItem};
 use crate::theme::Theme;
 use crate::ui::relative_time;
 
@@ -114,7 +114,7 @@ impl Context<'_> {
 pub fn build(context: &Context, width: usize) -> Vec<TextRow> {
     let mut folds = Folds::new(context.toggled);
     folds.enter("description");
-    let mut rows = status_card(context, width);
+    let mut rows = merge_box(context, width);
     rows.push(TextRow::blank());
     rows.extend(description_card(context, width, &mut folds));
     rows.push(TextRow::blank());
@@ -173,6 +173,7 @@ fn card(
         line: Line::from(top),
         fold: fold.map(|(id, _)| id),
         anchor: true,
+        action: None,
     };
     if !open {
         return vec![top];
@@ -197,44 +198,40 @@ fn card(
     rows
 }
 
-fn status_card(context: &Context, width: usize) -> Vec<TextRow> {
+/// GitHub's merge box: whether the PR can merge, then checks, review threads and
+/// approvals, each with a bar.
+fn merge_box(context: &Context, width: usize) -> Vec<TextRow> {
     let theme = context.theme;
-    let summary = &context.detail.summary;
-    let (title, color) = match summary.review {
-        _ if summary.is_draft => ("◌ Draft", theme.muted),
-        ReviewState::Approved => ("✓ Approved", theme.success),
-        ReviewState::ChangesRequested => ("✗ Changes requested", theme.danger),
-        ReviewState::Awaiting => ("◷ Approval required", theme.warning),
-    };
-    let approvals = context
-        .detail
-        .reviewers
-        .iter()
-        .filter(|reviewer| reviewer.state == "approved")
-        .count();
-    let mut line = vec![context.span("Checks ", theme.muted)];
-    line.push(match &summary.checks {
-        None => context.span("none", theme.muted),
-        Some(checks) => {
-            let (symbol, color) = check_symbol(checks.state, theme);
-            context.span(
-                format!("{symbol} {}/{}", checks.passed, checks.total),
-                color,
-            )
-        }
-    });
-    let counts = [
-        ("Comments", summary.comments),
-        ("Commits", context.detail.commit_count),
-        ("Approvals", approvals as u64),
-    ];
-    for (name, count) in counts {
-        line.push(context.span(format!("    {name} "), theme.muted));
-        line.push(context.span(count.to_string(), theme.foreground));
+    let (title, color, note) = merge_headline(context.detail, theme);
+    let inner = width.saturating_sub(4);
+    let mut content = Vec::new();
+    if let Some(note) = note {
+        content.push(TextRow::plain(Line::from(context.span(note, theme.muted))));
     }
+    content.extend(tally_rows(
+        context,
+        "Checks",
+        check_tally(context),
+        Some(RowAction::ChecksTab),
+        inner,
+    ));
+    content.extend(tally_rows(
+        context,
+        "Comments",
+        thread_tally(context),
+        Some(RowAction::UnresolvedComments),
+        inner,
+    ));
+    content.extend(tally_rows(
+        context,
+        "Approvals",
+        approval_tally(context),
+        None,
+        inner,
+    ));
     card(
         vec![context.bold(title, color)],
-        vec![TextRow::plain(Line::from(line))],
+        content,
         width,
         theme,
         None,
@@ -242,12 +239,192 @@ fn status_card(context: &Context, width: usize) -> Vec<TextRow> {
     )
 }
 
-fn check_symbol(state: CheckState, theme: &Theme) -> (&'static str, Color) {
-    match state {
-        CheckState::Passing => ("✓", theme.success),
-        CheckState::Pending => ("●", theme.warning),
-        CheckState::Failing => ("✗", theme.danger),
+/// The headline, its color, and a line on what blocks the merge.
+fn merge_headline(detail: &PrDetail, theme: &Theme) -> (&'static str, Color, Option<&'static str>) {
+    if detail.summary.is_draft || detail.merge_state == "DRAFT" {
+        let note = "Mark it ready for review before it can merge";
+        return ("◌ Draft", theme.muted, Some(note));
     }
+    match detail.merge_state.as_str() {
+        "CLEAN" | "HAS_HOOKS" => ("✓ Able to merge", theme.success, None),
+        "UNSTABLE" => {
+            let note = "Some non-required checks are failing or still in progress";
+            ("✓ Able to merge", theme.success, Some(note))
+        }
+        "DIRTY" => {
+            let note = "Resolve them before it can merge";
+            ("✗ This branch has conflicts", theme.danger, Some(note))
+        }
+        "BEHIND" => {
+            let note = "Update the branch before it can merge";
+            ("◷ Out of date with the base", theme.warning, Some(note))
+        }
+        "BLOCKED" => {
+            let note = blocked_reason(detail.summary.review);
+            ("◷ Merging is blocked", theme.warning, Some(note))
+        }
+        _ => ("◷ Checking whether it can merge", theme.muted, None),
+    }
+}
+
+fn blocked_reason(review: ReviewState) -> &'static str {
+    match review {
+        ReviewState::ChangesRequested => "Changes were requested",
+        ReviewState::Awaiting => "An approval is required",
+        ReviewState::Approved => "A required check or rule has not passed",
+    }
+}
+/// One merge box row: a summary, and bar parts as counts and colors.
+struct Tally {
+    summary: String,
+    parts: Vec<(u64, Color)>,
+}
+
+fn check_tally(context: &Context) -> Tally {
+    let theme = context.theme;
+    let Some(counts) = context.detail.check_counts else {
+        return Tally {
+            summary: "none".to_string(),
+            parts: Vec::new(),
+        };
+    };
+    let mut words = Vec::new();
+    if counts.failing > 0 {
+        words.push(format!("{} failing", counts.failing));
+    }
+    if counts.pending > 0 {
+        words.push(format!("{} pending", counts.pending));
+    }
+    if words.is_empty() {
+        words.push(format!("all {} passed", counts.passed + counts.skipped));
+    }
+    let parts = vec![
+        (counts.passed, theme.success),
+        (counts.skipped, theme.muted),
+        (counts.pending, theme.warning),
+        (counts.failing, theme.danger),
+    ];
+    Tally {
+        summary: words.join(", "),
+        parts,
+    }
+}
+
+fn thread_tally(context: &Context) -> Tally {
+    let theme = context.theme;
+    let activity = match context.activity {
+        Some(Ok(activity)) => activity,
+        Some(Err(_)) => {
+            return Tally {
+                summary: "not loaded".to_string(),
+                parts: Vec::new(),
+            };
+        }
+        None => {
+            return Tally {
+                summary: "loading".to_string(),
+                parts: Vec::new(),
+            };
+        }
+    };
+    let (total, unresolved) = (activity.threads_total, activity.threads_unresolved);
+    let summary = match (total, unresolved) {
+        (0, _) => "no review threads".to_string(),
+        (_, 0) => format!("all {total} resolved"),
+        _ => format!("{unresolved} unresolved"),
+    };
+    let parts = vec![
+        (total - unresolved, theme.success),
+        (unresolved, theme.muted),
+    ];
+    Tally { summary, parts }
+}
+
+fn approval_tally(context: &Context) -> Tally {
+    let theme = context.theme;
+    let reviewers = &context.detail.reviewers;
+    let count = |state: &str| {
+        reviewers
+            .iter()
+            .filter(|reviewer| reviewer.state == state)
+            .count() as u64
+    };
+    let parts = vec![
+        (count("approved"), theme.success),
+        (count("changes requested"), theme.danger),
+        (count("requested"), theme.muted),
+    ];
+    let names = ["approved", "changes requested", "pending"];
+    let words: Vec<String> = parts
+        .iter()
+        .zip(names)
+        .filter(|((count, _), _)| *count > 0)
+        .map(|((count, _), name)| format!("{count} {name}"))
+        .collect();
+    let summary = if words.is_empty() {
+        "none requested".to_string()
+    } else {
+        words.join(", ")
+    };
+    Tally { summary, parts }
+}
+
+/// The row's label and summary, then its bar. Both rows carry the action, so a click on
+/// either one works.
+fn tally_rows(
+    context: &Context,
+    label: &str,
+    tally: Tally,
+    action: Option<RowAction>,
+    width: usize,
+) -> Vec<TextRow> {
+    let theme = context.theme;
+    let heading = Line::from(vec![
+        context.bold(label.to_string(), theme.foreground),
+        context.span(format!(" {}", tally.summary), theme.muted),
+    ]);
+    let mut rows = vec![TextRow {
+        action,
+        ..TextRow::plain(heading)
+    }];
+    if let Some(bar) = tally_bar(&tally.parts, width) {
+        rows.push(TextRow {
+            action,
+            ..TextRow::plain(bar)
+        });
+    }
+    rows
+}
+
+/// A bar `width` cells wide, split by the counts. A part with any count gets at least
+/// one cell, as GitHub keeps a sliver for it.
+fn tally_bar(parts: &[(u64, Color)], width: usize) -> Option<Line<'static>> {
+    let total: u64 = parts.iter().map(|(count, _)| count).sum();
+    if total == 0 || width == 0 {
+        return None;
+    }
+    let mut cells: Vec<usize> = parts
+        .iter()
+        .map(|(count, _)| match *count {
+            0 => 0,
+            count => ((count as usize * width) / total as usize).max(1),
+        })
+        .collect();
+    // Rounding leaves the sum off by a few cells; the widest part takes the difference.
+    let widest = (0..cells.len())
+        .max_by_key(|index| cells[*index])
+        .unwrap_or(0);
+    let others: usize = cells
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != widest)
+        .map(|(_, cells)| cells)
+        .sum();
+    cells[widest] = width.saturating_sub(others);
+    let spans = parts.iter().zip(cells).filter(|(_, cells)| *cells > 0);
+    let spans =
+        spans.map(|((_, color), cells)| Span::styled("━".repeat(cells), Style::new().fg(*color)));
+    Some(Line::from(spans.collect::<Vec<_>>()))
 }
 
 fn description_card(context: &Context, width: usize, folds: &mut Folds) -> Vec<TextRow> {
@@ -681,9 +858,75 @@ mod tests {
     }
 
     #[test]
+    fn the_merge_box_names_what_blocks_and_counts_like_github() {
+        let theme = theme::by_name("dracula").unwrap();
+        let mut detail = sample_detail();
+        let cases = [
+            ("CLEAN", "✓ Able to merge"),
+            ("UNSTABLE", "✓ Able to merge"),
+            ("BLOCKED", "◷ Merging is blocked"),
+            ("DIRTY", "✗ This branch has conflicts"),
+            ("BEHIND", "◷ Out of date with the base"),
+        ];
+        for (state, headline) in cases {
+            detail.merge_state = state.to_string();
+            assert_eq!(merge_headline(&detail, &theme).0, headline, "{state}");
+        }
+        detail.check_counts = Some(crate::model::CheckCounts {
+            passed: 7,
+            skipped: 3,
+            pending: 1,
+            failing: 11,
+        });
+        let activity = Ok(sample_activity());
+        let toggled = HashSet::new();
+        let context = Context {
+            detail: &detail,
+            activity: Some(&activity),
+            toggled: &toggled,
+            comments: CommentView::default(),
+            theme: &theme,
+            now: detail.created_at,
+        };
+        let rows: Vec<String> = merge_box(&context, 60)
+            .iter()
+            .map(|row| {
+                row.line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        let text = rows.join("\n");
+        assert!(text.contains("Checks 11 failing, 1 pending"), "{text}");
+        assert!(text.contains("Comments 1 unresolved"), "{text}");
+        assert!(text.contains("Approvals 1 approved, 2 pending"), "{text}");
+        let bar = rows.iter().find(|row| row.contains('━')).unwrap();
+        assert_eq!(
+            bar.chars().filter(|c| *c == '━').count(),
+            56,
+            "the bar fills the card"
+        );
+    }
+
+    #[test]
+    fn a_bar_keeps_a_sliver_for_a_small_part() {
+        let parts = [(99, Color::Green), (1, Color::Red)];
+        let bar = tally_bar(&parts, 20).unwrap();
+        let widths: Vec<usize> = bar
+            .spans
+            .iter()
+            .map(|span| span.content.chars().count())
+            .collect();
+        assert_eq!(widths, [19, 1]);
+        assert!(tally_bar(&[(0, Color::Green)], 20).is_none());
+    }
+
+    #[test]
     fn cards_are_closed_boxes_of_the_full_width() {
         let lines = rendered(&[]);
-        assert!(lines[0].starts_with("╭─ ◷ Approval required"));
+        assert!(lines[0].starts_with("╭─ ◷ Checking whether it can merge"));
         for line in lines
             .iter()
             .filter(|line| line.starts_with('╭') || line.starts_with('│') || line.starts_with('╰'))

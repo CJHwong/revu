@@ -41,6 +41,16 @@ pub struct TextRow {
     pub line: Line<'static>,
     pub fold: Option<FoldId>,
     pub anchor: bool,
+    /// What Enter or a click on this row does instead of folding.
+    pub action: Option<RowAction>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowAction {
+    /// Open the Checks tab.
+    ChecksTab,
+    /// Show only the unresolved review threads.
+    UnresolvedComments,
 }
 
 impl TextRow {
@@ -49,6 +59,7 @@ impl TextRow {
             line,
             fold: None,
             anchor: false,
+            action: None,
         }
     }
 
@@ -57,6 +68,7 @@ impl TextRow {
             line,
             fold: None,
             anchor: true,
+            action: None,
         }
     }
 
@@ -187,6 +199,7 @@ fn layout_details(
         line: bar,
         fold: Some(id),
         anchor: true,
+        action: None,
     });
     if open {
         let rail = Span::styled("│ ", Style::new().fg(theme.fold));

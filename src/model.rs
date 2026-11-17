@@ -165,6 +165,40 @@ pub struct Reviewer {
     pub name: String,
     /// GitHub's review state in lower case, or "requested" for a pending request.
     pub state: String,
+    /// GitHub asked for this review because of CODEOWNERS.
+    pub code_owner: bool,
+    /// The team this member reviewed for, as GitHub's sidebar nests them.
+    pub team: Option<String>,
+}
+
+/// Check runs and statuses by outcome, as GitHub's merge box groups them. A cancelled,
+/// timed-out or errored run counts as failing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CheckCounts {
+    pub passed: u64,
+    pub skipped: u64,
+    pub pending: u64,
+    pub failing: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedIssue {
+    pub number: u64,
+    pub title: String,
+}
+
+/// What others did after your latest comment, review or reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SinceCounts {
+    /// Your latest comment, review or reply. None when you have none; the counts then
+    /// cover the whole pull request.
+    pub since: Option<DateTime<Utc>>,
+    pub commits: u64,
+    /// Force pushes and base branch changes.
+    pub pushes: u64,
+    pub review_comments: u64,
+    pub comments: u64,
+    pub review_requests: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,6 +267,9 @@ pub struct PrActivity {
     pub timeline: Vec<TimelineItem>,
     /// GitHub returned its limit of timeline items, so older ones are missing.
     pub timeline_cut: bool,
+    pub threads_total: u64,
+    pub threads_unresolved: u64,
+    pub since: SinceCounts,
 }
 
 #[derive(Debug, Clone)]
@@ -253,6 +290,11 @@ pub struct PrDetail {
     pub assignees: Vec<String>,
     pub reviewers: Vec<Reviewer>,
     pub commit_count: u64,
+    /// GitHub's mergeStateStatus: CLEAN, UNSTABLE, BLOCKED, DIRTY, BEHIND, DRAFT, ...
+    pub merge_state: String,
+    pub check_counts: Option<CheckCounts>,
+    pub milestone: Option<String>,
+    pub linked_issues: Vec<LinkedIssue>,
 }
 
 // ---- GitHub GraphQL shapes ----
@@ -366,6 +408,8 @@ struct RawCommitInfo {
     /// The raw message. GitHub's messageHeadline cuts a long subject with "…".
     message: String,
     authored_date: DateTime<Utc>,
+    /// A rebase moves this date and leaves the authored date alone.
+    committed_date: Option<DateTime<Utc>>,
     url: String,
     author: Option<RawGitActor>,
     status_check_rollup: Option<RawRollupState>,
@@ -425,6 +469,37 @@ struct RawDetail {
     assignees: Nodes<Login>,
     review_requests: Nodes<RawRequest>,
     latest_opinionated_reviews: Nodes<RawReview>,
+    latest_reviews: Option<Nodes<RawLatestReview>>,
+    merge_state_status: Option<String>,
+    milestone: Option<RawTitle>,
+    closing_issues_references: Option<Nodes<RawIssue>>,
+}
+
+#[derive(Deserialize)]
+struct RawTitle {
+    title: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawLatestReview {
+    author: Option<Login>,
+    state: String,
+    on_behalf_of: Nodes<Name>,
+}
+
+#[derive(Deserialize)]
+struct RawIssue {
+    number: u64,
+    title: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawEvent {
+    #[serde(rename = "__typename")]
+    kind: String,
+    created_at: DateTime<Utc>,
 }
 
 #[derive(Deserialize)]
@@ -446,6 +521,7 @@ struct RawActivity {
     commit_list: RawCommitList,
     timeline_items: Nodes<RawTimelineItem>,
     review_threads: Nodes<RawThread>,
+    events: Option<Nodes<RawEvent>>,
 }
 
 #[derive(Deserialize)]
@@ -519,6 +595,8 @@ struct RawId {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawRequest {
+    #[serde(default)]
+    as_code_owner: bool,
     requested_reviewer: Option<RawReviewer>,
 }
 
@@ -603,9 +681,28 @@ pub fn parse_group(search: &Value, config: &GroupConfig) -> Result<Group> {
 pub fn parse_detail(pull_request: &Value) -> Result<PrDetail> {
     let raw: RawDetail =
         serde_json::from_value(pull_request.clone()).context("parse pull request")?;
-    let reviewers = reviewers_from(&raw.review_requests, &raw.latest_opinionated_reviews);
+    let reviewers = reviewers_from(
+        &raw.review_requests,
+        &raw.latest_opinionated_reviews,
+        raw.latest_reviews.as_ref(),
+    );
     let labels = raw.labels.nodes.into_iter();
+    let check_counts = latest_rollup(&raw.row.commits).map(check_counts);
+    let linked_issues = raw
+        .closing_issues_references
+        .map_or_else(Vec::new, |issues| {
+            let issues = issues.nodes.into_iter();
+            let linked = issues.map(|issue| LinkedIssue {
+                number: issue.number,
+                title: issue.title,
+            });
+            linked.collect()
+        });
     Ok(PrDetail {
+        merge_state: raw.merge_state_status.unwrap_or_default(),
+        check_counts,
+        milestone: raw.milestone.map(|milestone| milestone.title),
+        linked_issues,
         id: raw.id,
         base_oid: raw.base_ref_oid,
         head_oid: raw.head_ref_oid,
@@ -641,6 +738,10 @@ pub const TIMELINE_LIMIT: usize = 100;
 pub fn parse_activity(pull_request: &Value) -> Result<PrActivity> {
     let raw: RawActivity =
         serde_json::from_value(pull_request.clone()).context("parse pull request activity")?;
+    let since = since_counts(&raw);
+    let threads = &raw.review_threads.nodes;
+    let threads_total = threads.len() as u64;
+    let threads_unresolved = threads.iter().filter(|thread| !thread.is_resolved).count() as u64;
     let commits = raw
         .commit_list
         .nodes
@@ -648,6 +749,9 @@ pub fn parse_activity(pull_request: &Value) -> Result<PrActivity> {
         .map(|node| commit_line(node.commit))
         .collect();
     Ok(PrActivity {
+        threads_total,
+        threads_unresolved,
+        since,
         checks: check_lines(latest_rollup(&raw.commits)),
         commits,
         timeline_cut: raw.timeline_items.nodes.len() >= TIMELINE_LIMIT,
@@ -705,6 +809,120 @@ fn check_summary(rollup: &Rollup) -> Option<CheckSummary> {
         total: contexts.total_count,
         state: rollup_state(&rollup.state),
     })
+}
+
+fn check_counts(rollup: &Rollup) -> CheckCounts {
+    let contexts = &rollup.contexts;
+    let mut counts = CheckCounts::default();
+    for entry in &contexts.check_run_counts_by_state {
+        let bucket = match entry.state.as_str() {
+            "SUCCESS" => &mut counts.passed,
+            "NEUTRAL" | "SKIPPED" => &mut counts.skipped,
+            "QUEUED" | "IN_PROGRESS" | "PENDING" | "WAITING" | "REQUESTED" => &mut counts.pending,
+            _ => &mut counts.failing,
+        };
+        *bucket += entry.count;
+    }
+    for entry in &contexts.status_context_counts_by_state {
+        let bucket = match entry.state.as_str() {
+            "SUCCESS" => &mut counts.passed,
+            "PENDING" | "EXPECTED" => &mut counts.pending,
+            _ => &mut counts.failing,
+        };
+        *bucket += entry.count;
+    }
+    counts
+}
+
+/// The times of your own comments, reviews and replies.
+fn my_times(raw: &RawActivity) -> Vec<DateTime<Utc>> {
+    let threads = raw.review_threads.nodes.iter();
+    let replies = threads.flat_map(|thread| thread.comments.nodes.iter());
+    let mut times: Vec<DateTime<Utc>> = replies
+        .filter(|comment| comment.viewer_did_author)
+        .map(|comment| comment.created_at)
+        .collect();
+    for item in &raw.timeline_items.nodes {
+        match item {
+            RawTimelineItem::IssueComment {
+                created_at,
+                viewer_did_author: true,
+                ..
+            } => times.push(*created_at),
+            RawTimelineItem::PullRequestReview {
+                viewer_did_author: true,
+                submitted_at,
+                created_at,
+                ..
+            } => times.push(submitted_at.unwrap_or(*created_at)),
+            _ => {}
+        }
+    }
+    times
+}
+
+/// Counts what others did after your latest comment, review or reply.
+fn since_counts(raw: &RawActivity) -> SinceCounts {
+    let since = my_times(raw).into_iter().max();
+    let count = |times: Vec<DateTime<Utc>>| {
+        let after = times
+            .into_iter()
+            .filter(|at| since.is_none_or(|since| *at > since));
+        after.count() as u64
+    };
+    let events = raw
+        .events
+        .as_ref()
+        .map_or(&[][..], |events| events.nodes.as_slice());
+    let events_of = |kinds: &[&str]| {
+        let matching = events
+            .iter()
+            .filter(|event| kinds.contains(&event.kind.as_str()));
+        count(matching.map(|event| event.created_at).collect())
+    };
+    let commits = raw.commit_list.nodes.iter().map(|node| {
+        node.commit
+            .committed_date
+            .unwrap_or(node.commit.authored_date)
+    });
+    // GitHub counts review submissions here; a reply in a thread is one too.
+    let reviews = raw
+        .timeline_items
+        .nodes
+        .iter()
+        .filter_map(|item| match item {
+            RawTimelineItem::PullRequestReview {
+                viewer_did_author: false,
+                submitted_at,
+                created_at,
+                ..
+            } => Some(submitted_at.unwrap_or(*created_at)),
+            _ => None,
+        });
+    let comments = raw
+        .timeline_items
+        .nodes
+        .iter()
+        .filter_map(|item| match item {
+            RawTimelineItem::IssueComment {
+                created_at,
+                viewer_did_author: false,
+                ..
+            } => Some(*created_at),
+            _ => None,
+        });
+    SinceCounts {
+        since,
+        commits: count(commits.collect()),
+        pushes: events_of(&[
+            "HeadRefForcePushedEvent",
+            "BaseRefChangedEvent",
+            "BaseRefForcePushedEvent",
+        ]),
+        review_comments: count(reviews.collect()),
+        comments: count(comments.collect()),
+        review_requests: events_of(&["ReviewRequestedEvent"]),
+    }
 }
 
 fn count_states(counts: &[StateCount], states: &[&str]) -> u64 {
@@ -806,31 +1024,69 @@ fn check_run_state(status: &str, conclusion: Option<&str>) -> CheckState {
 
 /// Pending requests come first. A review by someone who is requested again is dropped,
 /// because the new request is the state that needs action.
-fn reviewers_from(requests: &Nodes<RawRequest>, reviews: &Nodes<RawReview>) -> Vec<Reviewer> {
+/// Pending requests first, then everyone who reviewed. An approval or a change request
+/// outranks a later plain comment, as on GitHub; `latest` adds plain comment reviews and
+/// the team a member reviewed for.
+fn reviewers_from(
+    requests: &Nodes<RawRequest>,
+    opinionated: &Nodes<RawReview>,
+    latest: Option<&Nodes<RawLatestReview>>,
+) -> Vec<Reviewer> {
     let mut reviewers: Vec<Reviewer> = requests
         .nodes
         .iter()
-        .filter_map(|request| request.requested_reviewer.as_ref())
-        .filter_map(|reviewer| reviewer.login.clone().or_else(|| reviewer.name.clone()))
-        .map(|name| Reviewer {
-            name,
-            state: "requested".to_string(),
+        .filter_map(|request| {
+            let reviewer = request.requested_reviewer.as_ref()?;
+            let name = reviewer.login.clone().or_else(|| reviewer.name.clone())?;
+            Some(Reviewer {
+                name,
+                state: "requested".to_string(),
+                code_owner: request.as_code_owner,
+                team: None,
+            })
         })
         .collect();
-    for review in &reviews.nodes {
-        let name = review
-            .author
-            .as_ref()
-            .map_or("ghost", |user| user.login.as_str());
+    let opinion_of = |name: &str| {
+        let review = opinionated
+            .nodes
+            .iter()
+            .find(|review| review_author(&review.author) == name);
+        review.map(|review| humanize(&review.state))
+    };
+    let latest = latest.map_or(&[][..], |latest| latest.nodes.as_slice());
+    for review in latest {
+        let name = review_author(&review.author);
+        if reviewers.iter().any(|existing| existing.name == name) {
+            continue;
+        }
+        reviewers.push(Reviewer {
+            name: name.to_string(),
+            state: opinion_of(name).unwrap_or_else(|| humanize(&review.state)),
+            code_owner: false,
+            team: review
+                .on_behalf_of
+                .nodes
+                .first()
+                .map(|team| team.name.clone()),
+        });
+    }
+    for review in &opinionated.nodes {
+        let name = review_author(&review.author);
         if reviewers.iter().any(|existing| existing.name == name) {
             continue;
         }
         reviewers.push(Reviewer {
             name: name.to_string(),
             state: humanize(&review.state),
+            code_owner: false,
+            team: None,
         });
     }
     reviewers
+}
+
+fn review_author(author: &Option<Login>) -> &str {
+    author.as_ref().map_or("ghost", |user| user.login.as_str())
 }
 
 /// Comments, reviews and commits in GitHub's order. A review with no text and no
@@ -1154,6 +1410,107 @@ pub mod tests {
                   ]} },
             ]},
         })
+    }
+
+    #[test]
+    fn cancelled_and_errored_checks_count_as_failing() {
+        let mut detail = detail_fixture();
+        detail["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"] = json!({
+            "totalCount": 22,
+            "checkRunCountsByState": [
+                { "state": "CANCELLED", "count": 1 }, { "state": "FAILURE", "count": 10 },
+                { "state": "IN_PROGRESS", "count": 1 }, { "state": "NEUTRAL", "count": 2 },
+                { "state": "SKIPPED", "count": 1 }, { "state": "SUCCESS", "count": 7 },
+            ],
+            "statusContextCountsByState": [],
+        });
+        let counts = parse_detail(&detail).unwrap().check_counts.unwrap();
+        let expected = CheckCounts {
+            passed: 7,
+            skipped: 3,
+            pending: 1,
+            failing: 11,
+        };
+        assert_eq!(counts, expected);
+    }
+
+    #[test]
+    fn reviewers_join_requests_comments_and_teams() {
+        let mut detail = detail_fixture();
+        detail["reviewRequests"] = json!({ "nodes": [
+            { "asCodeOwner": true, "requestedReviewer": { "name": "DATA" } },
+        ]});
+        detail["latestOpinionatedReviews"] = json!({ "nodes": [
+            { "author": { "login": "peer" }, "state": "APPROVED" },
+        ]});
+        detail["latestReviews"] = json!({ "nodes": [
+            { "author": { "login": "joey" }, "state": "COMMENTED",
+              "onBehalfOf": { "nodes": [{ "name": "Core" }] } },
+            { "author": { "login": "peer" }, "state": "COMMENTED", "onBehalfOf": { "nodes": [] } },
+        ]});
+        let reviewers = parse_detail(&detail).unwrap().reviewers;
+        let rows: Vec<(&str, &str, bool, Option<&str>)> = reviewers
+            .iter()
+            .map(|r| {
+                (
+                    r.name.as_str(),
+                    r.state.as_str(),
+                    r.code_owner,
+                    r.team.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("DATA", "requested", true, None),
+                ("joey", "commented", false, Some("Core")),
+                ("peer", "approved", false, None),
+            ],
+            "an approval outranks a later plain comment"
+        );
+    }
+
+    #[test]
+    fn since_counts_what_others_did_after_your_last_reply() {
+        let mut activity = activity_fixture();
+        // Your reply in the fixture is at 2026-11-14T11:00.
+        activity["timelineItems"]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!(
+                { "__typename": "IssueComment", "author": { "__typename": "User", "login": "lead" },
+                  "createdAt": "2026-11-15T10:00:00Z", "body": "Ping" }
+            ));
+        activity["timelineItems"]["nodes"].as_array_mut().unwrap().push(json!(
+            { "__typename": "PullRequestReview", "id": "R3", "author": { "__typename": "User", "login": "lead" },
+              "state": "COMMENTED", "submittedAt": "2026-11-15T11:00:00Z",
+              "createdAt": "2026-11-15T11:00:00Z", "body": "" }
+        ));
+        activity["commitList"]["nodes"][1]["commit"]["committedDate"] =
+            json!("2026-11-15T09:00:00Z");
+        activity["events"] = json!({ "nodes": [
+            { "__typename": "HeadRefForcePushedEvent", "createdAt": "2026-11-15T09:00:00Z" },
+            { "__typename": "ReviewRequestedEvent", "createdAt": "2026-11-12T09:00:00Z" },
+            { "__typename": "ReviewRequestedEvent", "createdAt": "2026-11-16T09:00:00Z" },
+        ]});
+        let parsed = parse_activity(&activity).unwrap();
+        let since = parsed.since;
+        assert_eq!(
+            since.since.unwrap().to_rfc3339(),
+            "2026-11-14T11:00:00+00:00"
+        );
+        assert_eq!(
+            (
+                since.commits,
+                since.pushes,
+                since.review_comments,
+                since.comments,
+                since.review_requests
+            ),
+            (1, 1, 1, 1, 1)
+        );
+        assert_eq!((parsed.threads_total, parsed.threads_unresolved), (2, 1));
     }
 
     #[test]

@@ -15,7 +15,7 @@ use crate::app::{
 use crate::file_tree::FileRow;
 use crate::model::{
     ChangedFile, CheckLine, CheckState, CheckSummary, CommitLine, Group, Label, PrActivity,
-    PrDetail, PrRef, PrSummary, RateLimit, ReviewState, ViewedState,
+    PrDetail, PrRef, PrSummary, RateLimit, ReviewState, Reviewer, SinceCounts, ViewedState,
 };
 use crate::repo::{GrepHit, MAX_GREP_HITS};
 use crate::theme::Theme;
@@ -1034,7 +1034,10 @@ fn render_overview(frame: &mut Frame, view: &mut DetailView, area: Rect, paint: 
         click: Click::Page { first: *scroll },
     });
     if sidebar_width > 0 {
-        render_sidebar(frame, detail, sidebar, paint);
+        let activity = activity
+            .as_ref()
+            .and_then(|activity| activity.as_ref().ok());
+        render_sidebar(frame, detail, activity, sidebar, paint);
     }
 }
 
@@ -1062,13 +1065,25 @@ fn highlight(row: &markdown::TextRow, width: usize, theme: &Theme) -> Line<'stat
     line
 }
 
-fn render_sidebar(frame: &mut Frame, detail: &PrDetail, area: Rect, paint: Paint) {
+fn render_sidebar(
+    frame: &mut Frame,
+    detail: &PrDetail,
+    activity: Option<&PrActivity>,
+    area: Rect,
+    paint: Paint,
+) {
     let border = Block::new()
         .borders(Borders::LEFT)
         .border_style(Style::new().fg(paint.theme.selection));
     let inner = border.inner(area);
     frame.render_widget(border, area);
-    let lines = sidebar_lines(detail, inner.width.saturating_sub(1) as usize, paint);
+    // The text sits inside a one-cell margin on each side.
+    let lines = sidebar_lines(
+        detail,
+        activity,
+        inner.width.saturating_sub(2) as usize,
+        paint,
+    );
     frame.render_widget(
         Paragraph::new(lines),
         inner.inner(Margin {
@@ -1294,36 +1309,139 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
     frame.render_widget(Paragraph::new(text).block(block), box_area);
 }
 
-fn sidebar_lines(detail: &PrDetail, width: usize, paint: Paint) -> Vec<Line<'static>> {
+/// GitHub's sidebar: what changed since you last looked, then the reviewers, and the
+/// other sections only when they hold something.
+fn sidebar_lines(
+    detail: &PrDetail,
+    activity: Option<&PrActivity>,
+    width: usize,
+    paint: Paint,
+) -> Vec<Line<'static>> {
     let theme = paint.theme;
-    let mut lines = section("Reviewers", paint);
-    lines.extend(detail.reviewers.iter().map(|reviewer| {
-        let (symbol, color) = reviewer_symbol(&reviewer.state, theme);
-        Line::from(vec![
-            paint.span(format!("{symbol} "), color),
-            paint.span(reviewer.name.clone(), theme.foreground),
-            paint.span(format!("  {}", reviewer.state), theme.muted),
-        ])
-    }));
-    if detail.reviewers.is_empty() {
-        lines.push(Line::from(paint.span("No reviews", theme.muted)));
+    let mut lines = Vec::new();
+    if let Some(activity) = activity {
+        lines.extend(since_lines(&activity.since, width, paint));
     }
-    lines.extend(section("Assignees", paint));
-    lines.extend(
-        detail
-            .assignees
-            .iter()
-            .map(|name| Line::from(paint.span(name.clone(), theme.foreground))),
-    );
-    if detail.assignees.is_empty() {
-        lines.push(Line::from(paint.span("No one", theme.muted)));
+    if !detail.reviewers.is_empty() {
+        lines.extend(section("Reviewers", paint));
+        lines.extend(reviewer_lines(&detail.reviewers, paint));
     }
-    lines.extend(section("Labels", paint));
-    lines.extend(label_chips(&detail.labels, width));
-    if detail.labels.is_empty() {
-        lines.push(Line::from(paint.span("None yet", theme.muted)));
+    if !detail.assignees.is_empty() {
+        lines.extend(section("Assignees", paint));
+        let names = detail.assignees.iter();
+        lines.extend(names.map(|name| Line::from(paint.span(name.clone(), theme.foreground))));
+    }
+    if !detail.labels.is_empty() {
+        lines.extend(section("Labels", paint));
+        lines.extend(label_chips(&detail.labels, width));
+    }
+    if let Some(milestone) = &detail.milestone {
+        lines.extend(section("Milestone", paint));
+        lines.push(Line::from(paint.span(milestone.clone(), theme.foreground)));
+    }
+    if !detail.linked_issues.is_empty() {
+        lines.extend(section("Development", paint));
+        lines.extend(detail.linked_issues.iter().map(|issue| {
+            Line::from(vec![
+                paint.span(format!("#{} ", issue.number), theme.accent),
+                paint.span(issue.title.clone(), theme.foreground),
+            ])
+        }));
+    }
+    // The first section needs no blank line above it.
+    if lines.first().is_some_and(|line| line.width() == 0) {
+        lines.remove(0);
     }
     lines
+}
+
+/// Counts of what others did after your latest comment, review or reply, with the count
+/// at the right edge as GitHub draws it.
+fn since_lines(since: &SinceCounts, width: usize, paint: Paint) -> Vec<Line<'static>> {
+    let theme = paint.theme;
+    let title = if since.since.is_some() {
+        "Since you last looked"
+    } else {
+        "Activity"
+    };
+    let mut lines = section(title, paint);
+    if let Some(at) = since.since {
+        let when = format!("you last commented {}", relative_time(at, paint.now));
+        lines.push(Line::from(paint.span(when, theme.muted)));
+    }
+    let counts = [
+        ("Commits", since.commits),
+        ("Force pushes", since.pushes),
+        ("Review comments", since.review_comments),
+        ("Comments", since.comments),
+        ("Review requests", since.review_requests),
+    ];
+    let shown: Vec<Line> = counts
+        .into_iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(name, count)| {
+            let count = count.to_string();
+            let gap = width.saturating_sub(name.len() + count.len()).max(1);
+            Line::from(vec![
+                paint.span(format!("{name}{}", " ".repeat(gap)), theme.foreground),
+                paint.bold(count, theme.foreground),
+            ])
+        })
+        .collect();
+    if shown.is_empty() {
+        lines.push(Line::from(paint.span("Nothing new", theme.muted)));
+    }
+    lines.extend(shown);
+    lines
+}
+
+/// One line per reviewer. A member who reviewed for a team sits under that team.
+fn reviewer_lines(reviewers: &[Reviewer], paint: Paint) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for reviewer in reviewers.iter().filter(|reviewer| reviewer.team.is_none()) {
+        lines.push(reviewer_line(reviewer, "", paint));
+        let members = reviewers
+            .iter()
+            .filter(|member| member.team.as_ref() == Some(&reviewer.name));
+        lines.extend(members.map(|member| reviewer_line(member, "└ ", paint)));
+    }
+    // A team that reviewed through a member but has no request of its own.
+    let mut teams: Vec<&String> = reviewers
+        .iter()
+        .filter_map(|reviewer| reviewer.team.as_ref())
+        .collect();
+    teams.dedup();
+    for team in teams
+        .into_iter()
+        .filter(|team| !reviewers.iter().any(|reviewer| &reviewer.name == *team))
+    {
+        lines.push(Line::from(
+            paint.span(format!("  {team}"), paint.theme.foreground),
+        ));
+        let members = reviewers
+            .iter()
+            .filter(|member| member.team.as_ref() == Some(team));
+        lines.extend(members.map(|member| reviewer_line(member, "└ ", paint)));
+    }
+    lines
+}
+
+fn reviewer_line(reviewer: &Reviewer, indent: &str, paint: Paint) -> Line<'static> {
+    let theme = paint.theme;
+    let (symbol, color) = reviewer_symbol(&reviewer.state, theme);
+    let state = match reviewer.state.as_str() {
+        "requested" => "pending",
+        state => state,
+    };
+    let mut note = format!("  {state}");
+    if reviewer.code_owner {
+        note.push_str(", code owner");
+    }
+    Line::from(vec![
+        paint.span(format!("{indent}{symbol} "), color),
+        paint.span(reviewer.name.clone(), theme.foreground),
+        paint.span(note, theme.muted),
+    ])
 }
 
 /// Labels in their GitHub colors, as many per line as fit.
@@ -1370,6 +1488,7 @@ fn reviewer_symbol(state: &str, theme: &Theme) -> (&'static str, Color) {
         "approved" => ("✓", theme.success),
         "changes requested" => ("✗", theme.danger),
         "requested" => ("●", theme.warning),
+        "commented" => ("✎", theme.muted),
         _ => ("○", theme.muted),
     }
 }
@@ -1487,6 +1606,69 @@ mod tests {
     use super::*;
     use crate::theme;
     use chrono::TimeZone;
+
+    fn texts(lines: &[Line]) -> Vec<String> {
+        let text = |line: &Line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        };
+        lines.iter().map(text).collect()
+    }
+
+    #[test]
+    fn the_sidebar_nests_team_reviews_and_hides_empty_sections() {
+        let theme = theme::by_name("dracula").unwrap();
+        let paint = Paint {
+            theme: &theme,
+            now: Utc::now(),
+        };
+        let mut detail = crate::model::tests::sample_detail();
+        detail.assignees.clear();
+        detail.reviewers = vec![
+            Reviewer {
+                name: "DATA".into(),
+                state: "requested".into(),
+                code_owner: true,
+                team: None,
+            },
+            Reviewer {
+                name: "joey".into(),
+                state: "commented".into(),
+                code_owner: false,
+                team: Some("Core".into()),
+            },
+        ];
+        let lines = texts(&sidebar_lines(&detail, None, 30, paint));
+        assert_eq!(lines[0], "Reviewers");
+        assert_eq!(lines[1], "● DATA  pending, code owner");
+        assert_eq!(lines[2], "  Core");
+        assert_eq!(lines[3], "└ ✎ joey  commented");
+        assert!(
+            !lines.iter().any(|line| line == "Assignees"),
+            "no one assigned, no section"
+        );
+    }
+
+    #[test]
+    fn the_sidebar_counts_only_what_is_new() {
+        let theme = theme::by_name("dracula").unwrap();
+        let paint = Paint {
+            theme: &theme,
+            now: Utc::now(),
+        };
+        let since = SinceCounts {
+            since: Some(Utc::now()),
+            commits: 5,
+            comments: 1,
+            ..Default::default()
+        };
+        let lines = texts(&since_lines(&since, 20, paint));
+        assert_eq!(lines[1], "Since you last looked");
+        assert_eq!(lines[3], format!("Commits{}5", " ".repeat(12)));
+        assert_eq!(lines.len(), 5, "rows with nothing new stay out: {lines:?}");
+    }
 
     #[test]
     fn a_shrunk_layout_keeps_the_cursor_on_screen() {

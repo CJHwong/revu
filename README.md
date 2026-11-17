@@ -1,6 +1,6 @@
 # rs-github-inbox
 
-A terminal version of GitHub's pull request inbox. It shows the pull requests you care about across every repository, grouped like the web inbox, and opens each one like GitHub's Overview: the description, the comments and reviews with their threads, folded `<details>` blocks, reviewers and labels. It writes one thing to GitHub: the Viewed checkbox on a file, when you press `v`.
+A terminal version of GitHub's pull request inbox. It shows the pull requests you care about across every repository, grouped like the web inbox, and opens each one like GitHub's Overview: the description, the comments and reviews with their threads, folded `<details>` blocks, reviewers and labels. A merge box on top says whether the PR can merge and counts failing and pending checks, unresolved review threads and pending approvals; `Enter` on its Checks row opens the Checks tab, and on its Comments row shows only unresolved threads. The sidebar counts what others did since your last comment or review, lists every reviewer with their state (a member who reviewed for a team sits under the team), and shows Assignees, Labels, Milestone and linked issues only when set. It writes one thing to GitHub: the Viewed checkbox on a file, when you press `v`.
 
 ## Requirements
 
