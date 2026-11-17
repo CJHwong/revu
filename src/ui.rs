@@ -500,7 +500,7 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
             ("t, z", "tree or flat list, hide or show the list"),
             (
                 "c",
-                "comment mode: j/k pick a line, V a range, enter writes a comment into your pending review",
+                "comment mode: j/k pick a line, J/K or V a range, enter writes a comment into your pending review",
             ),
         ],
     ),
@@ -1015,7 +1015,7 @@ fn render_line_mode(frame: &mut Frame, view: &mut DetailView, area: Rect, paint:
         .border_style(Style::new().fg(theme.accent))
         .title(paint.bold(" comment mode ", theme.accent))
         .title(paint.span(
-            "j/k move, V range, enter comment, R review, esc back ",
+            "j/k move, J/K or V range, enter comment, R review, esc back ",
             theme.muted,
         ))
         .title(

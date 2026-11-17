@@ -66,7 +66,7 @@ Press `?` anywhere for this list.
 | Files changed | `z` | Hide or show the list, so the diff gets the full width |
 | Files changed | `v` | Toggle Viewed. It syncs to GitHub's Viewed checkbox at once. |
 | Files changed | `V` | Hide viewed files |
-| Files changed | `c` | Comment mode on the selected file: its plain diff with line numbers. `j`/`k` move, `V` marks a range (on one side only, as GitHub requires), `Enter` writes a comment, `esc` goes back. The comment joins your pending review on GitHub, which only you see until `R` submits it; a dot marks lines it already covers. |
+| Files changed | `c` | Comment mode on the selected file: its plain diff with line numbers. `j`/`k` move, `J`/`K` (or `V`, then `j`/`k`) mark a range (on one side only, as GitHub requires), `Enter` writes a comment, `esc` goes back. The comment joins your pending review on GitHub, which only you see until `R` submits it; a dot marks lines it already covers. |
 | Files changed | `]` / `[` | Next or previous unviewed file |
 | Files changed, Commits | `J` / `K`, `Space` / `b` | Scroll the diff |
 | Files changed, Commits | `m` | Switch the diff renderer |

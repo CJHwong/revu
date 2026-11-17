@@ -2301,6 +2301,15 @@ impl App {
         match key {
             KeyCode::Char('j') | KeyCode::Down => mode.cursor = (mode.cursor + 1).min(last),
             KeyCode::Char('k') | KeyCode::Up => mode.cursor = mode.cursor.saturating_sub(1),
+            // Shift grows a range from where the cursor was, as V then j/k does.
+            KeyCode::Char('J') => {
+                mode.anchor.get_or_insert(mode.cursor);
+                mode.cursor = (mode.cursor + 1).min(last);
+            }
+            KeyCode::Char('K') => {
+                mode.anchor.get_or_insert(mode.cursor);
+                mode.cursor = mode.cursor.saturating_sub(1);
+            }
             KeyCode::Char('g') => mode.cursor = 0,
             KeyCode::Char('G') => mode.cursor = last,
             KeyCode::Char('V') => {
@@ -3402,6 +3411,26 @@ mod tests {
             (vec!["L2".to_string()], Vec::<String>::new())
         );
         assert!(app.label_menu.is_none());
+    }
+
+    #[test]
+    fn shift_j_grows_a_range_in_comment_mode() {
+        let (mut app, pr) = files_tab(vec![file("a.rs", ViewedState::Unviewed)]);
+        if let Screen::Detail(view) = &mut app.screen {
+            view.line_mode = Some(LineMode {
+                path: "a.rs".to_string(),
+                rows: None,
+                cursor: 0,
+                anchor: None,
+                scroll: 0,
+            });
+        }
+        app.set_line_rows(&pr, "a.rs", Ok("@@ -1,0 +1,3 @@\n+a\n+b\n+c\n".to_string()));
+        app.handle_key(key(KeyCode::Char('J')));
+        app.handle_key(key(KeyCode::Char('J')));
+        let mode = view(&app).line_mode.as_ref().unwrap();
+        let target = mode.target().unwrap();
+        assert_eq!((target.start_line, target.line), (Some(1), 3));
     }
 
     #[test]
