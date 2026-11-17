@@ -5,6 +5,7 @@ mod file_tree;
 mod find;
 mod github;
 mod highlight;
+mod line_diff;
 mod markdown;
 mod model;
 mod overview;
@@ -38,6 +39,12 @@ use repo::{CloneLookup, LocalRepo};
 
 /// Results from the fetch threads. Errors are strings because they only get displayed.
 enum Message {
+    /// One file's plain diff, for comment mode.
+    LineDiff {
+        pr: PrRef,
+        path: String,
+        result: Result<String, String>,
+    },
     /// A write to GitHub finished: a review, a line comment, or a discard.
     Written {
         pr: PrRef,
@@ -290,6 +297,7 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
             Message::Detail { pr, result } => app.set_detail(&pr, result.map(|detail| *detail)),
             Message::Files { pr, result } => app.set_files(&pr, result),
             Message::Written { pr, result } => app.set_written(&pr, result),
+            Message::LineDiff { pr, path, result } => app.set_line_rows(&pr, &path, result),
             Message::FilesProgress { pr, loaded, total } => {
                 app.set_files_progress(&pr, loaded, total)
             }
@@ -430,6 +438,19 @@ fn perform(
             github::add_line_comment(&pull_request_id, pending_review.as_deref(), &comment)
                 .map(|_| ())
         }),
+        Action::LineDiff(job) => {
+            let sender = session.sender.clone();
+            thread::spawn(move || {
+                let path = job.paths.last().cloned().unwrap_or_default();
+                let result = repo::file_diff(&job.dir, &job.base, &job.head, &job.paths)
+                    .map_err(|error| format!("{error:#}"));
+                let _ = sender.send(Message::LineDiff {
+                    pr: job.pr,
+                    path,
+                    result,
+                });
+            });
+        }
         Action::DiscardReview { pr, pending_review } => {
             start_write(session, pr, move || github::discard_review(&pending_review))
         }

@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use crate::editor::{Editor, Outcome};
 use crate::file_tree::{self, FileRow};
+use crate::line_diff::{DiffRow, RowKind};
 use crate::markdown::TextRow;
 use crate::repo::{GrepHit, LocalRepo};
 
@@ -91,6 +92,8 @@ pub enum Action {
         pr: PrRef,
         pending_review: String,
     },
+    /// Read one file's plain diff for comment mode.
+    LineDiff(DiffJob),
     CloneRepo {
         pr: PrRef,
         dir: PathBuf,
@@ -314,6 +317,8 @@ pub struct DetailView {
     /// The PR's changed words for the find prompt to complete; None until git returns.
     pub find_words: Option<Vec<String>>,
     find_words_requested: bool,
+    /// Comment mode on Files changed: a line cursor over the file's plain diff.
+    pub line_mode: Option<LineMode>,
     /// n or N moved to another file; the find runs there once its diff is drawn. True
     /// goes to its first match, false to its last.
     find_pending: Option<bool>,
@@ -371,6 +376,7 @@ impl DetailView {
             find_pending: None,
             find_words: None,
             find_words_requested: false,
+            line_mode: None,
         }
     }
 
@@ -461,6 +467,27 @@ impl DetailView {
     }
 
     /// The clone folder and the PR's head commit, once the clone is ready.
+    /// c on Files changed: comment mode for the selected file.
+    fn start_line_mode(&mut self) -> Result<Action, String> {
+        let RepoState::Ready(repo) = &self.repo else {
+            return Err("the local clone is not ready yet".to_string());
+        };
+        let detail = self.loaded().ok_or("the pull request is still loading")?;
+        let key = self.current_diff_key().ok_or("select a file first")?;
+        let DiffTarget::File(path) = key.target.clone() else {
+            return Err("comments go on the files in Files changed".to_string());
+        };
+        let job = diff_job(&self.pr, repo, detail, key);
+        self.line_mode = Some(LineMode {
+            path,
+            rows: None,
+            cursor: 0,
+            anchor: None,
+            scroll: 0,
+        });
+        Ok(Action::LineDiff(job))
+    }
+
     fn head_in_clone(&self) -> Result<(PathBuf, String), String> {
         let RepoState::Ready(repo) = &self.repo else {
             return Err("the local clone is not ready; open Files changed first".to_string());
@@ -1204,6 +1231,55 @@ pub enum PromptKind {
         pr: PrRef,
         dir: PathBuf,
     },
+}
+
+/// Comment mode's state: the file's numbered rows, the cursor, and a range's other end.
+#[derive(Debug)]
+pub struct LineMode {
+    pub path: String,
+    /// `None` while git runs.
+    pub rows: Option<Result<Vec<DiffRow>, String>>,
+    pub cursor: usize,
+    /// V marked this row; the range runs from here to the cursor.
+    pub anchor: Option<usize>,
+    /// The first row drawn.
+    pub scroll: usize,
+}
+
+impl LineMode {
+    /// The rows the cursor and the range cover, first to last.
+    pub fn marked(&self) -> (usize, usize) {
+        let anchor = self.anchor.unwrap_or(self.cursor);
+        (anchor.min(self.cursor), anchor.max(self.cursor))
+    }
+
+    /// Where a comment on the marked rows goes. GitHub takes a range on one side only.
+    fn target(&self) -> Result<LineTarget, String> {
+        let Some(Ok(rows)) = &self.rows else {
+            return Err("the diff is still loading".to_string());
+        };
+        let (first, last) = self.marked();
+        let targets: Vec<(Side, u64)> = rows[first..=last]
+            .iter()
+            .filter_map(DiffRow::target)
+            .collect();
+        let (Some(&(side, start)), Some(&(end_side, end))) = (targets.first(), targets.last())
+        else {
+            return Err("a hunk header takes no comment; move to a line".to_string());
+        };
+        if targets.iter().any(|(row_side, _)| *row_side != side) || end_side != side {
+            return Err(
+                "a range must stay on one side: only removed lines, or only new and unchanged ones"
+                    .to_string(),
+            );
+        }
+        Ok(LineTarget {
+            path: self.path.clone(),
+            side,
+            line: end,
+            start_line: (start != end).then_some(start),
+        })
+    }
 }
 
 /// Where a line comment goes.
@@ -2120,6 +2196,75 @@ impl App {
         }
     }
 
+    /// Comment mode: j/k move, V starts or ends a range, enter writes the comment, and
+    /// esc or c goes back to the diff.
+    fn line_mode_key(&mut self, key: KeyCode) -> Option<Action> {
+        let Screen::Detail(view) = &mut self.screen else {
+            return None;
+        };
+        let mode = view.line_mode.as_mut()?;
+        let last = match &mode.rows {
+            Some(Ok(rows)) => rows.len().saturating_sub(1),
+            _ => 0,
+        };
+        match key {
+            KeyCode::Char('j') | KeyCode::Down => mode.cursor = (mode.cursor + 1).min(last),
+            KeyCode::Char('k') | KeyCode::Up => mode.cursor = mode.cursor.saturating_sub(1),
+            KeyCode::Char('g') => mode.cursor = 0,
+            KeyCode::Char('G') => mode.cursor = last,
+            KeyCode::Char('V') => {
+                mode.anchor = match mode.anchor {
+                    Some(_) => None,
+                    None => Some(mode.cursor),
+                }
+            }
+            KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('q') => view.line_mode = None,
+            KeyCode::Enter => {
+                let result = self.open_line_comment();
+                self.error = result.err();
+            }
+            KeyCode::Char('R') => {
+                let result = self.open_review();
+                self.error = result.err();
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// Enter in comment mode: a box for the line, or the range V marked.
+    fn open_line_comment(&mut self) -> Result<(), String> {
+        let Screen::Detail(view) = &self.screen else {
+            return Ok(());
+        };
+        let mode = view.line_mode.as_ref().ok_or("not in comment mode")?;
+        let target = mode.target()?;
+        let (Some(Ok(detail)), Some(Ok(activity))) = (&view.detail, &view.activity) else {
+            return Err("wait for the PR to load before commenting".to_string());
+        };
+        let kind = ComposeKind::LineComment(target);
+        self.composer = Some(Composer::new(view.pr.clone(), detail, activity, kind));
+        Ok(())
+    }
+
+    pub fn set_line_rows(&mut self, pr: &PrRef, path: &str, result: Result<String, String>) {
+        let Some(view) = self.view_for(pr) else {
+            return;
+        };
+        let Some(mode) = view.line_mode.as_mut().filter(|mode| mode.path == path) else {
+            return;
+        };
+        let rows = result.map(|diff| crate::line_diff::parse(&diff));
+        // Start on the first changed line, where a comment usually goes.
+        let changed = |row: &DiffRow| matches!(row.kind, RowKind::Added | RowKind::Removed);
+        mode.cursor = rows
+            .as_ref()
+            .ok()
+            .and_then(|rows| rows.iter().position(changed))
+            .unwrap_or(0);
+        mode.rows = Some(rows);
+    }
+
     /// R: a review of the open PR, carrying the pending line comments.
     fn open_review(&mut self) -> Result<(), String> {
         let Screen::Detail(view) = &self.screen else {
@@ -2245,7 +2390,14 @@ impl App {
             self.error = result.err();
             return None;
         }
+        if view.line_mode.is_some() {
+            return self.line_mode_key(key);
+        }
         match key {
+            KeyCode::Char('c') if view.tab == Tab::Files => {
+                let result = view.start_line_mode();
+                return self.report(result.map(Some));
+            }
             KeyCode::Char('R') => {
                 let result = self.open_review();
                 self.error = result.err();
@@ -3066,6 +3218,37 @@ mod tests {
 
     fn ctrl(character: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn comment_mode_targets_a_line_or_a_one_sided_range() {
+        let diff = "@@ -1,2 +1,2 @@\n keep\n-old\n+new\n";
+        let mut mode = LineMode {
+            path: "a.rs".to_string(),
+            rows: Some(Ok(crate::line_diff::parse(diff))),
+            cursor: 3,
+            anchor: None,
+            scroll: 0,
+        };
+        let target = mode.target().unwrap();
+        assert_eq!(
+            (target.side, target.line, target.start_line),
+            (Side::Right, 2, None)
+        );
+        mode.anchor = Some(1);
+        assert!(
+            mode.target().unwrap_err().contains("one side"),
+            "keep, old, new mixes sides"
+        );
+        mode.cursor = 1;
+        mode.anchor = None;
+        assert_eq!(
+            mode.target().unwrap().line,
+            1,
+            "an unchanged line takes a comment"
+        );
+        mode.cursor = 0;
+        assert!(mode.target().is_err(), "the hunk header takes none");
     }
 
     #[test]

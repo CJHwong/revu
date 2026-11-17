@@ -14,6 +14,7 @@ use crate::app::{
 };
 use crate::editor::Editor;
 use crate::file_tree::FileRow;
+use crate::line_diff::RowKind;
 use crate::model::{
     ChangedFile, CheckLine, CheckState, CheckSummary, CommitLine, Group, Label, Lifecycle,
     PrActivity, PrDetail, PrRef, PrSummary, RateLimit, ReviewState, Reviewer, Side, SinceCounts,
@@ -421,7 +422,7 @@ fn detail_help(tab: Tab) -> &'static str {
             "j/k commit | J/K scroll diff | m renderer | / find | o browser | h back | ? keys"
         }
         Tab::Files => {
-            "j/k file | enter whole file | v viewed | ]/[ unviewed | t tree | z list | m renderer | h back | ? keys"
+            "j/k file | enter whole file | c comment | v viewed | ]/[ unviewed | t tree | z list | m renderer | h back | ? keys"
         }
     }
 }
@@ -490,6 +491,10 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
             ("v, V", "toggle Viewed (syncs to GitHub), hide viewed files"),
             ("], [", "next or previous unviewed file"),
             ("t, z", "tree or flat list, hide or show the list"),
+            (
+                "c",
+                "comment mode: j/k pick a line, V a range, enter writes a comment into your pending review",
+            ),
         ],
     ),
     (
@@ -894,6 +899,10 @@ fn render_diff_pane(
     renderer_names: &[String],
     paint: Paint,
 ) {
+    if view.line_mode.is_some() {
+        render_line_mode(frame, view, area, paint);
+        return;
+    }
     let theme = paint.theme;
     let renderer = renderer_names
         .get(view.renderer)
@@ -970,6 +979,105 @@ fn render_diff_pane(
         },
     };
     frame.render_widget(content, inner);
+}
+
+/// Comment mode: the file's plain diff with old and new line numbers, the cursor and
+/// the range V marked, and a dot on lines your pending review already comments on.
+fn render_line_mode(frame: &mut Frame, view: &mut DetailView, area: Rect, paint: Paint) {
+    let theme = paint.theme;
+    let drafts: Vec<(Side, u64, u64)> = match (&view.activity, &view.line_mode) {
+        (Some(Ok(activity)), Some(mode)) => activity
+            .drafts
+            .iter()
+            .filter(|draft| draft.path == mode.path)
+            .map(|draft| {
+                (
+                    draft.side,
+                    draft.start_line.unwrap_or(draft.line),
+                    draft.line,
+                )
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let Some(mode) = view.line_mode.as_mut() else {
+        return;
+    };
+    let block = Block::new()
+        .borders(Borders::LEFT)
+        .border_style(Style::new().fg(theme.accent))
+        .title(paint.bold(" comment mode ", theme.accent))
+        .title(paint.span(
+            "j/k move, V range, enter comment, R review, esc back ",
+            theme.muted,
+        ))
+        .title(
+            paint
+                .bold(format!(" {} ", mode.path), theme.foreground)
+                .into_right_aligned_line(),
+        );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let rows = match &mode.rows {
+        None => {
+            frame.render_widget(
+                Paragraph::new(paint.span(" reading the diff...", theme.warning)),
+                inner,
+            );
+            return;
+        }
+        Some(Err(error)) => {
+            let text = Paragraph::new(paint.span(format!(" {error}"), theme.danger))
+                .wrap(Wrap { trim: false });
+            frame.render_widget(text, inner);
+            return;
+        }
+        Some(Ok(rows)) => rows,
+    };
+    let height = usize::from(inner.height.max(1));
+    mode.scroll = mode
+        .scroll
+        .min(mode.cursor)
+        .max((mode.cursor + 1).saturating_sub(height));
+    let (first, last) = mode.marked();
+    let number = |line: Option<u64>| line.map_or("     ".to_string(), |line| format!("{line:>5}"));
+    let lines: Vec<Line> = rows
+        .iter()
+        .enumerate()
+        .skip(mode.scroll)
+        .take(height)
+        .map(|(index, row)| {
+            let commented = row.target().is_some_and(|(side, line)| {
+                drafts.iter().any(|&(draft_side, start, end)| {
+                    draft_side == side && (start..=end).contains(&line)
+                })
+            });
+            let mark = match (index == mode.cursor, commented) {
+                (true, _) => paint.bold("›", theme.accent),
+                (false, true) => paint.span("●", theme.accent),
+                (false, false) => Span::raw(" "),
+            };
+            let (sign, color) = match row.kind {
+                RowKind::Added => ("+", theme.success),
+                RowKind::Removed => ("-", theme.danger),
+                RowKind::Context => (" ", theme.foreground),
+                RowKind::Hunk | RowKind::Note => ("", theme.heading),
+            };
+            let line = Line::from(vec![
+                mark,
+                paint.span(
+                    format!("{} {} ", number(row.old), number(row.new)),
+                    theme.muted,
+                ),
+                paint.span(format!("{sign}{}", row.text), color),
+            ]);
+            match (first..=last).contains(&index) {
+                true => line.style(Style::new().bg(theme.selection)),
+                false => line,
+            }
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// " /query  2 of 5 lines ", at the right of the diff pane's title, so the find text and
