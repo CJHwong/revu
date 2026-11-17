@@ -4,8 +4,9 @@
 use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
 use std::fs;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 /// Where the PR's commits are kept in the user's clone. Nothing else writes here.
 const REF_NAMESPACE: &str = "refs/rs-github-inbox/pr";
@@ -180,6 +181,8 @@ pub struct GrepHit {
 pub const MAX_GREP_HITS: usize = 1000;
 
 /// Searches every file at `commit`, case-insensitive and literal, without a checkout.
+/// Reads the output as it streams and stops git at `MAX_GREP_HITS`, so a common word
+/// in a large repo does not buffer hundreds of megabytes.
 pub fn grep(dir: &Path, commit: &str, query: &str) -> Result<Vec<GrepHit>> {
     let args = [
         "grep",
@@ -193,29 +196,50 @@ pub fn grep(dir: &Path, commit: &str, query: &str) -> Result<Vec<GrepHit>> {
         query,
         commit,
     ];
-    let output = git(dir, &args)?;
-    // git grep exits 1 when nothing matches, which is a result, not a failure.
-    if output.status.code() == Some(1) && output.stderr.is_empty() {
-        return Ok(Vec::new());
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("run git grep")?;
+    let stdout = child.stdout.take().context("read git grep output")?;
+    let prefix = format!("{commit}:");
+    let mut hits = Vec::new();
+    for record in BufReader::new(stdout).split(b'\n') {
+        hits.extend(parse_grep_record(
+            &record.context("read git grep output")?,
+            &prefix,
+        ));
+        if hits.len() == MAX_GREP_HITS {
+            // Enough to show; git's exit status no longer matters.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(hits);
+        }
     }
-    ensure_success(&output, "git grep")?;
-    Ok(parse_grep(&output.stdout, commit))
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        pipe.read_to_string(&mut stderr)
+            .context("read git grep errors")?;
+    }
+    let status = child.wait().context("wait for git grep")?;
+    // git grep exits 1 when nothing matches, which is a result, not a failure.
+    if status.success() || (status.code() == Some(1) && stderr.is_empty()) {
+        return Ok(hits);
+    }
+    bail!("git grep failed ({status}): {}", stderr.trim())
 }
 
-/// Parses `git grep -n -z <commit>` output: `<commit>:<path>\0<line>\0<text>` per line.
-pub fn parse_grep(output: &[u8], commit: &str) -> Vec<GrepHit> {
-    let prefix = format!("{commit}:");
-    String::from_utf8_lossy(output)
-        .lines()
-        .filter_map(|record| {
-            let mut fields = record.splitn(3, '\0');
-            let path = fields.next()?.strip_prefix(&prefix)?.to_string();
-            let line = fields.next()?.parse().ok()?;
-            let text = fields.next().unwrap_or_default().to_string();
-            Some(GrepHit { path, line, text })
-        })
-        .take(MAX_GREP_HITS)
-        .collect()
+/// Parses one `git grep -n -z <commit>` record: `<commit>:<path>\0<line>\0<text>`.
+pub fn parse_grep_record(record: &[u8], prefix: &str) -> Option<GrepHit> {
+    let record = String::from_utf8_lossy(record);
+    let mut fields = record.splitn(3, '\0');
+    let path = fields.next()?.strip_prefix(prefix)?.to_string();
+    let line = fields.next()?.parse().ok()?;
+    let text = fields.next().unwrap_or_default().to_string();
+    Some(GrepHit { path, line, text })
 }
 
 /// The file's full text at `commit`, for reading code the diff does not show.
@@ -360,24 +384,23 @@ mod tests {
     }
 
     #[test]
-    fn grep_output_splits_on_nul_and_keeps_colons_in_text() {
-        let output = b"abc:src/a.rs\x0012\x00let x: u8 = 1;\nabc:docs/b.md\x003\x00- a: b\n";
-        let hits = parse_grep(output, "abc");
-        assert_eq!(
-            hits,
-            [
-                GrepHit {
-                    path: "src/a.rs".to_string(),
-                    line: 12,
-                    text: "let x: u8 = 1;".to_string()
-                },
-                GrepHit {
-                    path: "docs/b.md".to_string(),
-                    line: 3,
-                    text: "- a: b".to_string()
-                },
-            ]
-        );
+    fn grep_record_splits_on_nul_and_keeps_colons_in_text() {
+        let hit = parse_grep_record(b"abc:src/a.rs\x0012\x00let x: u8 = 1;", "abc:");
+        let expected = GrepHit {
+            path: "src/a.rs".to_string(),
+            line: 12,
+            text: "let x: u8 = 1;".to_string(),
+        };
+        assert_eq!(hit, Some(expected));
+        assert_eq!(parse_grep_record(b"other:src/a.rs\x001\x00x", "abc:"), None);
+    }
+
+    #[test]
+    fn grep_stops_at_the_hit_limit() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let head = String::from_utf8(git(dir, &["rev-parse", "HEAD"]).unwrap().stdout).unwrap();
+        // An empty pattern matches every line, far more than the limit.
+        assert_eq!(grep(dir, head.trim(), "").unwrap().len(), MAX_GREP_HITS);
     }
 
     #[test]
@@ -394,6 +417,50 @@ mod tests {
             show_file(dir, head, "Cargo.toml")
                 .unwrap()
                 .contains("[package]")
+        );
+    }
+
+    #[test]
+    fn the_word_renderer_diffs_a_path_with_a_space_and_a_quote() {
+        let dir =
+            std::env::temp_dir().join(format!("rs-github-inbox-quote-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = "docs/it's a file.md";
+        fs::create_dir_all(dir.join("docs")).unwrap();
+        let run = |args: &[&str]| {
+            let output = git(&dir, args).unwrap();
+            ensure_success(&output, "git").unwrap();
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        run(&["init", "-q"]);
+        let commit = [
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+        ];
+        fs::write(dir.join(path), "the old words\n").unwrap();
+        run(&["add", "."]);
+        run(&[&commit[..], &["commit", "-q", "-m", "one"]].concat());
+        let base = run(&["rev-parse", "HEAD"]);
+        fs::write(dir.join(path), "the new words\n").unwrap();
+        run(&[&commit[..], &["commit", "-q", "-am", "two"]].concat());
+        let head = run(&["rev-parse", "HEAD"]);
+
+        let template = "git diff --word-diff=plain {base}...{head} -- {paths}";
+        let values = [
+            ("base", shell_quote(&base)),
+            ("head", shell_quote(&head)),
+            ("paths", shell_quote(path)),
+        ];
+        let output = run_renderer(&dir, &fill_template(template, &values)).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("[-old-]{+new+}")
         );
     }
 }

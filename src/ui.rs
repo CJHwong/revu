@@ -303,22 +303,10 @@ fn render_overlay(frame: &mut Frame, overlay: &mut Overlay, area: Rect, paint: P
             let (title, items) = match hits {
                 None => (format!(" searching for \"{query}\"... "), Vec::new()),
                 Some(Err(error)) => (format!(" {error} "), Vec::new()),
-                Some(Ok(hits)) => {
-                    let capped = if hits.len() == MAX_GREP_HITS {
-                        "the first "
-                    } else {
-                        ""
-                    };
-                    let title = format!(
-                        " {capped}{} matches for \"{query}\" at the PR head ",
-                        hits.len()
-                    );
-                    let items = hits
-                        .iter()
-                        .map(|hit| grep_item(hit, width, paint))
-                        .collect();
-                    (title, items)
-                }
+                Some(Ok(hits)) => (
+                    search_title(query, hits.len()),
+                    grep_items(hits, width, paint),
+                ),
             };
             let list = List::new(items)
                 .highlight_style(Style::new().bg(theme.selection))
@@ -345,6 +333,21 @@ fn render_overlay(frame: &mut Frame, overlay: &mut Overlay, area: Rect, paint: P
             frame.render_widget(Paragraph::new(text), inner);
         }
     }
+}
+
+fn search_title(query: &str, count: usize) -> String {
+    let capped = if count == MAX_GREP_HITS {
+        "the first "
+    } else {
+        ""
+    };
+    format!(" {capped}{count} matches for \"{query}\" at the PR head ")
+}
+
+fn grep_items(hits: &[GrepHit], width: usize, paint: Paint) -> Vec<ListItem<'static>> {
+    hits.iter()
+        .map(|hit| grep_item(hit, width, paint))
+        .collect()
 }
 
 /// "src/app.rs:12  let x = 1;", the location in accent and the code as found.

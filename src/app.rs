@@ -253,6 +253,9 @@ impl DetailView {
     }
 
     fn search(&mut self, query: String) -> Result<Action, String> {
+        if query.trim().is_empty() {
+            return Err("type some text to search for".to_string());
+        }
         let (dir, commit) = self.head_in_clone()?;
         let state = ListState::default().with_selected(Some(0));
         self.overlays.push(Overlay::Search {
@@ -858,16 +861,22 @@ impl App {
         }
     }
 
+    /// Shows a failed step's error in the footer.
+    fn report(&mut self, result: Result<Option<Action>, String>) -> Option<Action> {
+        result.unwrap_or_else(|error| {
+            self.error = Some(error);
+            None
+        })
+    }
+
     /// Runs a step on the open PR, and shows its error in the footer.
     fn in_view(
         &mut self,
         step: impl FnOnce(&mut DetailView) -> Result<Option<Action>, String>,
     ) -> Option<Action> {
         let view = self.open_view()?;
-        step(view).unwrap_or_else(|error| {
-            self.error = Some(error);
-            None
-        })
+        let result = step(view);
+        self.report(result)
     }
 
     fn submit_clone(&mut self, pr: PrRef, dir: PathBuf, answer: &str) -> Option<Action> {
@@ -927,10 +936,8 @@ impl App {
         // An error stays in the footer until the next key.
         self.error = None;
         if !view.overlays.is_empty() {
-            return view.overlay_key(key).unwrap_or_else(|error| {
-                self.error = Some(error);
-                None
-            });
+            let result = view.overlay_key(key);
+            return self.report(result);
         }
         let find_result = match key {
             KeyCode::Char('n') if diff_pane => Some(view.find_in_diff(true, true)),
@@ -958,13 +965,8 @@ impl App {
                 let path = view
                     .loaded_files()
                     .and_then(|files| Some(files.get(view.selected_file()?)?.path.clone()));
-                return view.open_file(path?, 0).map_or_else(
-                    |error| {
-                        self.error = Some(error);
-                        None
-                    },
-                    Some,
-                );
+                let result = view.open_file(path?, 0).map(Some);
+                return self.report(result);
             }
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Left => {
                 self.screen = Screen::Inbox;
@@ -1445,6 +1447,17 @@ mod tests {
         for character in text.chars() {
             app.handle_key(key(KeyCode::Char(character)));
         }
+    }
+
+    #[test]
+    fn an_empty_search_runs_nothing() {
+        let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        ready_repo(&mut app, &pr);
+        app.handle_key(key(KeyCode::Char('s')));
+        type_text(&mut app, "  ");
+        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
+        assert!(view(&app).overlays.is_empty());
+        assert_eq!(app.error.as_deref(), Some("type some text to search for"));
     }
 
     #[test]
