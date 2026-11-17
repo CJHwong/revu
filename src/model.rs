@@ -1630,6 +1630,52 @@ pub mod tests {
     }
 
     #[test]
+    fn your_pending_review_is_drafts_not_conversation() {
+        let mut activity = activity_fixture();
+        let pending = json!({ "__typename": "PullRequestReview", "id": "P1",
+            "author": { "__typename": "User", "login": "me" }, "viewerDidAuthor": true,
+            "state": "PENDING", "submittedAt": null, "createdAt": "2026-11-15T09:00:00Z", "body": "" });
+        activity["timelineItems"]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(pending);
+        let thread = json!({ "isResolved": false, "path": "c.md", "line": 9, "originalLine": 9,
+            "startLine": 7, "originalStartLine": 7, "diffSide": "LEFT",
+            "comments": { "nodes": [{ "pullRequestReview": { "id": "P1", "state": "PENDING" },
+                "author": { "__typename": "User", "login": "me" },
+                "createdAt": "2026-11-15T09:00:00Z", "body": "Draft note" }] } });
+        activity["reviewThreads"]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(thread);
+        activity["pendingReviews"] = json!({ "nodes": [{ "id": "P1" }] });
+        let parsed = parse_activity(&activity).unwrap();
+        assert_eq!(
+            (parsed.threads_total, parsed.threads_unresolved),
+            (2, 1),
+            "drafts are not counted"
+        );
+        assert_eq!(parsed.pending_review.as_deref(), Some("P1"));
+        assert_eq!(
+            parsed.drafts,
+            [Draft {
+                path: "c.md".to_string(),
+                side: Side::Left,
+                line: 9,
+                start_line: Some(7),
+                body: "Draft note".to_string(),
+            }]
+        );
+        assert!(
+            parsed
+                .timeline
+                .iter()
+                .all(|comment| comment.author.login != "me"),
+            "no pending review in the conversation"
+        );
+    }
+
+    #[test]
     fn activity_sorts_checks_failing_first() {
         let states: Vec<_> = sample_activity()
             .checks

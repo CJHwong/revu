@@ -2167,6 +2167,11 @@ impl App {
             composer.editor.insert(text);
             return;
         }
+        if let Some(menu) = self.label_menu.as_mut() {
+            menu.filter.push_str(text.trim());
+            menu.selected = 0;
+            return;
+        }
         let prompt = self.prompt.get_or_insert_with(Prompt::default);
         prompt.text.push_str(text.trim());
         prompt.error = None;
