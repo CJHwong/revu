@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use app::{Action, App, DiffJob, DiffKey, PromptKind, RepoJob, RepoState};
 use config::Config;
@@ -156,54 +156,78 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App, session: &mut Session) -> 
         terminal.draw(|frame| ui::render(frame, app, &session.config.theme, Utc::now()))?;
         apply_messages(app, &session.receiver);
         dispatch_requests(app, session);
-        let key = match next_input()? {
-            None => continue,
-            Some(Input::Paste(text)) => {
-                app.handle_paste(&text);
-                continue;
+        let mut input = next_input(Duration::from_millis(100))?;
+        // Every input already waiting is handled before the next draw, so a long wheel
+        // fling costs a few frames, not one per event. The time cap keeps the screen
+        // moving while events still stream in.
+        let started = Instant::now();
+        while let Some(current) = input {
+            if !handle_input(current, terminal, app, session)? {
+                return Ok(());
             }
-            Some(Input::Scroll(column, delta)) => {
-                app.handle_scroll(column, delta);
-                continue;
+            if started.elapsed() > Duration::from_millis(30) {
+                break;
             }
-            Some(Input::Click(column, row)) => {
-                let Some(action) = app.handle_click(column, row) else {
-                    continue;
-                };
-                if !perform(action, terminal, app, session)? {
-                    return Ok(());
-                }
-                continue;
-            }
-            Some(Input::Key(key)) => key,
-        };
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            return Ok(());
-        }
-        let Some(action) = app.handle_key(key) else {
-            continue;
-        };
-        if !perform(action, terminal, app, session)? {
-            return Ok(());
+            input = next_input(Duration::ZERO)?;
         }
     }
 }
 
-/// Waits briefly so fetch results still redraw when no key arrives.
-fn next_input() -> Result<Option<Input>> {
-    if !event::poll(Duration::from_millis(100))? {
-        return Ok(None);
+/// Does what one input asks. Returns false when the app should quit.
+fn handle_input(
+    input: Input,
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    session: &mut Session,
+) -> Result<bool> {
+    let action = match input {
+        Input::Paste(text) => {
+            app.handle_paste(&text);
+            None
+        }
+        Input::Scroll(column, delta) => {
+            app.handle_scroll(column, delta);
+            None
+        }
+        Input::Click(column, row) => app.handle_click(column, row),
+        Input::Key(key)
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            return Ok(false);
+        }
+        Input::Key(key) => app.handle_key(key),
+    };
+    match action {
+        Some(action) => perform(action, terminal, app, session),
+        None => Ok(true),
     }
-    match event::read()? {
-        Event::Key(key) if key.kind == KeyEventKind::Press => Ok(Some(Input::Key(key))),
-        Event::Paste(text) => Ok(Some(Input::Paste(text))),
-        Event::Mouse(mouse) => Ok(match mouse.kind {
+}
+
+/// Waits up to `wait` for an input; a short wait lets fetch results redraw when no key
+/// arrives.
+/// Events the app does not use, such as a mouse move, are skipped; after one, the
+/// wait drops to zero, so a resize still redraws at once.
+fn next_input(mut wait: Duration) -> Result<Option<Input>> {
+    while event::poll(wait)? {
+        if let Some(input) = to_input(event::read()?) {
+            return Ok(Some(input));
+        }
+        wait = Duration::ZERO;
+    }
+    Ok(None)
+}
+
+fn to_input(event: Event) -> Option<Input> {
+    match event {
+        Event::Key(key) if key.kind == KeyEventKind::Press => Some(Input::Key(key)),
+        Event::Paste(text) => Some(Input::Paste(text)),
+        Event::Mouse(mouse) => match mouse.kind {
             MouseEventKind::ScrollDown => Some(Input::Scroll(mouse.column, 1)),
             MouseEventKind::ScrollUp => Some(Input::Scroll(mouse.column, -1)),
             MouseEventKind::Down(MouseButton::Left) => Some(Input::Click(mouse.column, mouse.row)),
             _ => None,
-        }),
-        _ => Ok(None),
+        },
+        _ => None,
     }
 }
 
