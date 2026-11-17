@@ -16,16 +16,16 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            runner: macos-14
+            runner: macos-latest
           - target: x86_64-apple-darwin
-            runner: macos-14
+            runner: macos-latest
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-24.04
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install the Rust target
         run: rustup target add ${{ matrix.target }}
       - name: Install musl
@@ -39,7 +39,7 @@ jobs:
           cp target/${{ matrix.target }}/release/revu .
           tar -czf "$archive" revu LICENSE README.md
           echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ env.ARCHIVE }}
           path: ${{ env.ARCHIVE }}
@@ -48,8 +48,8 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -60,7 +60,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: checksums
           path: dist/checksums.txt
@@ -75,9 +75,9 @@ jobs:
       - name: Check for the tap token
         if: env.TAP_TOKEN == ''
         run: echo "::warning::HOMEBREW_TAP_TOKEN is not set, so the Homebrew formula was not updated."
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: env.TAP_TOKEN != ''
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         if: env.TAP_TOKEN != ''
         with:
           name: checksums
