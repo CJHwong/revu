@@ -15,6 +15,8 @@ pub struct Theme {
     pub success: Color,
     pub warning: Color,
     pub danger: Color,
+    /// Background of a `<details>` summary bar.
+    pub fold: Color,
 }
 
 pub const THEME_NAMES: [&str; 2] = ["dracula", "terminal"];
@@ -30,6 +32,7 @@ const DRACULA: Theme = Theme {
     success: Color::Rgb(0x50, 0xfa, 0x7b),
     warning: Color::Rgb(0xf1, 0xfa, 0x8c),
     danger: Color::Rgb(0xff, 0x55, 0x55),
+    fold: Color::Rgb(0xbd, 0x93, 0xf9),
 };
 
 /// Uses the terminal's own palette and background.
@@ -43,6 +46,7 @@ const TERMINAL: Theme = Theme {
     success: Color::Green,
     warning: Color::Yellow,
     danger: Color::Red,
+    fold: Color::Magenta,
 };
 
 pub fn by_name(name: &str) -> Result<Theme> {

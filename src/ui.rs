@@ -1,20 +1,22 @@
 use chrono::{DateTime, Utc};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::{
-    App, DetailView, DiffOutput, Overlay, Prompt, PromptKind, RepoState, Row, Screen, Tab,
+    App, DetailView, DiffOutput, Overlay, OverviewLayout, Prompt, PromptKind, RepoState, Row,
+    Screen, Tab,
 };
 use crate::model::{
-    ChangedFile, CheckLine, CheckState, CheckSummary, Group, PrActivity, PrDetail, PrRef,
+    ChangedFile, CheckLine, CheckState, CheckSummary, Group, Label, PrActivity, PrDetail, PrRef,
     PrSummary, ReviewState, ViewedState,
 };
 use crate::repo::{GrepHit, MAX_GREP_HITS};
 use crate::theme::Theme;
+use crate::{markdown, overview};
 
 const INBOX_HELP: &str = "j/k move | enter open | space fold | o browser | d diff | r refresh | ctrl-l open link | q quit";
 
@@ -224,7 +226,7 @@ fn pad_span(span: Span<'static>, width: usize) -> Span<'static> {
 fn detail_help(tab: Tab) -> &'static str {
     match tab {
         Tab::Overview => {
-            "tab/1-4 switch | j/k scroll | o browser | d diff | r reload | ctrl-l open link | esc back"
+            "j/k move | enter fold | ]/[ next/prev card | space/b page | o browser | r reload | esc back"
         }
         Tab::Checks => {
             "tab/1-4 switch | j/k move | enter/o browser | d diff | r reload | ctrl-l open link | esc back"
@@ -248,7 +250,7 @@ fn render_detail(
     let theme = paint.theme;
     let [top, tabs, body, bottom] = Layout::vertical([
         Constraint::Length(3),
-        Constraint::Length(1),
+        Constraint::Length(2),
         Constraint::Min(0),
         Constraint::Length(1),
     ])
@@ -273,13 +275,17 @@ fn render_detail(
         return;
     };
     frame.render_widget(Paragraph::new(detail_header(detail, paint)), top);
-    frame.render_widget(Paragraph::new(tab_bar(view.tab, detail, paint)), tabs);
+    let tab_lines = vec![
+        tab_bar(view.tab, detail, paint),
+        tab_rule(tabs.width, paint),
+    ];
+    frame.render_widget(Paragraph::new(tab_lines), tabs);
     if let Some(overlay) = view.overlays.last_mut() {
         render_overlay(frame, overlay, body, paint);
         return;
     }
     match view.tab {
-        Tab::Overview => render_overview(frame, detail, view.scroll, body, paint),
+        Tab::Overview => render_overview(frame, view, body, paint),
         Tab::Checks => match &view.activity {
             Some(Ok(activity)) => render_checks(frame, activity, &mut view.checks, body, paint),
             other => render_activity_state(frame, other.as_ref(), body, paint),
@@ -557,35 +563,38 @@ fn detail_title(pr: &PrRef, paint: Paint) -> Text<'static> {
     ])
 }
 
+/// Title, then a GitHub-style state pill with the branches and the size of the change.
 fn detail_header(detail: &PrDetail, paint: Paint) -> Text<'static> {
     let theme = paint.theme;
     let pr = &detail.summary;
-    let state = if pr.is_draft {
-        paint.span("Draft", theme.muted)
+    let (state, state_color) = if pr.is_draft {
+        (" Draft ", theme.muted)
     } else {
-        paint.span("Open", theme.success)
+        (" Open ", theme.success)
     };
-    let opened = format!(
-        " by {}, opened {}. {} ← {}. ",
-        pr.author,
-        relative_time(detail.created_at, paint.now),
-        detail.base,
-        detail.head
-    );
+    let pill = Style::new()
+        .fg(theme.background)
+        .bg(state_color)
+        .add_modifier(Modifier::BOLD);
+    let branch = Style::new().fg(theme.accent).bg(theme.selection);
     Text::from(vec![
         Line::from(vec![
-            paint.bold(format!("{}  ", pr.title), theme.foreground),
+            paint.bold(format!(" {}  ", pr.title), theme.foreground),
             paint.span(format!("#{}", pr.number), theme.muted),
         ]),
         Line::from(vec![
-            state,
-            Span::from(opened),
-            paint.span(format!("+{}", detail.additions), theme.success),
-            Span::from(" "),
-            paint.span(format!("-{}", detail.deletions), theme.danger),
-            Span::from(format!(" in {} files", detail.changed_files)),
+            Span::raw(" "),
+            Span::styled(state, pill),
+            paint.bold(format!(" {}", pr.author), theme.foreground),
+            paint.span(" wants to merge into ", theme.muted),
+            Span::styled(format!(" {} ", detail.base), branch),
+            paint.span(" from ", theme.muted),
+            Span::styled(format!(" {} ", detail.head), branch),
+            paint.span(format!("   +{}", detail.additions), theme.success),
+            paint.span(format!(" -{}", detail.deletions), theme.danger),
+            paint.span(format!(" in {} files", detail.changed_files), theme.muted),
         ]),
-        Line::from(paint.span(pr.repo.clone(), theme.muted)),
+        Line::from(paint.span(format!(" {}", pr.repo), theme.muted)),
     ])
 }
 
@@ -607,7 +616,7 @@ fn tab_bar(current: Tab, detail: &PrDetail, paint: Paint) -> Line<'static> {
             let style = Style::new()
                 .fg(theme.heading)
                 .bg(theme.selection)
-                .add_modifier(Modifier::BOLD);
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
             Span::styled(label, style)
         } else {
             paint.span(label, theme.muted)
@@ -616,19 +625,122 @@ fn tab_bar(current: Tab, detail: &PrDetail, paint: Paint) -> Line<'static> {
     Line::from(spans.collect::<Vec<_>>())
 }
 
-fn render_overview(frame: &mut Frame, detail: &PrDetail, scroll: u16, area: Rect, paint: Paint) {
-    let [description, sidebar] =
-        Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)]).areas(area);
-    render_description(frame, detail, scroll, description, paint);
+fn tab_rule(width: u16, paint: Paint) -> Line<'static> {
+    paint
+        .span("─".repeat(width as usize), paint.theme.selection)
+        .into()
+}
+
+/// The sidebar shows when the terminal is wide enough to keep the main column readable.
+const SIDEBAR_WIDTH: u16 = 32;
+const SIDEBAR_MIN_TOTAL: u16 = 110;
+
+fn render_overview(frame: &mut Frame, view: &mut DetailView, area: Rect, paint: Paint) {
+    let sidebar_width = if area.width >= SIDEBAR_MIN_TOTAL {
+        SIDEBAR_WIDTH
+    } else {
+        0
+    };
+    let [main, sidebar] =
+        Layout::horizontal([Constraint::Min(20), Constraint::Length(sidebar_width)]).areas(area);
+    let main = main.inner(Margin {
+        horizontal: 1,
+        vertical: 0,
+    });
+    let DetailView {
+        detail: Some(Ok(detail)),
+        activity,
+        open_folds,
+        overview: layout,
+        cursor,
+        scroll,
+        page,
+        ..
+    } = view
+    else {
+        return;
+    };
+    let width = main.width as usize;
+    if layout.as_ref().map(|layout| layout.width) != Some(width) {
+        let context = overview::Context {
+            detail,
+            activity: activity.as_ref(),
+            open: open_folds,
+            theme: paint.theme,
+            now: paint.now,
+        };
+        *layout = Some(OverviewLayout {
+            width,
+            rows: overview::build(&context, width),
+        });
+    }
+    let Some(layout) = layout.as_ref() else {
+        return;
+    };
+    let height = main.height as usize;
+    *page = height;
+    *cursor = (*cursor).min(layout.rows.len().saturating_sub(1));
+    *scroll = keep_visible(*scroll, *cursor, height, layout.rows.len());
+    let lines: Vec<Line> = layout
+        .rows
+        .iter()
+        .enumerate()
+        .skip(*scroll)
+        .take(height)
+        .map(|(index, row)| {
+            if index == *cursor {
+                highlight(row, width, paint.theme)
+            } else {
+                row.line.clone()
+            }
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), main);
+    if sidebar_width > 0 {
+        render_sidebar(frame, detail, sidebar, paint);
+    }
+}
+
+/// Scrolls only as far as needed to keep a few rows around the cursor in view.
+fn keep_visible(scroll: usize, cursor: usize, height: usize, total: usize) -> usize {
+    let margin = 3.min(height / 4);
+    let low = (cursor + margin + 1).saturating_sub(height);
+    let high = cursor.saturating_sub(margin);
+    scroll
+        .clamp(low, high.max(low))
+        .min(total.saturating_sub(height))
+}
+
+/// The cursor row across the full width. On a fold bar it turns the accent color, so the
+/// bar under the cursor differs from the others.
+fn highlight(row: &markdown::TextRow, width: usize, theme: &Theme) -> Line<'static> {
+    let background = if row.fold.is_some() {
+        theme.accent
+    } else {
+        theme.selection
+    };
+    let mut line = row.line.clone();
+    let padding = width.saturating_sub(markdown::line_width(&line));
+    line.spans.push(Span::raw(" ".repeat(padding)));
+    for span in &mut line.spans {
+        span.style = span.style.bg(background);
+    }
+    line
+}
+
+fn render_sidebar(frame: &mut Frame, detail: &PrDetail, area: Rect, paint: Paint) {
     let border = Block::new()
         .borders(Borders::LEFT)
-        .border_style(Style::new().fg(paint.theme.muted));
-    let sidebar_text = Text::from(sidebar_lines(detail, paint));
+        .border_style(Style::new().fg(paint.theme.selection));
+    let inner = border.inner(area);
+    frame.render_widget(border, area);
+    let lines = sidebar_lines(detail, inner.width.saturating_sub(1) as usize, paint);
     frame.render_widget(
-        Paragraph::new(sidebar_text)
-            .wrap(Wrap { trim: true })
-            .block(border),
-        sidebar,
+        Paragraph::new(lines),
+        inner.inner(Margin {
+            horizontal: 1,
+            vertical: 0,
+        }),
     );
 }
 
@@ -797,74 +909,84 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
     frame.render_widget(Paragraph::new(text).block(block), box_area);
 }
 
-fn render_description(frame: &mut Frame, detail: &PrDetail, scroll: u16, area: Rect, paint: Paint) {
-    let body = if detail.body.trim().is_empty() {
-        "_No description provided._"
-    } else {
-        detail.body.as_str()
-    };
-    let block = Block::new()
-        .borders(Borders::TOP)
-        .border_style(Style::new().fg(paint.theme.muted))
-        .title(paint.bold(" Description ", paint.theme.heading));
-    let paragraph = Paragraph::new(tui_markdown::from_str(body))
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0))
-        .block(block);
-    frame.render_widget(paragraph, area);
-}
-
-fn sidebar_lines(detail: &PrDetail, paint: Paint) -> Vec<Line<'static>> {
+fn sidebar_lines(detail: &PrDetail, width: usize, paint: Paint) -> Vec<Line<'static>> {
     let theme = paint.theme;
-    let summary = &detail.summary;
-    let mut lines = section("Status", paint);
-    let review = if summary.is_draft {
-        paint.span("Draft", theme.muted)
-    } else {
-        review_span(summary.review, paint)
-    };
-    lines.push(Line::from(vec![Span::from("Review: "), review]));
-    lines.push(Line::from(vec![
-        Span::from("Checks: "),
-        checks_span(summary.checks.as_ref(), theme.muted, paint),
-    ]));
-    lines.push(Line::from(format!("Comments: {}", summary.comments)));
-
-    lines.extend(section("Reviewers", paint));
+    let mut lines = section("Reviewers", paint);
     lines.extend(detail.reviewers.iter().map(|reviewer| {
+        let (symbol, color) = reviewer_symbol(&reviewer.state, theme);
         Line::from(vec![
-            Span::from(format!("{} ", reviewer.name)),
-            reviewer_state_span(&reviewer.state, paint),
+            paint.span(format!("{symbol} "), color),
+            paint.span(reviewer.name.clone(), theme.foreground),
+            paint.span(format!("  {}", reviewer.state), theme.muted),
         ])
     }));
+    if detail.reviewers.is_empty() {
+        lines.push(Line::from(paint.span("No reviews", theme.muted)));
+    }
     lines.extend(section("Assignees", paint));
-    lines.extend(detail.assignees.iter().map(|name| Line::from(name.clone())));
-    lines.extend(section("Labels", paint));
     lines.extend(
         detail
-            .labels
+            .assignees
             .iter()
-            .map(|label| Line::from(paint.span(label.name.clone(), theme.accent))),
+            .map(|name| Line::from(paint.span(name.clone(), theme.foreground))),
     );
+    if detail.assignees.is_empty() {
+        lines.push(Line::from(paint.span("No one", theme.muted)));
+    }
+    lines.extend(section("Labels", paint));
+    lines.extend(label_chips(&detail.labels, width));
+    if detail.labels.is_empty() {
+        lines.push(Line::from(paint.span("None yet", theme.muted)));
+    }
+    lines
+}
+
+/// Labels in their GitHub colors, as many per line as fit.
+fn label_chips(labels: &[Label], width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let mut line: Vec<Span<'static>> = Vec::new();
+    let mut used = 0;
+    for label in labels {
+        let text = format!(
+            " {} ",
+            truncate_to_width(&label.name, width.saturating_sub(2))
+        );
+        let text_width = display_width(&text);
+        if used > 0 && used + 1 + text_width > width {
+            lines.push(Line::from(std::mem::take(&mut line)));
+            used = 0;
+        }
+        if used > 0 {
+            line.push(Span::raw(" "));
+            used += 1;
+        }
+        let (background, foreground) = markdown::label_colors(&label.color);
+        line.push(Span::styled(
+            text,
+            Style::new().bg(background).fg(foreground),
+        ));
+        used += text_width;
+    }
+    if !line.is_empty() {
+        lines.push(Line::from(line));
+    }
     lines
 }
 
 fn section(title: &str, paint: Paint) -> Vec<Line<'static>> {
     vec![
         Line::from(""),
-        Line::from(paint.bold(format!(" {title}"), paint.theme.heading)),
+        Line::from(paint.bold(title.to_string(), paint.theme.heading)),
     ]
 }
 
-fn reviewer_state_span(state: &str, paint: Paint) -> Span<'static> {
-    let theme = paint.theme;
-    let color = match state {
-        "approved" => theme.success,
-        "changes requested" => theme.danger,
-        "requested" => theme.warning,
-        _ => theme.muted,
-    };
-    paint.span(format!("({state})"), color)
+fn reviewer_symbol(state: &str, theme: &Theme) -> (&'static str, Color) {
+    match state {
+        "approved" => ("✓", theme.success),
+        "changes requested" => ("✗", theme.danger),
+        "requested" => ("●", theme.warning),
+        _ => ("○", theme.muted),
+    }
 }
 
 // ---- Text helpers ----

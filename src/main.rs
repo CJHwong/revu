@@ -1,7 +1,9 @@
 mod app;
 mod config;
 mod github;
+mod markdown;
 mod model;
+mod overview;
 mod repo;
 mod theme;
 mod ui;

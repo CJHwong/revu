@@ -5,9 +5,10 @@ use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::text::Text;
 use ratatui::widgets::ListState;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use crate::markdown::TextRow;
 use crate::repo::{GrepHit, LocalRepo};
 
 use crate::config::GroupConfig;
@@ -169,6 +170,11 @@ fn line_text(line: &ratatui::text::Line) -> String {
         .collect()
 }
 
+pub struct OverviewLayout {
+    pub width: usize,
+    pub rows: Vec<TextRow>,
+}
+
 pub struct DetailView {
     pub pr: PrRef,
     /// `None` while the request runs.
@@ -176,7 +182,14 @@ pub struct DetailView {
     /// Checks, commits and the conversation, which arrive separately.
     pub activity: Option<Result<PrActivity, String>>,
     pub tab: Tab,
-    pub scroll: u16,
+    /// The Overview's cursor row and its first visible row.
+    pub cursor: usize,
+    pub scroll: usize,
+    pub open_folds: HashSet<usize>,
+    /// The Overview laid out at the last drawn width. Cleared when its content changes.
+    pub overview: Option<OverviewLayout>,
+    /// The Overview's visible height at the last draw, for paging.
+    pub page: usize,
     pub commits: ListState,
     pub checks: ListState,
     /// `None` until the Files tab is first shown and its request returns.
@@ -203,7 +216,11 @@ impl DetailView {
             detail: None,
             activity: None,
             tab: Tab::Overview,
+            cursor: 0,
             scroll: 0,
+            open_folds: HashSet::new(),
+            overview: None,
+            page: 20,
             commits: ListState::default().with_selected(Some(0)),
             checks: ListState::default().with_selected(Some(0)),
             files: None,
@@ -480,11 +497,59 @@ impl DetailView {
         }
     }
 
+    /// Opens or closes the `<details>` block under the Overview cursor.
+    fn toggle_fold(&mut self) {
+        let row = self
+            .overview
+            .as_ref()
+            .and_then(|layout| layout.rows.get(self.cursor));
+        let Some(id) = row.and_then(|row| row.fold) else {
+            return;
+        };
+        if !self.open_folds.remove(&id) {
+            self.open_folds.insert(id);
+        }
+        self.overview = None;
+    }
+
+    /// Moves the Overview cursor to the next or previous card or fold.
+    fn jump_anchor(&mut self, forward: bool) {
+        let Some(layout) = &self.overview else {
+            return;
+        };
+        let mut anchors = layout
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.anchor)
+            .map(|(index, _)| index);
+        let target = if forward {
+            anchors.find(|index| *index > self.cursor)
+        } else {
+            anchors.rev().find(|index| *index < self.cursor)
+        };
+        if let Some(target) = target {
+            self.cursor = target;
+        }
+    }
+
+    /// How far Space and b move: a screen on the Overview, 20 rows in a list.
+    fn page_step(&self) -> isize {
+        match self.tab {
+            Tab::Overview => self.page.saturating_sub(2).max(1) as isize,
+            _ => 20,
+        }
+    }
+
     fn move_in_tab(&mut self, delta: isize) {
         let last = self.list_len().saturating_sub(1);
         let state = match self.tab {
             Tab::Overview => {
-                self.scroll = self.scroll.saturating_add_signed(delta as i16);
+                let last = self
+                    .overview
+                    .as_ref()
+                    .map_or(0, |layout| layout.rows.len().saturating_sub(1));
+                self.cursor = self.cursor.saturating_add_signed(delta).min(last);
                 return;
             }
             Tab::Commits => &mut self.commits,
@@ -830,12 +895,14 @@ impl App {
     pub fn set_detail(&mut self, pr: &PrRef, result: Result<PrDetail, String>) {
         if let Some(view) = self.view_for(pr) {
             view.detail = Some(result);
+            view.overview = None;
         }
     }
 
     pub fn set_activity(&mut self, pr: &PrRef, result: Result<PrActivity, String>) {
         if let Some(view) = self.view_for(pr) {
             view.activity = Some(result);
+            view.overview = None;
         }
     }
 
@@ -1062,9 +1129,13 @@ impl App {
             }
             KeyCode::Char('j') | KeyCode::Down => view.move_in_tab(1),
             KeyCode::Char('k') | KeyCode::Up => view.move_in_tab(-1),
-            KeyCode::Char(' ') | KeyCode::PageDown => view.move_in_tab(20),
-            KeyCode::Char('b') | KeyCode::PageUp => view.move_in_tab(-20),
-            KeyCode::Char('g') | KeyCode::Home => view.move_in_tab(-10_000),
+            KeyCode::Char(' ') | KeyCode::PageDown => view.move_in_tab(view.page_step()),
+            KeyCode::Char('b') | KeyCode::PageUp => view.move_in_tab(-view.page_step()),
+            KeyCode::Char('g') | KeyCode::Home => view.move_in_tab(-1_000_000),
+            KeyCode::Char('G') | KeyCode::End => view.move_in_tab(1_000_000),
+            KeyCode::Enter if view.tab == Tab::Overview => view.toggle_fold(),
+            KeyCode::Char(']') if view.tab == Tab::Overview => view.jump_anchor(true),
+            KeyCode::Char('[') if view.tab == Tab::Overview => view.jump_anchor(false),
             KeyCode::Char('o') => return Some(Action::OpenBrowser(view.link())),
             KeyCode::Enter if matches!(view.tab, Tab::Commits | Tab::Checks) => {
                 return Some(Action::OpenBrowser(view.link()));
