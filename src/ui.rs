@@ -309,7 +309,7 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
         "Files changed",
         &[
             ("enter", "whole file with its changes; on a folder, fold it"),
-            ("v, H", "toggle Viewed (syncs to GitHub), hide viewed files"),
+            ("v, V", "toggle Viewed (syncs to GitHub), hide viewed files"),
             ("], [", "next or previous unviewed file"),
             ("t, z", "tree or flat list, hide or show the list"),
         ],
@@ -320,7 +320,7 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
             ("J/K, space/b", "scroll the diff"),
             (
                 "w",
-                "wrap long lines, or not; unwrapped, h/l scroll sideways",
+                "wrap long lines, or not; unwrapped, H/L scroll sideways",
             ),
             ("m", "switch the diff renderer"),
             ("/, n/N", "find in the diff, next and previous match"),
@@ -768,8 +768,8 @@ fn render_diff_pane(
 fn wrap_note(view: &DetailView) -> String {
     match (view.diff_wrap, view.diff_shift) {
         (true, _) => "w unwraps ".to_string(),
-        (false, 0) => "w wraps  h/l sideways ".to_string(),
-        (false, shift) => format!("w wraps  h/l sideways  → {shift} "),
+        (false, 0) => "w wraps  H/L sideways ".to_string(),
+        (false, shift) => format!("w wraps  H/L sideways  → {shift} "),
     }
 }
 

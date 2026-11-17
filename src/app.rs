@@ -901,7 +901,8 @@ impl DetailView {
         self.diff_shift = 0;
     }
 
-    /// `h` and `l` scroll an unwrapped diff sideways by a quarter of the pane.
+    /// `H` and `L` scroll an unwrapped diff sideways by a quarter of the pane. A wrapped
+    /// diff has nothing past the edge, so the render keeps the shift at zero.
     fn shift_diff(&mut self, right: bool) {
         let step = (self.diff_width / 4).max(4);
         self.diff_shift = match right {
@@ -1564,8 +1565,8 @@ impl App {
                 view.diff_wrap = !view.diff_wrap;
                 view.diff_shift = 0;
             }
-            KeyCode::Char('h') if diff_pane && !view.diff_wrap => view.shift_diff(false),
-            KeyCode::Char('l') if diff_pane && !view.diff_wrap => view.shift_diff(true),
+            KeyCode::Char('H') if diff_pane => view.shift_diff(false),
+            KeyCode::Char('L') if diff_pane => view.shift_diff(true),
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Left => {
                 self.screen = Screen::Inbox;
                 self.error = None;
@@ -1585,7 +1586,7 @@ impl App {
             KeyCode::Char(' ') | KeyCode::PageDown if diff_pane => view.scroll_diff(20),
             KeyCode::Char('b') | KeyCode::PageUp if diff_pane => view.scroll_diff(-20),
             KeyCode::Char('v') if view.tab == Tab::Files => return view.toggle_viewed(),
-            KeyCode::Char('H') if view.tab == Tab::Files => {
+            KeyCode::Char('V') if view.tab == Tab::Files => {
                 view.hide_viewed = !view.hide_viewed;
                 view.clamp_file_selection();
             }
@@ -1977,22 +1978,19 @@ mod tests {
     }
 
     #[test]
-    fn w_unwraps_the_diff_and_then_h_and_l_scroll_it_sideways() {
+    fn shift_h_and_l_scroll_the_diff_sideways_and_h_still_goes_back() {
         let (mut app, _) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
         if let Screen::Detail(view) = &mut app.screen {
             view.diff_width = 80;
         }
         assert!(view(&app).diff_wrap, "long lines wrap by default");
         app.handle_key(key(KeyCode::Char('w')));
-        app.handle_key(key(KeyCode::Char('l')));
-        app.handle_key(key(KeyCode::Char('l')));
+        app.handle_key(key(KeyCode::Char('L')));
+        app.handle_key(key(KeyCode::Char('L')));
         assert_eq!(view(&app).diff_shift, 40);
-        app.handle_key(key(KeyCode::Char('h')));
+        app.handle_key(key(KeyCode::Char('H')));
         assert_eq!(view(&app).diff_shift, 20);
-        assert!(
-            matches!(app.screen, Screen::Detail(_)),
-            "h scrolls, not back"
-        );
+        assert!(matches!(app.screen, Screen::Detail(_)));
         app.handle_key(key(KeyCode::Char('w')));
         assert_eq!(view(&app).diff_shift, 0);
         app.handle_key(key(KeyCode::Char('h')));
@@ -2477,7 +2475,7 @@ mod tests {
             file("a.md", ViewedState::Viewed),
             file("b.md", ViewedState::Unviewed),
         ]);
-        app.handle_key(key(KeyCode::Char('H')));
+        app.handle_key(key(KeyCode::Char('V')));
         assert_eq!(view(&app).visible_files(), [1]);
         assert_eq!(view(&app).selected_file(), Some(1));
     }

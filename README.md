@@ -59,11 +59,11 @@ Press `?` anywhere for this list.
 | Files changed | `t` | Switch the list between a folder tree and flat paths |
 | Files changed | `z` | Hide or show the list, so the diff gets the full width |
 | Files changed | `v` | Toggle Viewed. It syncs to GitHub's Viewed checkbox at once. |
-| Files changed | `H` | Hide viewed files |
+| Files changed | `V` | Hide viewed files |
 | Files changed | `]` / `[` | Next or previous unviewed file |
 | Files changed, Commits | `J` / `K`, `Space` / `b` | Scroll the diff |
 | Files changed, Commits | `m` | Switch the diff renderer |
-| Files changed, Commits | `w` | Wrap long lines (the default) or not. Unwrapped, `h` / `l` scroll the diff sideways instead of going back and opening. |
+| Files changed, Commits | `w` | Wrap long lines (the default) or not. Unwrapped, `H` / `L` scroll the diff sideways, as `J` / `K` scroll it down and up. |
 | Files changed, Commits | `/`, then `n` / `N` | Find text in the diff, next and previous match |
 | Commits, Checks | `Enter` | Open the selected commit or check in the browser |
 | Inbox, pull request | `o` | Open in the browser |
