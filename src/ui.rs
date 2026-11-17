@@ -10,7 +10,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::app::{
     App, Click, ClickTarget, ComposeKind, Composer, DetailView, DiffOutput, LabelMenu, Overlay,
-    OverviewLayout, Prompt, PromptKind, RepoState, Row, SETTINGS, Screen, Tab,
+    OverviewLayout, Prompt, PromptKind, RepoState, Row, SETTINGS, SaveNote, Screen, Tab,
 };
 use crate::editor::Editor;
 use crate::file_tree::FileRow;
@@ -55,13 +55,8 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: &Theme, now: DateTime<Utc
     }
     frame.render_widget(Block::new().style(base), frame.area());
     if let Screen::Detail(view) = &mut app.screen {
-        render_detail(
-            frame,
-            view,
-            app.error.as_deref(),
-            &app.renderer_names,
-            paint,
-        );
+        let status = status_span(app.error.as_deref(), app.saving, app.saved, paint);
+        render_detail(frame, view, status, &app.renderer_names, paint);
     } else {
         render_inbox(frame, app, paint);
     }
@@ -575,7 +570,7 @@ fn render_help(frame: &mut Frame, paint: Paint) {
 fn render_detail(
     frame: &mut Frame,
     view: &mut DetailView,
-    error: Option<&str>,
+    status: Option<Span<'static>>,
     renderer_names: &[String],
     paint: Paint,
 ) {
@@ -591,9 +586,9 @@ fn render_detail(
         Constraint::Length(1),
     ])
     .areas(frame.area());
-    // An error, such as a failed Viewed sync, replaces the help line until the next action.
-    let footer = match error {
-        Some(message) => paint.span(message.to_string(), theme.danger),
+    // An error, a save in progress, or a finished save replaces the help line.
+    let footer = match status {
+        Some(status) => status,
         None => paint.span(
             overlay_help(view.overlays.last()).unwrap_or(detail_help(view.tab)),
             theme.muted,
@@ -986,6 +981,24 @@ fn render_diff_pane(
         },
     };
     frame.render_widget(content, inner);
+}
+
+/// The PR footer's status: an error first, then a write to GitHub in progress, then
+/// the last write's success.
+fn status_span(
+    error: Option<&str>,
+    saving: Option<SaveNote>,
+    saved: Option<&str>,
+    paint: Paint,
+) -> Option<Span<'static>> {
+    let theme = paint.theme;
+    if let Some(error) = error {
+        return Some(paint.span(error.to_string(), theme.danger));
+    }
+    if let Some(note) = saving {
+        return Some(paint.span(format!("◷ {}", note.doing), theme.warning));
+    }
+    saved.map(|done| paint.span(format!("✓ {done}"), theme.success))
 }
 
 /// Comment mode: the file's plain diff with old and new line numbers, the cursor and

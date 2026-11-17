@@ -1248,6 +1248,33 @@ pub enum PromptKind {
     },
 }
 
+impl Action {
+    /// For a write to GitHub: what the footer says while it runs, and once it succeeds.
+    pub fn save_note(&self) -> Option<SaveNote> {
+        let (doing, done) = match self {
+            Action::SubmitReview { .. } => ("sending your review to GitHub...", "review sent"),
+            Action::AddComment { .. } => (
+                "adding the comment to your pending review...",
+                "comment added to your pending review; R submits it",
+            ),
+            Action::SetLabels { .. } => ("saving labels to GitHub...", "labels saved"),
+            Action::DiscardReview { .. } => (
+                "discarding your pending review...",
+                "pending review discarded",
+            ),
+            _ => return None,
+        };
+        Some(SaveNote { doing, done })
+    }
+}
+
+/// The footer's words for a write in progress and for its success.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SaveNote {
+    pub doing: &'static str,
+    pub done: &'static str,
+}
+
 /// The label checklist: the repo's labels, ticked for the ones the PR will have.
 #[derive(Debug)]
 pub struct LabelMenu {
@@ -1568,6 +1595,10 @@ pub struct App {
     pub composer: Option<Composer>,
     /// The label checklist, while it is open.
     pub label_menu: Option<LabelMenu>,
+    /// A write to GitHub is running; the footer says what it saves.
+    pub saving: Option<SaveNote>,
+    /// The last write succeeded; the footer says so until the next key.
+    pub saved: Option<&'static str>,
     /// A write succeeded, so this PR loads again to show it.
     pub reload_after_write: Option<PrRef>,
     /// The settings panel's selected row, while it is open.
@@ -1610,6 +1641,8 @@ impl App {
             theme_menu: None,
             composer: None,
             label_menu: None,
+            saving: None,
+            saved: None,
             reload_after_write: None,
             settings_menu: None,
             workspace_dir: None,
@@ -2041,6 +2074,7 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+        self.saved = None;
         if self.composer.is_some() {
             return self.composer_key(key);
         }
@@ -2463,8 +2497,10 @@ impl App {
 
     /// A write finished: a sent box closes, a failed one shows why and keeps the text.
     pub fn set_written(&mut self, pr: &PrRef, result: Result<(), String>) {
+        let note = self.saving.take();
         if result.is_ok() {
             self.reload_after_write = Some(pr.clone());
+            self.saved = note.map(|note| note.done);
         }
         let Some(composer) = self.composer.as_mut().filter(|composer| &composer.pr == pr) else {
             self.error = result.err();
@@ -3455,6 +3491,23 @@ mod tests {
         );
         mode.cursor = 0;
         assert!(mode.target().is_err(), "the hunk header takes none");
+    }
+
+    #[test]
+    fn a_write_says_it_is_saving_then_saved_until_the_next_key() {
+        let (mut app, pr) = files_tab(vec![file("a.rs", ViewedState::Unviewed)]);
+        let action = Action::DiscardReview {
+            pr: pr.clone(),
+            pending_review: "P1".to_string(),
+        };
+        app.saving = action.save_note();
+        app.set_written(&pr, Ok(()));
+        assert_eq!(
+            (app.saving, app.saved),
+            (None, Some("pending review discarded"))
+        );
+        app.handle_key(key(KeyCode::Char('j')));
+        assert!(app.saved.is_none(), "the next key clears it");
     }
 
     #[test]

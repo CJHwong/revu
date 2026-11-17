@@ -254,7 +254,10 @@ fn handle_input(
         Input::Key(key) => app.handle_key(key),
     };
     match action {
-        Some(action) => perform(action, terminal, app, session),
+        Some(action) => {
+            app.saving = action.save_note().or(app.saving);
+            perform(action, terminal, app, session)
+        }
         None => Ok(true),
     }
 }
