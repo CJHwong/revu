@@ -19,7 +19,7 @@ use crate::model::{
     ViewedState,
 };
 use crate::repo::{GrepHit, MAX_GREP_HITS};
-use crate::theme::Theme;
+use crate::theme::{ON_STATE, PrState, Theme};
 use crate::{markdown, overview};
 
 const INBOX_HELP: &str = "j/k move | l/enter open | space fold | tab next group | o browser | r refresh | ctrl-l link | ? keys";
@@ -196,7 +196,7 @@ fn pr_item(pr: &PrSummary, width: usize, selected: bool, paint: Paint) -> ListIt
 
 fn badge_spans(pr: &PrSummary, secondary: Color, paint: Paint) -> Vec<Span<'static>> {
     let review = if pr.is_draft {
-        paint.span("Draft", secondary)
+        paint.span("Draft", paint.theme.github_state(PrState::Draft))
     } else {
         review_span(pr.review, paint)
     };
@@ -1001,13 +1001,14 @@ fn detail_header(detail: &PrDetail, width: usize, paint: Paint) -> Vec<Line<'sta
     let title = [paint.bold(format!(" {}", pr.title), theme.foreground)];
     lines.extend(markdown::wrap(&title, width, 1));
     let (state, state_color, verb) = match &detail.lifecycle {
-        Lifecycle::Merged { .. } => (" Merged ", theme.heading, " merged into "),
-        Lifecycle::Closed { .. } => (" Closed ", theme.danger, " wanted to merge into "),
-        Lifecycle::Draft => (" Draft ", theme.muted, " wants to merge into "),
-        Lifecycle::Open => (" Open ", theme.success, " wants to merge into "),
+        Lifecycle::Merged { .. } => (" Merged ", PrState::Merged, " merged into "),
+        Lifecycle::Closed { .. } => (" Closed ", PrState::Closed, " wanted to merge into "),
+        Lifecycle::Draft => (" Draft ", PrState::Draft, " wants to merge into "),
+        Lifecycle::Open => (" Open ", PrState::Open, " wants to merge into "),
     };
+    let state_color = theme.github_state(state_color);
     let pill = Style::new()
-        .fg(theme.background)
+        .fg(ON_STATE)
         .bg(state_color)
         .add_modifier(Modifier::BOLD);
     let branch = Style::new().fg(theme.accent).bg(theme.selection);

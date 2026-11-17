@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::markdown::{self, Block, FoldId, Folds, RowAction, TextRow, fold_key, line_width};
 use crate::model::{Comment, Lifecycle, PrActivity, PrDetail, ReviewState, ThreadLine};
-use crate::theme::Theme;
+use crate::theme::{PrState, Theme};
 use crate::ui::relative_time;
 
 /// GitHub's controls over the Comments list: which items, and in which order.
@@ -249,11 +249,12 @@ fn finished_box(context: &Context, width: usize) -> Option<Vec<TextRow>> {
                 .as_deref()
                 .map(|login| format!(" by {login}"))
                 .unwrap_or_default();
-            ("⇄ Merged", theme.heading, format!("Merged{by}{}", when(at)))
+            let color = theme.github_state(PrState::Merged);
+            ("⇄ Merged", color, format!("Merged{by}{}", when(at)))
         }
         Lifecycle::Closed { at } => (
             "✗ Closed",
-            theme.danger,
+            theme.github_state(PrState::Closed),
             format!("Closed without merging{}", when(at)),
         ),
         Lifecycle::Open | Lifecycle::Draft => return None,
@@ -272,7 +273,7 @@ fn finished_box(context: &Context, width: usize) -> Option<Vec<TextRow>> {
 fn merge_headline(detail: &PrDetail, theme: &Theme) -> (&'static str, Color, Option<&'static str>) {
     if detail.summary.is_draft || detail.merge_state == "DRAFT" {
         let note = "Mark it ready for review before it can merge";
-        return ("◌ Draft", theme.muted, Some(note));
+        return ("◌ Draft", theme.github_state(PrState::Draft), Some(note));
     }
     match detail.merge_state.as_str() {
         "CLEAN" | "HAS_HOOKS" => ("✓ Able to merge", theme.success, None),

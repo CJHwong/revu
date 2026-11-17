@@ -298,7 +298,34 @@ const GITHUB: Theme = Theme {
     removed_bg: Color::Rgb(0xdf, 0xbc, 0xc2),
 };
 
+/// A pull request's state, as GitHub's state pill names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrState {
+    Open,
+    Closed,
+    Merged,
+    Draft,
+}
+
+/// The text on GitHub's state pill: white in every state and mode.
+pub const ON_STATE: Color = Color::Rgb(0xff, 0xff, 0xff);
+
 impl Theme {
+    /// GitHub's color for a state (Primer's emphasis colors), the same under every theme
+    /// so a state reads as it does on GitHub. Light themes get GitHub's light-mode shade,
+    /// the rest its dark-mode one.
+    pub fn github_state(&self, state: PrState) -> Color {
+        let light = group_of(self) == "Light";
+        let (light_mode, dark_mode) = match state {
+            PrState::Open => ((0x1f, 0x88, 0x3d), (0x23, 0x86, 0x36)),
+            PrState::Closed => ((0xcf, 0x22, 0x2e), (0xda, 0x36, 0x33)),
+            PrState::Merged => ((0x82, 0x50, 0xdf), (0x89, 0x57, 0xe5)),
+            PrState::Draft => ((0x6e, 0x77, 0x81), (0x6e, 0x76, 0x81)),
+        };
+        let (red, green, blue) = if light { light_mode } else { dark_mode };
+        Color::Rgb(red, green, blue)
+    }
+
     /// Bold text: the text color pushed halfway to white on a dark page, or to black on
     /// a light one, so bold stands out even in a font with no bold weight.
     pub fn strong(&self) -> Color {
@@ -354,6 +381,18 @@ pub fn by_name(name: &str) -> Result<Theme> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn state_colors_are_githubs_under_every_theme() {
+        for name in THEME_NAMES {
+            let theme = by_name(name).unwrap();
+            let expected = match group_of(&theme) {
+                "Light" => Color::Rgb(0x82, 0x50, 0xdf),
+                _ => Color::Rgb(0x89, 0x57, 0xe5),
+            };
+            assert_eq!(theme.github_state(PrState::Merged), expected, "{name}");
+        }
+    }
+
     #[test]
     fn every_theme_has_a_name_and_a_bat_theme_bat_knows() {
         for name in THEME_NAMES {
