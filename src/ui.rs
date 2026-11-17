@@ -390,8 +390,12 @@ fn render_detail(
     paint: Paint,
 ) {
     let theme = paint.theme;
+    let header = match &view.detail {
+        Some(Ok(detail)) => detail_header(detail, frame.area().width as usize, paint),
+        _ => detail_title(&view.pr, paint),
+    };
     let [top, tabs, body, bottom] = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(header.len() as u16),
         Constraint::Length(2),
         Constraint::Min(0),
         Constraint::Length(1),
@@ -408,7 +412,7 @@ fn render_detail(
     frame.render_widget(Paragraph::new(footer), bottom);
 
     let Some(Ok(detail)) = &view.detail else {
-        frame.render_widget(Paragraph::new(detail_title(&view.pr, paint)), top);
+        frame.render_widget(Paragraph::new(header), top);
         let message = match &view.detail {
             Some(Err(error)) => paint.span(error.clone(), theme.danger),
             _ => paint.span("loading...", theme.warning),
@@ -416,7 +420,7 @@ fn render_detail(
         frame.render_widget(Paragraph::new(message).wrap(Wrap { trim: false }), body);
         return;
     };
-    frame.render_widget(Paragraph::new(detail_header(detail, paint)), top);
+    frame.render_widget(Paragraph::new(header), top);
     let tab_lines = vec![
         tab_bar(view.tab, detail, paint),
         tab_rule(view.tab, detail, tabs.width, paint),
@@ -882,17 +886,25 @@ fn file_line(file: &ChangedFile, tree: bool, width: usize, paint: Paint) -> Line
     ])
 }
 
-fn detail_title(pr: &PrRef, paint: Paint) -> Text<'static> {
-    Text::from(vec![
+fn detail_title(pr: &PrRef, paint: Paint) -> Vec<Line<'static>> {
+    vec![
         Line::from(paint.bold(format!("{}#{}", pr.repo, pr.number), paint.theme.foreground)),
         Line::from(paint.span(pr.url(), paint.theme.muted)),
-    ])
+    ]
 }
 
-/// Title, then a GitHub-style state pill with the branches and the size of the change.
-fn detail_header(detail: &PrDetail, paint: Paint) -> Text<'static> {
+/// GitHub's order: the repo and number, the title, then a state pill with the branches
+/// and the size of the change, and a blank line before the tabs. The title and the
+/// branch line wrap; the API budget sits at the right of the first line.
+fn detail_header(detail: &PrDetail, width: usize, paint: Paint) -> Vec<Line<'static>> {
     let theme = paint.theme;
     let pr = &detail.summary;
+    let mut lines = vec![Line::from(vec![
+        paint.span(format!(" {} ", pr.repo), theme.muted),
+        paint.span(format!("#{}", pr.number), theme.muted),
+    ])];
+    let title = [paint.bold(format!(" {}", pr.title), theme.foreground)];
+    lines.extend(markdown::wrap(&title, width, 1));
     let (state, state_color) = if pr.is_draft {
         (" Draft ", theme.muted)
     } else {
@@ -903,25 +915,21 @@ fn detail_header(detail: &PrDetail, paint: Paint) -> Text<'static> {
         .bg(state_color)
         .add_modifier(Modifier::BOLD);
     let branch = Style::new().fg(theme.accent).bg(theme.selection);
-    Text::from(vec![
-        Line::from(vec![
-            paint.bold(format!(" {}  ", pr.title), theme.foreground),
-            paint.span(format!("#{}", pr.number), theme.muted),
-        ]),
-        Line::from(vec![
-            Span::raw(" "),
-            Span::styled(state, pill),
-            paint.bold(format!(" {}", pr.author), theme.foreground),
-            paint.span(" wants to merge into ", theme.muted),
-            Span::styled(format!(" {} ", detail.base), branch),
-            paint.span(" from ", theme.muted),
-            Span::styled(format!(" {} ", detail.head), branch),
-            paint.span(format!("   +{}", detail.additions), theme.success),
-            paint.span(format!(" -{}", detail.deletions), theme.danger),
-            paint.span(format!(" in {} files", detail.changed_files), theme.muted),
-        ]),
-        Line::from(paint.span(format!(" {}", pr.repo), theme.muted)),
-    ])
+    let merge = [
+        Span::raw(" "),
+        Span::styled(state, pill),
+        paint.bold(format!(" {}", pr.author), theme.foreground),
+        paint.span(" wants to merge into ", theme.muted),
+        Span::styled(format!(" {} ", detail.base), branch),
+        paint.span(" from ", theme.muted),
+        Span::styled(format!(" {} ", detail.head), branch),
+        paint.span(format!("   +{}", detail.additions), theme.success),
+        paint.span(format!(" -{}", detail.deletions), theme.danger),
+        paint.span(format!(", {} files", detail.changed_files), theme.muted),
+    ];
+    lines.extend(markdown::wrap(&merge, width, state.len() + 1));
+    lines.push(Line::default());
+    lines
 }
 
 /// GitHub's tab bar: the title, then a count badge, or the check state for Checks. The
@@ -936,24 +944,19 @@ fn tab_bar(current: Tab, detail: &PrDetail, paint: Paint) -> Line<'static> {
         } else {
             Style::new().fg(theme.foreground)
         };
-        spans.push(Span::styled(format!("  {}", tab.title()), title_style));
+        spans.push(Span::styled(
+            format!("{TAB_LEFT}{}", tab.title()),
+            title_style,
+        ));
         spans.extend(tab_badge(tab, detail, paint));
-        spans.push(Span::raw("  "));
+        spans.push(Span::raw(TAB_RIGHT));
     }
     Line::from(spans)
 }
 
 fn tab_badge(tab: Tab, detail: &PrDetail, paint: Paint) -> Vec<Span<'static>> {
     let theme = paint.theme;
-    let badge = |count: u64| {
-        vec![
-            Span::raw(" "),
-            Span::styled(
-                format!(" {count} "),
-                Style::new().fg(theme.foreground).bg(theme.selection),
-            ),
-        ]
-    };
+    let badge = |count: u64| vec![paint.span(format!(" {count}"), theme.muted)];
     match tab {
         Tab::Overview => Vec::new(),
         Tab::Commits => badge(detail.commit_count),
@@ -1020,8 +1023,8 @@ fn tab_rule(current: Tab, detail: &PrDetail, width: u16, paint: Paint) -> Line<'
         let label_width: usize = tab_bar_width(tab, detail, paint);
         if tab == current {
             // Under the title and badge, not the padding around them.
-            start += 2;
-            bar = label_width.saturating_sub(4);
+            start += TAB_LEFT.len();
+            bar = label_width.saturating_sub(TAB_LEFT.len() + TAB_RIGHT.len());
             break;
         }
         start += label_width;
@@ -1040,8 +1043,12 @@ fn tab_bar_width(tab: Tab, detail: &PrDetail, paint: Paint) -> usize {
         .iter()
         .map(|span| display_width(&span.content))
         .sum();
-    2 + display_width(tab.title()) + badge + 2
+    TAB_LEFT.len() + display_width(tab.title()) + badge + TAB_RIGHT.len()
 }
+
+/// The space before and after a tab label; two tabs sit three columns apart.
+const TAB_LEFT: &str = "  ";
+const TAB_RIGHT: &str = " ";
 
 /// The sidebar shows when the terminal is wide enough to keep the main column readable.
 const SIDEBAR_WIDTH: u16 = 32;
