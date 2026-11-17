@@ -1,6 +1,6 @@
 //! Talks to GitHub through `gh api graphql`, so the tool reuses the user's gh login.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::NaiveDate;
 use serde_json::Value;
 use std::process::Command;
@@ -28,7 +28,9 @@ pub fn search_query(group_query: &str, updated_since: Option<NaiveDate>) -> Stri
 
 /// One request for every group: each group is a `search` under the alias `g<index>`.
 pub fn inbox_document(group_count: usize) -> String {
-    let variables: Vec<String> = (0..group_count).map(|index| format!("$q{index}: String!")).collect();
+    let variables: Vec<String> = (0..group_count)
+        .map(|index| format!("$q{index}: String!"))
+        .collect();
     let searches: Vec<String> = (0..group_count)
         .map(|index| {
             format!("g{index}: search(query: $q{index}, type: ISSUE, first: {PAGE_SIZE}) {{ issueCount nodes {{ ...Row }} }}")
@@ -70,17 +72,25 @@ pub fn fetch_inbox(config: &Config, today: NaiveDate) -> Result<Vec<Group>> {
     let updated_since = config
         .updated_within_days
         .map(|days| today - chrono::Duration::days(i64::from(days)));
-    let mut args = vec!["-f".to_string(), format!("query={}", inbox_document(config.groups.len()))];
+    let mut args = vec![
+        "-f".to_string(),
+        format!("query={}", inbox_document(config.groups.len())),
+    ];
     for (index, group) in config.groups.iter().enumerate() {
         args.push("-f".to_string());
-        args.push(format!("q{index}={}", search_query(&group.query, updated_since)));
+        args.push(format!(
+            "q{index}={}",
+            search_query(&group.query, updated_since)
+        ));
     }
     let data = run_graphql(&args)?;
     model::parse_inbox(&data, &config.groups)
 }
 
 pub fn fetch_detail(repo: &str, number: u64) -> Result<PrDetail> {
-    let (owner, name) = repo.split_once('/').with_context(|| format!("repo \"{repo}\" is not owner/name"))?;
+    let (owner, name) = repo
+        .split_once('/')
+        .with_context(|| format!("repo \"{repo}\" is not owner/name"))?;
     let args = [
         "-f".to_string(),
         format!("query={}", detail_document()),
@@ -109,13 +119,21 @@ fn run_graphql(args: &[String]) -> Result<Value> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("gh api graphql failed ({}): {} {}", output.status, stderr.trim(), stdout.trim());
+        bail!(
+            "gh api graphql failed ({}): {} {}",
+            output.status,
+            stderr.trim(),
+            stdout.trim()
+        );
     }
     let response: Value = serde_json::from_str(&stdout).context("gh returned invalid JSON")?;
     if let Some(errors) = response.get("errors") {
         bail!("GitHub GraphQL errors: {errors}");
     }
-    response.get("data").cloned().context("GraphQL response has no data field")
+    response
+        .get("data")
+        .cloned()
+        .context("GraphQL response has no data field")
 }
 
 #[cfg(test)]
@@ -129,7 +147,10 @@ mod tests {
             search_query("author:@me", Some(date)),
             "is:pr is:open archived:false author:@me updated:>=2026-10-18"
         );
-        assert_eq!(search_query("author:@me", None), "is:pr is:open archived:false author:@me");
+        assert_eq!(
+            search_query("author:@me", None),
+            "is:pr is:open archived:false author:@me"
+        );
     }
 
     #[test]

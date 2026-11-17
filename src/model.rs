@@ -247,7 +247,9 @@ pub fn parse_inbox(data: &Value, groups: &[GroupConfig]) -> Result<Vec<Group>> {
 
 fn parse_group(data: &Value, index: usize, config: &GroupConfig) -> Result<Group> {
     let key = format!("g{index}");
-    let raw = data.get(&key).with_context(|| format!("response has no {key} field"))?;
+    let raw = data
+        .get(&key)
+        .with_context(|| format!("response has no {key} field"))?;
     let search: RawSearch = serde_json::from_value(raw.clone())
         .with_context(|| format!("parse group \"{}\"", config.title))?;
     Ok(Group {
@@ -260,7 +262,8 @@ fn parse_group(data: &Value, index: usize, config: &GroupConfig) -> Result<Group
 
 /// `pull_request` is `data.repository.pullRequest`.
 pub fn parse_detail(pull_request: &Value) -> Result<PrDetail> {
-    let raw: RawDetail = serde_json::from_value(pull_request.clone()).context("parse pull request")?;
+    let raw: RawDetail =
+        serde_json::from_value(pull_request.clone()).context("parse pull request")?;
     let checks = check_lines(&raw.row);
     let reviewers = reviewers_from(&raw.review_requests, &raw.latest_opinionated_reviews);
     let activity = activity_from(&raw.comments, &raw.reviews);
@@ -273,8 +276,18 @@ pub fn parse_detail(pull_request: &Value) -> Result<PrDetail> {
         additions: raw.additions,
         deletions: raw.deletions,
         changed_files: raw.changed_files,
-        labels: raw.labels.nodes.into_iter().map(|label| label.name).collect(),
-        assignees: raw.assignees.nodes.into_iter().map(|user| user.login).collect(),
+        labels: raw
+            .labels
+            .nodes
+            .into_iter()
+            .map(|label| label.name)
+            .collect(),
+        assignees: raw
+            .assignees
+            .nodes
+            .into_iter()
+            .map(|user| user.login)
+            .collect(),
         reviewers,
         checks,
         activity,
@@ -313,7 +326,12 @@ fn review_state(decision: Option<&str>) -> ReviewState {
 }
 
 fn latest_rollup(raw: &RawRow) -> Option<&Rollup> {
-    raw.commits.nodes.last()?.commit.status_check_rollup.as_ref()
+    raw.commits
+        .nodes
+        .last()?
+        .commit
+        .status_check_rollup
+        .as_ref()
 }
 
 fn check_summary(rollup: &Rollup) -> Option<CheckSummary> {
@@ -321,7 +339,10 @@ fn check_summary(rollup: &Rollup) -> Option<CheckSummary> {
     if contexts.total_count == 0 {
         return None;
     }
-    let passed_runs = count_states(&contexts.check_run_counts_by_state, &["SUCCESS", "NEUTRAL", "SKIPPED"]);
+    let passed_runs = count_states(
+        &contexts.check_run_counts_by_state,
+        &["SUCCESS", "NEUTRAL", "SKIPPED"],
+    );
     let passed_statuses = count_states(&contexts.status_context_counts_by_state, &["SUCCESS"]);
     Some(CheckSummary {
         passed: passed_runs + passed_statuses,
@@ -351,13 +372,21 @@ fn check_lines(raw: &RawRow) -> Vec<CheckLine> {
         return Vec::new();
     };
     let mut lines: Vec<CheckLine> = rollup.contexts.nodes.iter().map(check_line).collect();
-    lines.sort_by(|left, right| left.state.cmp(&right.state).then(left.name.cmp(&right.name)));
+    lines.sort_by(|left, right| {
+        left.state
+            .cmp(&right.state)
+            .then(left.name.cmp(&right.name))
+    });
     lines
 }
 
 fn check_line(check: &RawCheck) -> CheckLine {
     match check {
-        RawCheck::CheckRun { name, conclusion, status } => CheckLine {
+        RawCheck::CheckRun {
+            name,
+            conclusion,
+            status,
+        } => CheckLine {
             name: name.clone(),
             state: check_run_state(status, conclusion.as_deref()),
         },
@@ -386,14 +415,23 @@ fn reviewers_from(requests: &Nodes<RawRequest>, reviews: &Nodes<RawReview>) -> V
         .iter()
         .filter_map(|request| request.requested_reviewer.as_ref())
         .filter_map(|reviewer| reviewer.login.clone().or_else(|| reviewer.name.clone()))
-        .map(|name| Reviewer { name, state: "requested".to_string() })
+        .map(|name| Reviewer {
+            name,
+            state: "requested".to_string(),
+        })
         .collect();
     for review in &reviews.nodes {
-        let name = review.author.as_ref().map_or("ghost", |user| user.login.as_str());
+        let name = review
+            .author
+            .as_ref()
+            .map_or("ghost", |user| user.login.as_str());
         if reviewers.iter().any(|existing| existing.name == name) {
             continue;
         }
-        reviewers.push(Reviewer { name: name.to_string(), state: humanize(&review.state) });
+        reviewers.push(Reviewer {
+            name: name.to_string(),
+            state: humanize(&review.state),
+        });
     }
     reviewers
 }
@@ -419,7 +457,9 @@ fn activity_from(comments: &Nodes<RawComment>, reviews: &Nodes<RawReview>) -> Ve
 }
 
 fn author_name(author: &Option<Login>) -> String {
-    author.as_ref().map_or_else(|| "ghost".to_string(), |user| user.login.clone())
+    author
+        .as_ref()
+        .map_or_else(|| "ghost".to_string(), |user| user.login.clone())
 }
 
 fn humanize(state: &str) -> String {
@@ -468,7 +508,11 @@ mod tests {
     fn groups(titles: &[&str]) -> Vec<GroupConfig> {
         titles
             .iter()
-            .map(|title| GroupConfig { title: title.to_string(), query: String::new(), collapsed: false })
+            .map(|title| GroupConfig {
+                title: title.to_string(),
+                query: String::new(),
+                collapsed: false,
+            })
             .collect()
     }
 
@@ -487,7 +531,14 @@ mod tests {
         assert_eq!(pr.review, ReviewState::Approved);
         assert_eq!(pr.comments, 104);
         // 3 passing check runs plus 1 passing status context, out of 5.
-        assert_eq!(pr.checks, Some(CheckSummary { passed: 4, total: 5, state: CheckState::Failing }));
+        assert_eq!(
+            pr.checks,
+            Some(CheckSummary {
+                passed: 4,
+                total: 5,
+                state: CheckState::Failing
+            })
+        );
         assert_eq!(parsed[1].total, 120);
         assert!(parsed[1].prs.is_empty());
     }
@@ -517,19 +568,23 @@ mod tests {
     }
 
     fn detail_fixture() -> Value {
-        let mut pr = row(56, json!("REVIEW_REQUIRED"), json!({ "nodes": [{ "commit": { "statusCheckRollup": {
-            "state": "PENDING",
-            "contexts": {
-                "totalCount": 3,
-                "checkRunCountsByState": [],
-                "statusContextCountsByState": [],
-                "nodes": [
-                    { "__typename": "CheckRun", "name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS" },
-                    { "__typename": "CheckRun", "name": "test", "status": "IN_PROGRESS", "conclusion": null },
-                    { "__typename": "StatusContext", "context": "deploy", "state": "FAILURE" },
-                ]
-            }
-        }}}]}));
+        let mut pr = row(
+            56,
+            json!("REVIEW_REQUIRED"),
+            json!({ "nodes": [{ "commit": { "statusCheckRollup": {
+                "state": "PENDING",
+                "contexts": {
+                    "totalCount": 3,
+                    "checkRunCountsByState": [],
+                    "statusContextCountsByState": [],
+                    "nodes": [
+                        { "__typename": "CheckRun", "name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS" },
+                        { "__typename": "CheckRun", "name": "test", "status": "IN_PROGRESS", "conclusion": null },
+                        { "__typename": "StatusContext", "context": "deploy", "state": "FAILURE" },
+                    ]
+                }
+            }}}]}),
+        );
         let extra = json!({
             "body": "## Reason\nBecause.",
             "createdAt": "2026-11-12T10:00:00Z",
@@ -561,18 +616,37 @@ mod tests {
     #[test]
     fn detail_sorts_checks_failing_first() {
         let detail = parse_detail(&detail_fixture()).unwrap();
-        let states: Vec<_> = detail.checks.iter().map(|check| (check.name.as_str(), check.state)).collect();
+        let states: Vec<_> = detail
+            .checks
+            .iter()
+            .map(|check| (check.name.as_str(), check.state))
+            .collect();
         assert_eq!(
             states,
-            [("deploy", CheckState::Failing), ("test", CheckState::Pending), ("lint", CheckState::Passing)]
+            [
+                ("deploy", CheckState::Failing),
+                ("test", CheckState::Pending),
+                ("lint", CheckState::Passing)
+            ]
         );
     }
 
     #[test]
     fn detail_reviewers_prefer_the_pending_request() {
         let detail = parse_detail(&detail_fixture()).unwrap();
-        let reviewers: Vec<_> = detail.reviewers.iter().map(|r| (r.name.as_str(), r.state.as_str())).collect();
-        assert_eq!(reviewers, [("lead", "requested"), ("backend", "requested"), ("peer", "approved")]);
+        let reviewers: Vec<_> = detail
+            .reviewers
+            .iter()
+            .map(|r| (r.name.as_str(), r.state.as_str()))
+            .collect();
+        assert_eq!(
+            reviewers,
+            [
+                ("lead", "requested"),
+                ("backend", "requested"),
+                ("peer", "approved")
+            ]
+        );
     }
 
     #[test]

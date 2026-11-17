@@ -20,6 +20,7 @@ The first run writes `~/.config/rs-github-inbox/config.yaml` (or `$XDG_CONFIG_HO
 
 - `groups`: one GitHub search per group, in display order. The tool adds `is:pr is:open archived:false` to each query. `collapsed: true` folds the group on start.
 - `updated_within_days`: adds `updated:>=<date>` to every query. Remove the key to see older pull requests.
+- `theme`: `dracula` (the default) or `terminal`, which uses your terminal's own colors.
 - `open_diff`: the shell command that `d` runs. `{repo}`, `{number}` and `{url}` are replaced. The default is `gh pr diff {number} -R {repo} | delta`.
 
 A search shows at most 100 pull requests. A group with more matches shows a count like `100 of 140`.

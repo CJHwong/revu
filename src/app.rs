@@ -123,7 +123,11 @@ impl App {
             KeyCode::Char('G') | KeyCode::End => self.select_last(),
             KeyCode::Char(' ') | KeyCode::Tab => self.toggle_selected_group(),
             KeyCode::Enter => return self.open_selected(),
-            KeyCode::Char('o') => return self.selected_pr().map(|pr| Action::OpenBrowser(pr.url.clone())),
+            KeyCode::Char('o') => {
+                return self
+                    .selected_pr()
+                    .map(|pr| Action::OpenBrowser(pr.url.clone()));
+            }
             KeyCode::Char('d') => return self.selected_pr().cloned().map(Action::RunDiff),
             _ => {}
         }
@@ -135,7 +139,9 @@ impl App {
             return None;
         };
         match key {
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Left => self.screen = Screen::Inbox,
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Left => {
+                self.screen = Screen::Inbox
+            }
             KeyCode::Char('j') | KeyCode::Down => view.scroll = view.scroll.saturating_add(1),
             KeyCode::Char('k') | KeyCode::Up => view.scroll = view.scroll.saturating_sub(1),
             KeyCode::Char(' ') | KeyCode::PageDown => view.scroll = view.scroll.saturating_add(20),
@@ -158,7 +164,11 @@ impl App {
             return None;
         }
         let pr = self.selected_pr()?.clone();
-        self.screen = Screen::Detail(Box::new(DetailView { pr: pr.clone(), detail: None, scroll: 0 }));
+        self.screen = Screen::Detail(Box::new(DetailView {
+            pr: pr.clone(),
+            detail: None,
+            scroll: 0,
+        }));
         Some(Action::FetchDetail(pr))
     }
 
@@ -169,7 +179,10 @@ impl App {
             None => return,
         };
         self.groups[group_index].collapsed = !self.groups[group_index].collapsed;
-        let header = self.rows().iter().position(|row| *row == Row::Header(group_index));
+        let header = self
+            .rows()
+            .iter()
+            .position(|row| *row == Row::Header(group_index));
         self.list_state.select(header);
     }
 
@@ -181,7 +194,8 @@ impl App {
     }
 
     fn select_last(&mut self) {
-        self.list_state.select(Some(self.rows().len().saturating_sub(1)));
+        self.list_state
+            .select(Some(self.rows().len().saturating_sub(1)));
     }
 
     fn clamp_selection(&mut self) {
@@ -229,7 +243,10 @@ mod tests {
     #[test]
     fn collapsed_groups_show_only_their_header() {
         let app = app_with(vec![group("A", &[1, 2], false), group("B", &[3], true)]);
-        assert_eq!(app.rows(), [Row::Header(0), Row::Pr(0, 0), Row::Pr(0, 1), Row::Header(1)]);
+        assert_eq!(
+            app.rows(),
+            [Row::Header(0), Row::Pr(0, 0), Row::Pr(0, 1), Row::Header(1)]
+        );
     }
 
     #[test]
@@ -275,7 +292,9 @@ mod tests {
         app.list_state.select(Some(1));
         app.handle_key(KeyCode::Enter);
         app.set_detail("acme/app", 8, Err("boom".to_string()));
-        let Screen::Detail(view) = &app.screen else { panic!("expected detail screen") };
+        let Screen::Detail(view) = &app.screen else {
+            panic!("expected detail screen")
+        };
         assert!(view.detail.is_none());
     }
 

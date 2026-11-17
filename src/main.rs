@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod github;
 mod model;
+mod theme;
 mod ui;
 
 use anyhow::{Context, Result};
@@ -22,7 +23,11 @@ use model::{Group, PrDetail, PrSummary};
 /// Results from the fetch threads. Errors are strings because they only get displayed.
 enum Message {
     Inbox(Result<Vec<Group>, String>, DateTime<Utc>),
-    Detail { repo: String, number: u64, result: Result<Box<PrDetail>, String> },
+    Detail {
+        repo: String,
+        number: u64,
+        result: Result<Box<PrDetail>, String>,
+    },
 }
 
 struct Session {
@@ -36,7 +41,12 @@ fn main() -> Result<()> {
     let config_path = config::default_path()?;
     let config = config::load_or_init(&config_path)?;
     let (sender, receiver) = mpsc::channel();
-    let mut session = Session { config, config_path, sender, receiver };
+    let mut session = Session {
+        config,
+        config_path,
+        sender,
+        receiver,
+    };
     let mut app = App::new();
     start_inbox_fetch(&session, &mut app);
 
@@ -48,7 +58,7 @@ fn main() -> Result<()> {
 
 fn run(terminal: &mut DefaultTerminal, app: &mut App, session: &mut Session) -> Result<()> {
     loop {
-        terminal.draw(|frame| ui::render(frame, app, Utc::now()))?;
+        terminal.draw(|frame| ui::render(frame, app, &session.config.theme, Utc::now()))?;
         apply_messages(app, &session.receiver);
         let Some(key) = next_key()? else {
             continue;
@@ -81,13 +91,22 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
         match message {
             Message::Inbox(Ok(groups), fetched_at) => app.set_groups(groups, fetched_at),
             Message::Inbox(Err(error), _) => app.set_inbox_error(error),
-            Message::Detail { repo, number, result } => app.set_detail(&repo, number, result.map(|detail| *detail)),
+            Message::Detail {
+                repo,
+                number,
+                result,
+            } => app.set_detail(&repo, number, result.map(|detail| *detail)),
         }
     }
 }
 
 /// Returns false when the app should quit.
-fn perform(action: Action, terminal: &mut DefaultTerminal, app: &mut App, session: &mut Session) -> Result<bool> {
+fn perform(
+    action: Action,
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    session: &mut Session,
+) -> Result<bool> {
     match action {
         Action::Quit => return Ok(false),
         Action::Refresh => refresh(app, session),
@@ -115,7 +134,8 @@ fn start_inbox_fetch(session: &Session, app: &mut App) {
     let config = session.config.clone();
     let sender = session.sender.clone();
     thread::spawn(move || {
-        let result = github::fetch_inbox(&config, Local::now().date_naive()).map_err(|error| format!("{error:#}"));
+        let result = github::fetch_inbox(&config, Local::now().date_naive())
+            .map_err(|error| format!("{error:#}"));
         // The receiver only goes away when the app exits, so a failed send needs no handling.
         let _ = sender.send(Message::Inbox(result, Utc::now()));
     });
@@ -124,20 +144,35 @@ fn start_inbox_fetch(session: &Session, app: &mut App) {
 fn start_detail_fetch(session: &Session, pr: PrSummary) {
     let sender = session.sender.clone();
     thread::spawn(move || {
-        let result = github::fetch_detail(&pr.repo, pr.number).map(Box::new).map_err(|error| format!("{error:#}"));
-        let _ = sender.send(Message::Detail { repo: pr.repo, number: pr.number, result });
+        let result = github::fetch_detail(&pr.repo, pr.number)
+            .map(Box::new)
+            .map_err(|error| format!("{error:#}"));
+        let _ = sender.send(Message::Detail {
+            repo: pr.repo,
+            number: pr.number,
+            result,
+        });
     });
 }
 
 fn open_browser(app: &mut App, url: &str) {
-    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
     if let Err(error) = Command::new(opener).arg(url).status() {
         app.error = Some(format!("{opener} failed: {error}"));
     }
 }
 
 /// Hands the terminal to the diff command, then takes it back.
-fn run_diff(terminal: &mut DefaultTerminal, app: &mut App, template: &str, pr: &PrSummary) -> Result<()> {
+fn run_diff(
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    template: &str,
+    pr: &PrSummary,
+) -> Result<()> {
     let command = template
         .replace("{repo}", &pr.repo)
         .replace("{number}", &pr.number.to_string())
@@ -163,6 +198,8 @@ fn wait_for_enter(message: &str) -> Result<()> {
     let mut stdout = std::io::stdout();
     write!(stdout, "\n{message}\nPress Enter to return to the inbox.")?;
     stdout.flush()?;
-    std::io::stdin().read_line(&mut String::new()).context("read Enter")?;
+    std::io::stdin()
+        .read_line(&mut String::new())
+        .context("read Enter")?;
     Ok(())
 }

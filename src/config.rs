@@ -3,10 +3,15 @@ use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::theme::{self, Theme};
+
 pub const DEFAULT_CONFIG: &str = r#"# rs-github-inbox config. Press r in the inbox to reload it.
 # Every group query gets "is:pr is:open archived:false" added,
 # plus "updated:>=<date>" when updated_within_days is set.
 updated_within_days: 30
+
+# Color theme: dracula or terminal (your terminal's own colors).
+theme: dracula
 
 # Runs when you press d. {repo}, {number} and {url} are replaced.
 open_diff: "gh pr diff {number} -R {repo} | delta"
@@ -32,6 +37,17 @@ pub struct Config {
     pub updated_within_days: Option<u32>,
     pub open_diff: String,
     pub groups: Vec<GroupConfig>,
+    #[serde(default = "default_theme", deserialize_with = "theme_from_name")]
+    pub theme: Theme,
+}
+
+fn default_theme() -> Theme {
+    theme::by_name("dracula").expect("dracula is a built-in theme")
+}
+
+fn theme_from_name<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Theme, D::Error> {
+    let name = String::deserialize(deserializer)?;
+    theme::by_name(&name).map_err(serde::de::Error::custom)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -56,7 +72,9 @@ pub fn default_path() -> Result<PathBuf> {
 /// Writes the default config on first run, so the user has a file to edit.
 pub fn load_or_init(path: &Path) -> Result<Config> {
     if !path.exists() {
-        let dir = path.parent().context("config path has no parent directory")?;
+        let dir = path
+            .parent()
+            .context("config path has no parent directory")?;
         fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
         fs::write(path, DEFAULT_CONFIG).with_context(|| format!("write {}", path.display()))?;
     }
@@ -80,6 +98,14 @@ mod tests {
         assert_eq!(config.groups[0].title, "Needs your review");
         assert!(!config.groups[0].collapsed);
         assert!(config.groups[1].collapsed);
+    }
+
+    #[test]
+    fn theme_defaults_to_dracula_and_rejects_unknown_names() {
+        let config = parse("open_diff: x\ngroups: []\n").unwrap();
+        assert_eq!(config.theme, theme::by_name("dracula").unwrap());
+        let error = parse("open_diff: x\ngroups: []\ntheme: nope\n").unwrap_err();
+        assert!(format!("{error:#}").contains("unknown theme"));
     }
 
     #[test]
