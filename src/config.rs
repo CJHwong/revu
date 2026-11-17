@@ -1,0 +1,100 @@
+use anyhow::{Context, Result};
+use serde::Deserialize;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+pub const DEFAULT_CONFIG: &str = r#"# rs-github-inbox config. Press r in the inbox to reload it.
+# Every group query gets "is:pr is:open archived:false" added,
+# plus "updated:>=<date>" when updated_within_days is set.
+updated_within_days: 30
+
+# Runs when you press d. {repo}, {number} and {url} are replaced.
+open_diff: "gh pr diff {number} -R {repo} | delta"
+
+groups:
+  - title: Needs your review
+    query: user-review-requested:@me
+  - title: Needs your teams' review
+    query: review-requested:@me -user-review-requested:@me
+    collapsed: true
+  - title: Your drafts
+    query: draft:true author:@me
+    collapsed: true
+  - title: Waiting for review or checks
+    query: draft:false author:@me
+  - title: Reviewed by you
+    query: reviewed-by:@me -author:@me
+    collapsed: true
+"#;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Config {
+    pub updated_within_days: Option<u32>,
+    pub open_diff: String,
+    pub groups: Vec<GroupConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GroupConfig {
+    pub title: String,
+    pub query: String,
+    #[serde(default)]
+    pub collapsed: bool,
+}
+
+pub fn default_path() -> Result<PathBuf> {
+    let base = match std::env::var_os("XDG_CONFIG_HOME") {
+        Some(dir) => PathBuf::from(dir),
+        None => {
+            let home = std::env::var_os("HOME").context("HOME is not set")?;
+            PathBuf::from(home).join(".config")
+        }
+    };
+    Ok(base.join("rs-github-inbox").join("config.yaml"))
+}
+
+/// Writes the default config on first run, so the user has a file to edit.
+pub fn load_or_init(path: &Path) -> Result<Config> {
+    if !path.exists() {
+        let dir = path.parent().context("config path has no parent directory")?;
+        fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        fs::write(path, DEFAULT_CONFIG).with_context(|| format!("write {}", path.display()))?;
+    }
+    let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    parse(&text).with_context(|| format!("parse {}", path.display()))
+}
+
+pub fn parse(text: &str) -> Result<Config> {
+    Ok(serde_yaml::from_str(text)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_parses_into_five_groups() {
+        let config = parse(DEFAULT_CONFIG).unwrap();
+        assert_eq!(config.updated_within_days, Some(30));
+        assert_eq!(config.groups.len(), 5);
+        assert_eq!(config.groups[0].title, "Needs your review");
+        assert!(!config.groups[0].collapsed);
+        assert!(config.groups[1].collapsed);
+    }
+
+    #[test]
+    fn updated_within_days_is_optional() {
+        let config = parse("open_diff: x\ngroups: []\n").unwrap();
+        assert_eq!(config.updated_within_days, None);
+    }
+
+    #[test]
+    fn first_run_writes_the_default_file() {
+        let dir = std::env::temp_dir().join(format!("rs-github-inbox-test-{}", std::process::id()));
+        let path = dir.join("nested").join("config.yaml");
+        let config = load_or_init(&path).unwrap();
+        assert_eq!(config.groups.len(), 5);
+        assert_eq!(fs::read_to_string(&path).unwrap(), DEFAULT_CONFIG);
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
