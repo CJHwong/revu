@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use app::{Action, App};
 use config::Config;
-use model::{Group, PrDetail, PrRef};
+use model::{ChangedFile, Group, PrDetail, PrRef};
 
 /// Results from the fetch threads. Errors are strings because they only get displayed.
 enum Message {
@@ -32,6 +32,16 @@ enum Message {
     Detail {
         pr: PrRef,
         result: Result<Box<PrDetail>, String>,
+    },
+    Files {
+        pr: PrRef,
+        result: Result<Vec<ChangedFile>, String>,
+    },
+    Viewed {
+        pr: PrRef,
+        path: String,
+        viewed: bool,
+        result: Result<(), String>,
     },
 }
 
@@ -136,6 +146,13 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
             Message::Inbox(Ok(groups), fetched_at) => app.set_groups(groups, fetched_at),
             Message::Inbox(Err(error), _) => app.set_inbox_error(error),
             Message::Detail { pr, result } => app.set_detail(&pr, result.map(|detail| *detail)),
+            Message::Files { pr, result } => app.set_files(&pr, result),
+            Message::Viewed {
+                pr,
+                path,
+                viewed,
+                result,
+            } => app.set_viewed_result(&pr, &path, viewed, result),
         }
     }
 }
@@ -153,6 +170,13 @@ fn perform(
         Action::FetchDetail(pr) => start_detail_fetch(session, pr),
         Action::OpenBrowser(url) => open_browser(app, &url),
         Action::RunDiff(pr) => run_diff(terminal, app, session, &pr)?,
+        Action::FetchFiles(pr) => start_files_fetch(session, pr),
+        Action::SetViewed {
+            pr,
+            pull_request_id,
+            path,
+            viewed,
+        } => start_viewed_sync(session, pr, pull_request_id, path, viewed),
     }
     Ok(true)
 }
@@ -188,6 +212,34 @@ fn start_detail_fetch(session: &Session, pr: PrRef) {
             .map(Box::new)
             .map_err(|error| format!("{error:#}"));
         let _ = sender.send(Message::Detail { pr, result });
+    });
+}
+
+fn start_files_fetch(session: &Session, pr: PrRef) {
+    let sender = session.sender.clone();
+    thread::spawn(move || {
+        let result = github::fetch_files(&pr.repo, pr.number).map_err(|error| format!("{error:#}"));
+        let _ = sender.send(Message::Files { pr, result });
+    });
+}
+
+fn start_viewed_sync(
+    session: &Session,
+    pr: PrRef,
+    pull_request_id: String,
+    path: String,
+    viewed: bool,
+) {
+    let sender = session.sender.clone();
+    thread::spawn(move || {
+        let result = github::set_viewed(&pull_request_id, &path, viewed)
+            .map_err(|error| format!("{error:#}"));
+        let _ = sender.send(Message::Viewed {
+            pr,
+            path,
+            viewed,
+            result,
+        });
     });
 }
 

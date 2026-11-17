@@ -116,6 +116,30 @@ pub struct CheckLine {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewedState {
+    Viewed,
+    Unviewed,
+    /// Marked viewed once, then the file changed again.
+    Dismissed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangedFile {
+    pub path: String,
+    pub additions: u64,
+    pub deletions: u64,
+    /// GitHub's change type in lower case: added, modified, deleted, renamed, copied, changed.
+    pub change: String,
+    pub viewed: ViewedState,
+}
+
+/// One page of `pullRequest.files`, plus the cursor for the next page.
+pub struct FilesPage {
+    pub files: Vec<ChangedFile>,
+    pub next_cursor: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitLine {
     pub oid: String,
@@ -145,6 +169,8 @@ pub struct Activity {
 pub struct PrDetail {
     /// GraphQL node id, which the viewed-file mutations take.
     pub id: String,
+    pub base_oid: String,
+    pub head_oid: String,
     pub summary: PrSummary,
     pub body: String,
     pub created_at: DateTime<Utc>,
@@ -321,6 +347,8 @@ struct RawDetail {
     #[serde(flatten)]
     row: RawRow,
     id: String,
+    base_ref_oid: String,
+    head_ref_oid: String,
     commit_list: RawCommitList,
     body: String,
     created_at: DateTime<Utc>,
@@ -368,7 +396,56 @@ struct RawComment {
     body: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawFiles {
+    page_info: RawPageInfo,
+    nodes: Vec<RawFile>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawPageInfo {
+    has_next_page: bool,
+    end_cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawFile {
+    path: String,
+    additions: u64,
+    deletions: u64,
+    change_type: String,
+    viewer_viewed_state: String,
+}
+
 // ---- Conversion ----
+
+/// `files` is `data.repository.pullRequest.files`.
+pub fn parse_files_page(files: &Value) -> Result<FilesPage> {
+    let raw: RawFiles = serde_json::from_value(files.clone()).context("parse changed files")?;
+    let next_cursor = raw
+        .page_info
+        .end_cursor
+        .filter(|_| raw.page_info.has_next_page);
+    let files = raw
+        .nodes
+        .into_iter()
+        .map(|file| ChangedFile {
+            viewed: match file.viewer_viewed_state.as_str() {
+                "VIEWED" => ViewedState::Viewed,
+                "DISMISSED" => ViewedState::Dismissed,
+                _ => ViewedState::Unviewed,
+            },
+            change: humanize(&file.change_type),
+            path: file.path,
+            additions: file.additions,
+            deletions: file.deletions,
+        })
+        .collect();
+    Ok(FilesPage { files, next_cursor })
+}
 
 /// `data` is the GraphQL `data` object, holding one `g<index>` search per group.
 pub fn parse_inbox(data: &Value, groups: &[GroupConfig]) -> Result<Vec<Group>> {
@@ -409,6 +486,8 @@ pub fn parse_detail(pull_request: &Value) -> Result<PrDetail> {
         .collect();
     Ok(PrDetail {
         id: raw.id,
+        base_oid: raw.base_ref_oid,
+        head_oid: raw.head_ref_oid,
         commit_count: raw.commit_list.total_count,
         commits,
         summary: summary_from(raw.row),
@@ -654,7 +733,7 @@ fn first_line(body: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use serde_json::json;
 
@@ -746,6 +825,10 @@ mod tests {
         assert_eq!(pr.review, ReviewState::Awaiting);
     }
 
+    pub fn sample_detail() -> PrDetail {
+        parse_detail(&detail_fixture()).unwrap()
+    }
+
     fn detail_fixture() -> Value {
         let mut pr = row(
             56,
@@ -769,6 +852,8 @@ mod tests {
         );
         let extra = json!({
             "id": "PR_node",
+            "baseRefOid": "base000",
+            "headRefOid": "head999",
             "commitList": { "totalCount": 2, "nodes": [
                 { "commit": {
                     "oid": "aaa111", "messageHeadline": "first", "authoredDate": "2026-11-12T10:00:00Z",
@@ -900,5 +985,39 @@ mod tests {
         ] {
             assert_eq!(parse_pr_ref(text), None, "{text}");
         }
+    }
+
+    #[test]
+    fn files_page_maps_viewed_states_and_the_cursor() {
+        let files = json!({
+            "pageInfo": { "hasNextPage": true, "endCursor": "CUR" },
+            "nodes": [
+                { "path": "a.md", "additions": 1, "deletions": 2, "changeType": "MODIFIED", "viewerViewedState": "VIEWED" },
+                { "path": "b.md", "additions": 0, "deletions": 0, "changeType": "RENAMED", "viewerViewedState": "DISMISSED" },
+                { "path": "c.md", "additions": 3, "deletions": 0, "changeType": "ADDED", "viewerViewedState": "UNVIEWED" },
+            ]
+        });
+        let page = parse_files_page(&files).unwrap();
+        assert_eq!(page.next_cursor.as_deref(), Some("CUR"));
+        let states: Vec<_> = page
+            .files
+            .iter()
+            .map(|file| (file.change.as_str(), file.viewed))
+            .collect();
+        assert_eq!(
+            states,
+            [
+                ("modified", ViewedState::Viewed),
+                ("renamed", ViewedState::Dismissed),
+                ("added", ViewedState::Unviewed)
+            ]
+        );
+    }
+
+    #[test]
+    fn last_files_page_has_no_cursor() {
+        let files =
+            json!({ "pageInfo": { "hasNextPage": false, "endCursor": "CUR" }, "nodes": [] });
+        assert!(parse_files_page(&files).unwrap().next_cursor.is_none());
     }
 }

@@ -1,6 +1,6 @@
 # rs-github-inbox
 
-A terminal version of GitHub's pull request inbox. It shows the pull requests you care about across every repository, grouped like the web inbox, and opens each one with its rendered description, reviewers, labels, checks and activity. It is read-only.
+A terminal version of GitHub's pull request inbox. It shows the pull requests you care about across every repository, grouped like the web inbox, and opens each one with its rendered description, reviewers, labels, checks and activity. It writes one thing to GitHub: the Viewed checkbox on a file, when you press `v`.
 
 ## Requirements
 
@@ -36,7 +36,9 @@ A search shows at most 100 pull requests. A group with more matches shows a coun
 | Inbox | `Space` | Fold the current group |
 | Inbox | `g` / `G` | Top / bottom |
 | Inbox | `r` | Reload the config and fetch again |
-| Pull request | `Tab` / `Shift+Tab`, `1`-`3` | Switch between Overview, Commits and Checks |
+| Pull request | `Tab` / `Shift+Tab`, `1`-`4` | Switch between Overview, Commits, Checks and Files changed |
+| Files changed | `v` | Toggle Viewed. It syncs to GitHub's Viewed checkbox at once. |
+| Files changed | `H` | Hide viewed files |
 | Pull request | `j` / `k`, `Space` / `b` | Scroll the description, or move in a list |
 | Pull request | `Enter` | Open the selected commit or check in the browser |
 | Pull request | `r` | Fetch the pull request again |

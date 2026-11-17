@@ -8,7 +8,8 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::app::{App, DetailView, Prompt, Row, Screen, Tab};
 use crate::model::{
-    Activity, CheckLine, CheckState, CheckSummary, Group, PrDetail, PrRef, PrSummary, ReviewState,
+    Activity, ChangedFile, CheckLine, CheckState, CheckSummary, Group, PrDetail, PrRef, PrSummary,
+    ReviewState, ViewedState,
 };
 use crate::theme::Theme;
 
@@ -39,7 +40,7 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: &Theme, now: DateTime<Utc
     let base = Style::new().bg(theme.background).fg(theme.foreground);
     frame.render_widget(Block::new().style(base), frame.area());
     if let Screen::Detail(view) = &mut app.screen {
-        render_detail(frame, view, paint);
+        render_detail(frame, view, app.error.as_deref(), paint);
     } else {
         render_inbox(frame, app, paint);
     }
@@ -207,15 +208,18 @@ fn pad_span(span: Span<'static>, width: usize) -> Span<'static> {
 fn detail_help(tab: Tab) -> &'static str {
     match tab {
         Tab::Overview => {
-            "tab/1-3 switch | j/k scroll | o browser | d diff | r reload | ctrl-l open link | esc back"
+            "tab/1-4 switch | j/k scroll | o browser | d diff | r reload | ctrl-l open link | esc back"
         }
         Tab::Commits | Tab::Checks => {
-            "tab/1-3 switch | j/k move | enter/o browser | d diff | r reload | ctrl-l open link | esc back"
+            "tab/1-4 switch | j/k move | enter/o browser | d diff | r reload | ctrl-l open link | esc back"
+        }
+        Tab::Files => {
+            "tab/1-4 switch | j/k move | v viewed | H hide viewed | o browser | r reload | esc back"
         }
     }
 }
 
-fn render_detail(frame: &mut Frame, view: &mut DetailView, paint: Paint) {
+fn render_detail(frame: &mut Frame, view: &mut DetailView, error: Option<&str>, paint: Paint) {
     let theme = paint.theme;
     let [top, tabs, body, bottom] = Layout::vertical([
         Constraint::Length(3),
@@ -224,11 +228,14 @@ fn render_detail(frame: &mut Frame, view: &mut DetailView, paint: Paint) {
         Constraint::Length(1),
     ])
     .areas(frame.area());
-    frame.render_widget(
-        Paragraph::new(paint.span(detail_help(view.tab), theme.muted)),
-        bottom,
-    );
+    // An error, such as a failed Viewed sync, replaces the help line until the next action.
+    let footer = match error {
+        Some(message) => paint.span(message.to_string(), theme.danger),
+        None => paint.span(detail_help(view.tab), theme.muted),
+    };
+    frame.render_widget(Paragraph::new(footer), bottom);
 
+    let visible_files = view.visible_files();
     let DetailView {
         pr,
         detail,
@@ -236,6 +243,10 @@ fn render_detail(frame: &mut Frame, view: &mut DetailView, paint: Paint) {
         scroll,
         commits,
         checks,
+        files,
+        file_state,
+        hide_viewed,
+        ..
     } = view;
     let detail = match detail {
         None => {
@@ -261,7 +272,119 @@ fn render_detail(frame: &mut Frame, view: &mut DetailView, paint: Paint) {
         Tab::Overview => render_overview(frame, detail, *scroll, body, paint),
         Tab::Commits => render_commits(frame, detail, commits, body, paint),
         Tab::Checks => render_checks(frame, detail, checks, body, paint),
+        Tab::Files => {
+            let files_view = FilesView {
+                files: files.as_ref(),
+                visible: &visible_files,
+                hide_viewed: *hide_viewed,
+            };
+            render_files(frame, &files_view, file_state, body, paint);
+        }
     }
+}
+
+struct FilesView<'a> {
+    files: Option<&'a Result<Vec<ChangedFile>, String>>,
+    visible: &'a [usize],
+    hide_viewed: bool,
+}
+
+fn render_files(
+    frame: &mut Frame,
+    view: &FilesView,
+    state: &mut ListState,
+    area: Rect,
+    paint: Paint,
+) {
+    let theme = paint.theme;
+    let files = match view.files {
+        None => {
+            frame.render_widget(
+                Paragraph::new(paint.span(" loading files...", theme.warning)),
+                area,
+            );
+            return;
+        }
+        Some(Err(error)) => {
+            let message = paint.span(format!(" {error}"), theme.danger);
+            frame.render_widget(Paragraph::new(message).wrap(Wrap { trim: false }), area);
+            return;
+        }
+        Some(Ok(files)) => files,
+    };
+    let [list_area, diff_area] =
+        Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(area);
+
+    let viewed = files
+        .iter()
+        .filter(|file| file.viewed == ViewedState::Viewed)
+        .count();
+    let hidden_note = if view.hide_viewed {
+        ", viewed hidden"
+    } else {
+        ""
+    };
+    let title = format!(" {viewed}/{} viewed{hidden_note} ", files.len());
+    let items: Vec<ListItem> = view
+        .visible
+        .iter()
+        .map(|index| ListItem::new(file_line(&files[*index], list_area.width as usize, paint)))
+        .collect();
+    let list = List::new(items)
+        .highlight_style(Style::new().bg(theme.selection))
+        .block(
+            Block::new()
+                .borders(Borders::RIGHT)
+                .border_style(Style::new().fg(theme.muted))
+                .title(paint.span(title, theme.heading)),
+        );
+    frame.render_stateful_widget(list, list_area, state);
+
+    let selected = state
+        .selected()
+        .and_then(|position| view.visible.get(position));
+    let summary = selected.map(|index| file_summary(&files[*index], paint));
+    frame.render_widget(Paragraph::new(summary.unwrap_or_default()), diff_area);
+}
+
+/// "✓ src/app/ main.rs  +3 -1", with the directory muted so the file name stands out.
+fn file_line(file: &ChangedFile, width: usize, paint: Paint) -> Line<'static> {
+    let theme = paint.theme;
+    let (marker, marker_color) = match file.viewed {
+        ViewedState::Viewed => ("✓", theme.success),
+        ViewedState::Dismissed => ("!", theme.warning),
+        ViewedState::Unviewed => (" ", theme.muted),
+    };
+    let (directory, name) = match file.path.rsplit_once('/') {
+        Some((directory, name)) => (format!("{directory}/"), name.to_string()),
+        None => (String::new(), file.path.clone()),
+    };
+    let counts = format!(" +{} -{}", file.additions, file.deletions);
+    let path_width = width.saturating_sub(display_width(&counts) + 4);
+    let name_width = display_width(&name).min(path_width);
+    let directory = truncate_to_width(&directory, path_width - name_width);
+    let padding = path_width.saturating_sub(display_width(&directory) + name_width);
+    Line::from(vec![
+        paint.span(format!(" {marker} "), marker_color),
+        paint.span(directory, theme.muted),
+        paint.bold(truncate_to_width(&name, name_width), theme.foreground),
+        Span::from(" ".repeat(padding)),
+        paint.span(format!(" +{}", file.additions), theme.success),
+        paint.span(format!(" -{}", file.deletions), theme.danger),
+    ])
+}
+
+fn file_summary(file: &ChangedFile, paint: Paint) -> Text<'static> {
+    let theme = paint.theme;
+    let viewed = match file.viewed {
+        ViewedState::Viewed => paint.span("viewed", theme.success),
+        ViewedState::Dismissed => paint.span("changed since you viewed it", theme.warning),
+        ViewedState::Unviewed => paint.span("not viewed", theme.muted),
+    };
+    Text::from(vec![
+        Line::from(paint.bold(format!(" {}", file.path), theme.foreground)),
+        Line::from(vec![Span::from(format!(" {}, ", file.change)), viewed]),
+    ])
 }
 
 fn detail_title(pr: &PrRef, paint: Paint) -> Text<'static> {
@@ -310,6 +433,7 @@ fn tab_bar(current: Tab, detail: &PrDetail, paint: Paint) -> Line<'static> {
             Tab::Overview => String::new(),
             Tab::Commits => format!(" {}", detail.commit_count),
             Tab::Checks => format!(" {}", detail.checks.len()),
+            Tab::Files => format!(" {}", detail.changed_files),
         };
         let label = format!(" {} {}{count} ", index + 1, tab.title());
         if *tab == current {

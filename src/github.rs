@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::process::Command;
 
 use crate::config::Config;
-use crate::model::{self, Group, PrDetail};
+use crate::model::{self, ChangedFile, Group, PrDetail};
 
 /// GitHub's maximum page size for a search connection.
 const PAGE_SIZE: u32 = 100;
@@ -49,7 +49,7 @@ pub fn detail_document() -> String {
     format!(
         "query($owner: String!, $name: String!, $number: Int!) {{ \
          repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ \
-         {ROW_FIELDS} id body createdAt additions deletions changedFiles baseRefName headRefName \
+         {ROW_FIELDS} id baseRefOid headRefOid body createdAt additions deletions changedFiles baseRefName headRefName \
          commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 100) {{ {ROLLUP_COUNTS} \
            nodes {{ __typename \
              ... on CheckRun {{ name conclusion status detailsUrl startedAt completedAt \
@@ -92,9 +92,7 @@ pub fn fetch_inbox(config: &Config, today: NaiveDate) -> Result<Vec<Group>> {
 }
 
 pub fn fetch_detail(repo: &str, number: u64) -> Result<PrDetail> {
-    let (owner, name) = repo
-        .split_once('/')
-        .with_context(|| format!("repo \"{repo}\" is not owner/name"))?;
+    let (owner, name) = split_repo(repo)?;
     let args = [
         "-f".to_string(),
         format!("query={}", detail_document()),
@@ -111,6 +109,70 @@ pub fn fetch_detail(repo: &str, number: u64) -> Result<PrDetail> {
         .filter(|value| !value.is_null())
         .with_context(|| format!("{repo}#{number} not found"))?;
     model::parse_detail(pull_request)
+}
+
+const FILES_DOCUMENT: &str = "query($owner: String!, $name: String!, $number: Int!, $cursor: String) { \
+    repository(owner: $owner, name: $name) { pullRequest(number: $number) { \
+    files(first: 100, after: $cursor) { pageInfo { hasNextPage endCursor } \
+    nodes { path additions deletions changeType viewerViewedState } } } } }";
+
+/// Follows the cursor until GitHub reports no next page.
+pub fn fetch_files(repo: &str, number: u64) -> Result<Vec<ChangedFile>> {
+    let (owner, name) = split_repo(repo)?;
+    let mut files = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let mut args = vec![
+            "-f".to_string(),
+            format!("query={FILES_DOCUMENT}"),
+            "-f".to_string(),
+            format!("owner={owner}"),
+            "-f".to_string(),
+            format!("name={name}"),
+            "-F".to_string(),
+            format!("number={number}"),
+        ];
+        if let Some(after) = &cursor {
+            args.extend(["-f".to_string(), format!("cursor={after}")]);
+        }
+        let data = run_graphql(&args)?;
+        let raw = data
+            .pointer("/repository/pullRequest/files")
+            .with_context(|| format!("{repo}#{number} has no files field"))?;
+        let page = model::parse_files_page(raw)?;
+        files.extend(page.files);
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => return Ok(files),
+        }
+    }
+}
+
+/// Sets the viewer's Viewed checkbox for one file, the same one the web shows.
+pub fn set_viewed(pull_request_id: &str, path: &str, viewed: bool) -> Result<()> {
+    let mutation = if viewed {
+        "markFileAsViewed"
+    } else {
+        "unmarkFileAsViewed"
+    };
+    let document = format!(
+        "mutation($id: ID!, $path: String!) {{ {mutation}(input: {{ pullRequestId: $id, path: $path }}) {{ clientMutationId }} }}"
+    );
+    let args = [
+        "-f".to_string(),
+        format!("query={document}"),
+        "-f".to_string(),
+        format!("id={pull_request_id}"),
+        "-f".to_string(),
+        format!("path={path}"),
+    ];
+    run_graphql(&args)?;
+    Ok(())
+}
+
+fn split_repo(repo: &str) -> Result<(&str, &str)> {
+    repo.split_once('/')
+        .with_context(|| format!("repo \"{repo}\" is not owner/name"))
 }
 
 /// Returns the GraphQL `data` object. A GraphQL error fails the call even when gh exits 0.

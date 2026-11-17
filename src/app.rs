@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::ListState;
 
-use crate::model::{Group, PrDetail, PrRef, PrSummary, parse_pr_ref};
+use crate::model::{ChangedFile, Group, PrDetail, PrRef, PrSummary, ViewedState, parse_pr_ref};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Row {
@@ -20,6 +20,13 @@ pub enum Action {
     FetchDetail(PrRef),
     OpenBrowser(String),
     RunDiff(PrRef),
+    FetchFiles(PrRef),
+    SetViewed {
+        pr: PrRef,
+        pull_request_id: String,
+        path: String,
+        viewed: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,16 +34,18 @@ pub enum Tab {
     Overview,
     Commits,
     Checks,
+    Files,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 3] = [Tab::Overview, Tab::Commits, Tab::Checks];
+    pub const ALL: [Tab; 4] = [Tab::Overview, Tab::Commits, Tab::Checks, Tab::Files];
 
     pub fn title(self) -> &'static str {
         match self {
             Tab::Overview => "Overview",
             Tab::Commits => "Commits",
             Tab::Checks => "Checks",
+            Tab::Files => "Files changed",
         }
     }
 
@@ -58,6 +67,12 @@ pub struct DetailView {
     pub scroll: u16,
     pub commits: ListState,
     pub checks: ListState,
+    /// `None` until the Files tab is first shown and its request returns.
+    pub files: Option<Result<Vec<ChangedFile>, String>>,
+    files_requested: bool,
+    /// Indexes into the visible files, not into `files`.
+    pub file_state: ListState,
+    pub hide_viewed: bool,
 }
 
 impl DetailView {
@@ -69,11 +84,76 @@ impl DetailView {
             scroll: 0,
             commits: ListState::default().with_selected(Some(0)),
             checks: ListState::default().with_selected(Some(0)),
+            files: None,
+            files_requested: false,
+            file_state: ListState::default().with_selected(Some(0)),
+            hide_viewed: false,
         }
     }
 
     fn loaded(&self) -> Option<&PrDetail> {
         self.detail.as_ref()?.as_ref().ok()
+    }
+
+    pub fn loaded_files(&self) -> Option<&Vec<ChangedFile>> {
+        self.files.as_ref()?.as_ref().ok()
+    }
+
+    /// Indexes of the files the list shows, in GitHub's order.
+    pub fn visible_files(&self) -> Vec<usize> {
+        let Some(files) = self.loaded_files() else {
+            return Vec::new();
+        };
+        let shown = |file: &ChangedFile| !(self.hide_viewed && file.viewed == ViewedState::Viewed);
+        let visible = files.iter().enumerate().filter(|(_, file)| shown(file));
+        visible.map(|(index, _)| index).collect()
+    }
+
+    pub fn selected_file(&self) -> Option<usize> {
+        self.visible_files()
+            .get(self.file_state.selected()?)
+            .copied()
+    }
+
+    /// Switches tab, and asks for the file list the first time the Files tab shows.
+    fn show_tab(&mut self, tab: Tab) -> Option<Action> {
+        self.tab = tab;
+        if tab != Tab::Files || self.files_requested {
+            return None;
+        }
+        self.files_requested = true;
+        Some(Action::FetchFiles(self.pr.clone()))
+    }
+
+    /// Flips the selected file's Viewed state at once; the caller syncs it to GitHub.
+    /// Marking a file viewed moves on to the next file, as GitHub's web view does.
+    fn toggle_viewed(&mut self) -> Option<Action> {
+        let pull_request_id = self.loaded()?.id.clone();
+        let index = self.selected_file()?;
+        let file = self.files.as_mut()?.as_mut().ok()?.get_mut(index)?;
+        let viewed = file.viewed != ViewedState::Viewed;
+        file.viewed = if viewed {
+            ViewedState::Viewed
+        } else {
+            ViewedState::Unviewed
+        };
+        let path = file.path.clone();
+        if viewed && !self.hide_viewed {
+            self.move_in_tab(1);
+        }
+        self.clamp_file_selection();
+        Some(Action::SetViewed {
+            pr: self.pr.clone(),
+            pull_request_id,
+            path,
+            viewed,
+        })
+    }
+
+    fn clamp_file_selection(&mut self) {
+        let last = self.visible_files().len().saturating_sub(1);
+        let current = self.file_state.selected().unwrap_or(0);
+        self.file_state.select(Some(current.min(last)));
     }
 
     /// The page `o` and `Enter` open: the selected commit or check, else the PR.
@@ -89,6 +169,7 @@ impl DetailView {
                 .checks
                 .get(selected(&self.checks))
                 .and_then(|check| check.url.clone()),
+            Tab::Files => Some(format!("{}/files", self.pr.url())),
         });
         item_url.unwrap_or_else(|| self.pr.url())
     }
@@ -101,6 +182,7 @@ impl DetailView {
             Tab::Overview => 0,
             Tab::Commits => detail.commits.len(),
             Tab::Checks => detail.checks.len(),
+            Tab::Files => self.visible_files().len(),
         }
     }
 
@@ -113,6 +195,7 @@ impl DetailView {
             }
             Tab::Commits => &mut self.commits,
             Tab::Checks => &mut self.checks,
+            Tab::Files => &mut self.file_state,
         };
         let next = state
             .selected()
@@ -207,13 +290,50 @@ impl App {
         self.error = Some(message);
     }
 
-    /// Ignores a response for a PR the user already left.
+    /// The open PR's view, unless the user has already left that PR.
+    fn view_for(&mut self, pr: &PrRef) -> Option<&mut DetailView> {
+        match &mut self.screen {
+            Screen::Detail(view) if view.pr == *pr => Some(view),
+            _ => None,
+        }
+    }
+
     pub fn set_detail(&mut self, pr: &PrRef, result: Result<PrDetail, String>) {
-        let Screen::Detail(view) = &mut self.screen else {
+        if let Some(view) = self.view_for(pr) {
+            view.detail = Some(result);
+        }
+    }
+
+    pub fn set_files(&mut self, pr: &PrRef, result: Result<Vec<ChangedFile>, String>) {
+        if let Some(view) = self.view_for(pr) {
+            view.files = Some(result);
+            view.clamp_file_selection();
+        }
+    }
+
+    /// A failed sync puts the checkbox back, so the screen never claims a state GitHub lacks.
+    pub fn set_viewed_result(
+        &mut self,
+        pr: &PrRef,
+        path: &str,
+        viewed: bool,
+        result: Result<(), String>,
+    ) {
+        let Err(error) = result else {
             return;
         };
-        if view.pr == *pr {
-            view.detail = Some(result);
+        self.error = Some(format!("Viewed not saved for {path}: {error}"));
+        let Some(view) = self.view_for(pr) else {
+            return;
+        };
+        let files = view.files.as_mut().and_then(|files| files.as_mut().ok());
+        let file = files.and_then(|files| files.iter_mut().find(|file| file.path == path));
+        if let Some(file) = file {
+            file.viewed = if viewed {
+                ViewedState::Unviewed
+            } else {
+                ViewedState::Viewed
+            };
         }
     }
 
@@ -263,6 +383,7 @@ impl App {
     }
 
     fn open_pr(&mut self, pr: PrRef) -> Action {
+        self.error = None;
         self.screen = Screen::Detail(Box::new(DetailView::new(pr.clone())));
         Action::FetchDetail(pr)
     }
@@ -297,12 +418,18 @@ impl App {
         match key {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Left => {
                 self.screen = Screen::Inbox;
+                self.error = None;
             }
-            KeyCode::Tab => view.tab = view.tab.shifted(1),
-            KeyCode::BackTab => view.tab = view.tab.shifted(-1),
+            KeyCode::Tab => return view.show_tab(view.tab.shifted(1)),
+            KeyCode::BackTab => return view.show_tab(view.tab.shifted(-1)),
             KeyCode::Char(digit @ '1'..='9') => {
                 let index = digit as usize - '1' as usize;
-                view.tab = Tab::ALL.get(index).copied().unwrap_or(view.tab);
+                return view.show_tab(Tab::ALL.get(index).copied().unwrap_or(view.tab));
+            }
+            KeyCode::Char('v') if view.tab == Tab::Files => return view.toggle_viewed(),
+            KeyCode::Char('H') if view.tab == Tab::Files => {
+                view.hide_viewed = !view.hide_viewed;
+                view.clamp_file_selection();
             }
             KeyCode::Char('j') | KeyCode::Down => view.move_in_tab(1),
             KeyCode::Char('k') | KeyCode::Up => view.move_in_tab(-1),
@@ -310,17 +437,26 @@ impl App {
             KeyCode::Char('b') | KeyCode::PageUp => view.move_in_tab(-20),
             KeyCode::Char('g') | KeyCode::Home => view.move_in_tab(-10_000),
             KeyCode::Char('o') => return Some(Action::OpenBrowser(view.link())),
-            KeyCode::Enter if view.tab != Tab::Overview => {
+            KeyCode::Enter if matches!(view.tab, Tab::Commits | Tab::Checks) => {
                 return Some(Action::OpenBrowser(view.link()));
             }
             KeyCode::Char('d') => return Some(Action::RunDiff(view.pr.clone())),
-            KeyCode::Char('r') => {
-                view.detail = None;
-                return Some(Action::FetchDetail(view.pr.clone()));
-            }
+            KeyCode::Char('r') => return Some(Self::reload(view)),
             _ => {}
         }
         None
+    }
+
+    /// Starts the PR over, keeping the tab, and fetches its files again if that tab shows.
+    fn reload(view: &mut DetailView) -> Action {
+        let tab = view.tab;
+        *view = DetailView::new(view.pr.clone());
+        // FetchDetail covers the overview; the Files tab asks again when shown.
+        view.tab = tab;
+        if tab == Tab::Files {
+            view.files_requested = false;
+        }
+        Action::FetchDetail(view.pr.clone())
     }
 
     fn open_selected(&mut self) -> Option<Action> {
@@ -527,7 +663,7 @@ mod tests {
         let Screen::Detail(view) = &app.screen else {
             panic!("expected detail screen")
         };
-        assert_eq!(view.tab, Tab::Checks);
+        assert_eq!(view.tab, Tab::Files);
         app.handle_key(key(KeyCode::Char('2')));
         let Screen::Detail(view) = &app.screen else {
             panic!("expected detail screen")
@@ -545,5 +681,86 @@ mod tests {
         assert!(
             matches!(action, Some(Action::OpenBrowser(ref url)) if url == "https://github.com/acme/app/pull/7")
         );
+    }
+
+    fn file(path: &str, viewed: ViewedState) -> ChangedFile {
+        ChangedFile {
+            path: path.to_string(),
+            additions: 1,
+            deletions: 0,
+            change: "modified".to_string(),
+            viewed,
+        }
+    }
+
+    /// An open PR with its detail loaded and the Files tab showing.
+    fn files_tab(files: Vec<ChangedFile>) -> (App, PrRef) {
+        let mut app = app_with(vec![group("A", &[7], false)]);
+        app.list_state.select(Some(1));
+        app.handle_key(key(KeyCode::Enter));
+        let pr = view(&app).pr.clone();
+        app.set_detail(&pr, Ok(crate::model::tests::sample_detail()));
+        app.handle_key(key(KeyCode::Char('4')));
+        app.set_files(&pr, Ok(files));
+        (app, pr)
+    }
+
+    fn view(app: &App) -> &DetailView {
+        let Screen::Detail(view) = &app.screen else {
+            panic!("expected detail screen")
+        };
+        view
+    }
+
+    #[test]
+    fn files_tab_requests_its_list_once() {
+        let mut app = app_with(vec![group("A", &[7], false)]);
+        app.list_state.select(Some(1));
+        app.handle_key(key(KeyCode::Enter));
+        let first = app.handle_key(key(KeyCode::Char('4')));
+        assert!(matches!(first, Some(Action::FetchFiles(_))));
+        app.handle_key(key(KeyCode::Char('1')));
+        assert!(app.handle_key(key(KeyCode::Char('4'))).is_none());
+    }
+
+    #[test]
+    fn v_marks_viewed_moves_on_and_asks_for_a_sync() {
+        let (mut app, _) = files_tab(vec![
+            file("a.md", ViewedState::Unviewed),
+            file("b.md", ViewedState::Unviewed),
+        ]);
+        let action = app.handle_key(key(KeyCode::Char('v')));
+        assert!(
+            matches!(action, Some(Action::SetViewed { ref path, viewed: true, ref pull_request_id, .. })
+            if path == "a.md" && pull_request_id == "PR_node")
+        );
+        assert_eq!(
+            view(&app).loaded_files().unwrap()[0].viewed,
+            ViewedState::Viewed
+        );
+        assert_eq!(view(&app).selected_file(), Some(1));
+    }
+
+    #[test]
+    fn a_failed_sync_puts_the_checkbox_back() {
+        let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        app.handle_key(key(KeyCode::Char('v')));
+        app.set_viewed_result(&pr, "a.md", true, Err("forbidden".to_string()));
+        assert_eq!(
+            view(&app).loaded_files().unwrap()[0].viewed,
+            ViewedState::Unviewed
+        );
+        assert!(app.error.as_deref().unwrap().contains("forbidden"));
+    }
+
+    #[test]
+    fn hiding_viewed_files_skips_them_in_the_list() {
+        let (mut app, _) = files_tab(vec![
+            file("a.md", ViewedState::Viewed),
+            file("b.md", ViewedState::Unviewed),
+        ]);
+        app.handle_key(key(KeyCode::Char('H')));
+        assert_eq!(view(&app).visible_files(), [1]);
+        assert_eq!(view(&app).selected_file(), Some(1));
     }
 }
