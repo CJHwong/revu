@@ -10,7 +10,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::app::{
     App, Click, ClickTarget, DetailView, DiffOutput, Overlay, OverviewLayout, Prompt, PromptKind,
-    RepoState, Row, Screen, Tab,
+    RepoState, Row, SETTINGS, Screen, Tab,
 };
 use crate::file_tree::FileRow;
 use crate::model::{
@@ -65,6 +65,9 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: &Theme, now: DateTime<Utc
     }
     if let Some(limit) = app.rate_limit {
         render_rate_limit(frame, limit, paint);
+    }
+    if let Some(selected) = app.settings_menu {
+        render_settings(frame, app, selected, paint);
     }
     if let Some(selected) = app.theme_menu {
         render_theme_menu(frame, selected, app.theme_name, paint);
@@ -267,6 +270,10 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
                 "open a pull request by link or owner/repo#123",
             ),
             ("T", "pick a color theme; it is saved to the config"),
+            (
+                ",",
+                "settings: theme, workspace folder, how far back the inbox looks",
+            ),
             ("?", "this list; any key closes it"),
         ],
     ),
@@ -1455,12 +1462,17 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
         ),
         PromptKind::Workspace => (
             " Workspace folder ".to_string(),
-            "the folder that holds your clones. enter saves it to the config, esc skips"
+            "the folder that holds your clones. enter saves it to the config, esc cancels"
                 .to_string(),
         ),
         PromptKind::SearchRepo => (
             " Search the repo at the PR head ".to_string(),
             "finds text in every file, not only the changed ones. case-insensitive".to_string(),
+        ),
+        PromptKind::UpdatedWithin => (
+            " Updated within, in days ".to_string(),
+            "the inbox shows PRs updated in this many days. enter saves it and reloads, esc keeps it"
+                .to_string(),
         ),
         PromptKind::FindInDiff => (
             " Find in the diff ".to_string(),
@@ -1685,6 +1697,46 @@ fn reviewer_symbol(state: &str, theme: &Theme) -> (&'static str, Color) {
 
 /// A small box of the built-in themes. The current one has a dot; enter applies the
 /// selected one.
+/// The settings, each with its value; Enter edits the selected one.
+fn render_settings(frame: &mut Frame, app: &App, selected: usize, paint: Paint) {
+    let theme = paint.theme;
+    let mut lines: Vec<Line> = SETTINGS
+        .iter()
+        .enumerate()
+        .map(|(index, setting)| {
+            let line = Line::from(vec![
+                paint.span(format!("  {:<18}", setting.label()), theme.foreground),
+                paint.bold(app.setting_value(*setting), theme.accent),
+            ]);
+            match index == selected {
+                true => line.style(Style::new().bg(theme.selection)),
+                false => line,
+            }
+        })
+        .collect();
+    lines.push(Line::default());
+    lines.push(Line::from(
+        paint.span("  Saved to config.yaml as you change them", theme.muted),
+    ));
+    let area = frame.area();
+    let width = 60.min(area.width);
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let box_area = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    };
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(theme.heading))
+        .title(paint.bold(" Settings ", theme.heading))
+        .title_bottom(paint.span(" j/k move, enter edit, esc ", theme.muted))
+        .style(Style::new().bg(theme.background).fg(theme.foreground));
+    frame.render_widget(Clear, box_area);
+    frame.render_widget(Paragraph::new(lines).block(block), box_area);
+}
+
 fn render_theme_menu(frame: &mut Frame, selected: usize, current: &str, paint: Paint) {
     let theme = paint.theme;
     let mut lines: Vec<Line> = Vec::new();

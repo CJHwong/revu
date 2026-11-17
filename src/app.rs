@@ -64,6 +64,8 @@ pub enum Action {
     SetWorkspace(String),
     /// Apply a built-in theme and save it to the config.
     SetTheme(&'static str),
+    /// Save how many days back the inbox looks, and reload it.
+    SetUpdatedWithin(u32),
     CloneRepo {
         pr: PrRef,
         dir: PathBuf,
@@ -1166,11 +1168,32 @@ pub enum PromptKind {
     Workspace,
     SearchRepo,
     FindInDiff,
+    UpdatedWithin,
     /// Asks before cloning the PR's repo into this folder.
     ConfirmClone {
         pr: PrRef,
         dir: PathBuf,
     },
+}
+
+/// A row of the settings panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Setting {
+    Theme,
+    Workspace,
+    UpdatedWithin,
+}
+
+pub const SETTINGS: [Setting; 3] = [Setting::Theme, Setting::Workspace, Setting::UpdatedWithin];
+
+impl Setting {
+    pub fn label(self) -> &'static str {
+        match self {
+            Setting::Theme => "Theme",
+            Setting::Workspace => "Workspace folder",
+            Setting::UpdatedWithin => "Updated within",
+        }
+    }
 }
 
 /// A one-line input box over the current screen.
@@ -1216,6 +1239,11 @@ pub struct App {
     pub rate_limit: Option<crate::model::RateLimit>,
     /// The theme menu is open, with this entry of `THEME_NAMES` selected.
     pub theme_menu: Option<usize>,
+    /// The settings panel's selected row, while it is open.
+    pub settings_menu: Option<usize>,
+    /// The config values the settings panel shows.
+    pub workspace_dir: Option<String>,
+    pub updated_within_days: Option<u32>,
     /// The theme in use, so the menu opens on it.
     pub theme_name: &'static str,
     /// One flag per group: true while its search is running.
@@ -1249,6 +1277,9 @@ impl App {
             inbox_clicks: Vec::new(),
             rate_limit: None,
             theme_menu: None,
+            settings_menu: None,
+            workspace_dir: None,
+            updated_within_days: None,
             theme_name: crate::theme::THEME_NAMES[0],
             group_loading: Vec::new(),
             inbox_generation: 0,
@@ -1686,6 +1717,13 @@ impl App {
         if self.theme_menu.is_some() {
             return self.theme_menu_key(key.code);
         }
+        if self.settings_menu.is_some() {
+            return self.settings_key(key.code);
+        }
+        if key.code == KeyCode::Char(',') {
+            self.settings_menu = Some(0);
+            return None;
+        }
         if key.code == KeyCode::Char('T') {
             let names = crate::theme::THEME_NAMES;
             self.theme_menu = names
@@ -1705,6 +1743,72 @@ impl App {
         match self.screen {
             Screen::Inbox => self.inbox_key(key.code),
             Screen::Detail(_) => self.detail_key(key.code),
+        }
+    }
+
+    /// The settings panel: j/k move, Enter edits the row, esc closes.
+    fn settings_key(&mut self, key: KeyCode) -> Option<Action> {
+        let selected = self.settings_menu?;
+        let rows = SETTINGS.len();
+        match key {
+            KeyCode::Char('j') | KeyCode::Down => self.settings_menu = Some((selected + 1) % rows),
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.settings_menu = Some((selected + rows - 1) % rows)
+            }
+            KeyCode::Enter => {
+                self.settings_menu = None;
+                self.edit_setting(SETTINGS[selected]);
+            }
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char(',') => self.settings_menu = None,
+            _ => {}
+        }
+        None
+    }
+
+    /// Opens the theme menu, or a box filled with the current value.
+    fn edit_setting(&mut self, setting: Setting) {
+        match setting {
+            Setting::Theme => {
+                let names = crate::theme::THEME_NAMES;
+                self.theme_menu = names
+                    .iter()
+                    .position(|name| *name == self.theme_name)
+                    .or(Some(0));
+            }
+            Setting::Workspace => {
+                let current = self.workspace_dir.clone().unwrap_or_default();
+                self.ask(PromptKind::Workspace, &current);
+            }
+            Setting::UpdatedWithin => {
+                let current = self.updated_within_days.map(|days| days.to_string());
+                self.ask(PromptKind::UpdatedWithin, &current.unwrap_or_default());
+            }
+        }
+    }
+
+    /// The settings panel's value for a row.
+    pub fn setting_value(&self, setting: Setting) -> String {
+        match setting {
+            Setting::Theme => self.theme_name.to_string(),
+            Setting::Workspace => self
+                .workspace_dir
+                .clone()
+                .unwrap_or_else(|| "not set".to_string()),
+            Setting::UpdatedWithin => match self.updated_within_days {
+                Some(days) => format!("{days} days"),
+                None => "no limit".to_string(),
+            },
+        }
+    }
+
+    fn submit_updated_within(&mut self, text: &str) -> Option<Action> {
+        match text.trim().parse::<u32>() {
+            Ok(days) if days > 0 => Some(Action::SetUpdatedWithin(days)),
+            _ => {
+                let error = "type a number of days, such as 30".to_string();
+                self.set_prompt_error(PromptKind::UpdatedWithin, text, error);
+                None
+            }
         }
     }
 
@@ -1743,7 +1847,10 @@ impl App {
                 prompt.text.clear();
                 return self.submit_prompt();
             }
-            KeyCode::Esc if prompt.kind == PromptKind::Workspace => {
+            // On first run, no folder means no diff; from the settings it changes nothing.
+            KeyCode::Esc
+                if prompt.kind == PromptKind::Workspace && self.workspace_dir.is_none() =>
+            {
                 self.prompt = None;
                 let message = "no workspace folder, so no diff here. r asks again.";
                 self.set_repo_state(RepoState::Failed(message.to_string()));
@@ -1772,6 +1879,7 @@ impl App {
             PromptKind::ConfirmClone { pr, dir } => self.submit_clone(pr, dir, &prompt.text),
             PromptKind::SearchRepo => self.in_view(|view| view.search(prompt.text).map(Some)),
             PromptKind::FindInDiff => self.in_view(|view| view.start_find(&prompt.text)),
+            PromptKind::UpdatedWithin => self.submit_updated_within(&prompt.text),
         }
     }
 
@@ -2482,6 +2590,32 @@ mod tests {
             app.take_diff_request().is_some(),
             "a new theme renders the diff again"
         );
+    }
+
+    #[test]
+    fn settings_edit_the_workspace_and_check_the_days() {
+        let mut app = App::new();
+        app.workspace_dir = Some("~/Work".to_string());
+        app.handle_key(key(KeyCode::Char(',')));
+        app.handle_key(key(KeyCode::Char('j')));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.settings_menu.is_none());
+        let prompt = app.prompt.as_ref().unwrap();
+        assert_eq!(
+            (&prompt.kind, prompt.text.as_str()),
+            (&PromptKind::Workspace, "~/Work")
+        );
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.prompt.is_none(), "esc keeps the folder");
+        app.handle_key(key(KeyCode::Char(',')));
+        app.handle_key(key(KeyCode::Char('k')));
+        app.handle_key(key(KeyCode::Enter));
+        app.prompt.as_mut().unwrap().text = "soon".to_string();
+        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
+        assert!(app.prompt.as_ref().unwrap().error.is_some());
+        app.prompt.as_mut().unwrap().text = "14".to_string();
+        let action = app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(action, Some(Action::SetUpdatedWithin(14))));
     }
 
     #[test]

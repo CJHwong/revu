@@ -40,6 +40,7 @@ Press `?` anywhere for this list.
 | Anywhere | `Ctrl+L` (or `Cmd+L`, see below), or paste | Open a pull request by link or `owner/repo#123` |
 | Anywhere | `?` | Show every key. Any key closes the list. |
 | Anywhere | `T` | Pick a color theme: `dracula`, `terminal` (your terminal's own colors), `catppuccin_mocha`, `catppuccin_macchiato`, `catppuccin_frappe`, `nord`, `gruvbox_dark`, `solarized_dark`, `one_half_dark`, `monokai`, or the light `catppuccin_latte`, `gruvbox_light`, `solarized_light`, `one_half_light` and `github`. Each pairs with the bat theme of the same name, so code in diffs matches the page. `Enter` applies it at once, diffs included, and saves it as the `theme:` line in the config. |
+| Anywhere | `,` | Settings: the theme, the workspace folder, and how many days back the inbox looks. `Enter` edits the selected one and saves it to its line in the config at once; comments and other lines stay as they are. A new number of days reloads the inbox. |
 | Inbox | `j` / `k`, `g` / `G` | Move, top, bottom |
 | Inbox | `Enter`, `l` | Open the pull request, or fold a group header |
 | Inbox | `Space` | Fold the current group |

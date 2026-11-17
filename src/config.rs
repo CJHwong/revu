@@ -85,24 +85,24 @@ fn default_renderers() -> Vec<Renderer> {
         .unwrap_or_default()
 }
 
-/// Appends one line rather than rewriting the file, so the user's comments survive.
-pub fn append_workspace_dir(path: &Path, workspace_dir: &str) -> Result<()> {
-    let mut text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    if !text.ends_with('\n') {
-        text.push('\n');
-    }
-    let quoted = workspace_dir.replace('\\', "\\\\").replace('"', "\\\"");
-    text.push_str(&format!("workspace_dir: \"{quoted}\"\n"));
-    parse(&text).context("the config would no longer parse")?;
-    fs::write(path, text).with_context(|| format!("write {}", path.display()))
+/// The folder as a quoted YAML string, so spaces and quotes in it survive.
+pub fn quoted(text: &str) -> String {
+    let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
-/// Replaces the `theme:` line, or adds one, and leaves every other line as it was.
 pub fn save_theme(path: &Path, name: &str) -> Result<()> {
+    save_setting(path, "theme", name)
+}
+
+/// Replaces the `key:` line, or adds one, and leaves every other line as it was, so the
+/// user's comments survive. `value` is written as given; quote it with `quoted` when needed.
+pub fn save_setting(path: &Path, key: &str, value: &str) -> Result<()> {
     let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let setting = format!("theme: {name}");
+    let setting = format!("{key}: {value}");
+    let prefix = format!("{key}:");
     let mut lines: Vec<&str> = text.lines().collect();
-    match lines.iter().position(|line| line.starts_with("theme:")) {
+    match lines.iter().position(|line| line.starts_with(&prefix)) {
         Some(index) => lines[index] = &setting,
         None => lines.push(&setting),
     }
@@ -257,14 +257,16 @@ mod tests {
     }
 
     #[test]
-    fn appending_the_workspace_keeps_comments_and_parses() {
+    fn saving_the_workspace_twice_keeps_one_line_and_comments() {
         let dir = std::env::temp_dir().join(format!("rs-github-inbox-ws-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.yaml");
         fs::write(&path, "# keep me\nopen_diff: x\ngroups: []").unwrap();
-        append_workspace_dir(&path, "~/My \"Work\"").unwrap();
+        save_setting(&path, "workspace_dir", &quoted("~/Old")).unwrap();
+        save_setting(&path, "workspace_dir", &quoted("~/My \"Work\"")).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.starts_with("# keep me\n"));
+        assert_eq!(text.matches("workspace_dir:").count(), 1);
         assert_eq!(
             parse(&text).unwrap().workspace_dir.as_deref(),
             Some("~/My \"Work\"")

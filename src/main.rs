@@ -131,6 +131,8 @@ fn main() -> Result<()> {
     };
     let mut app = App::new();
     app.renderer_names = renderer_names(&session.config);
+    app.workspace_dir = session.config.workspace_dir.clone();
+    app.updated_within_days = session.config.updated_within_days;
     match config::load_prefs(&config::prefs_path(&session.config_path)) {
         Ok(prefs) => app.prefs = prefs,
         Err(error) => app.set_inbox_error(format!("view toggles not loaded: {error:#}")),
@@ -390,6 +392,7 @@ fn perform(
         }
         Action::SetWorkspace(text) => set_workspace(app, session, text),
         Action::SetTheme(name) => set_theme(app, session, name),
+        Action::SetUpdatedWithin(days) => set_updated_within(app, session, days),
         Action::CloneRepo { pr, dir } => match session.pending_clone.take() {
             Some(job) if job.pr == pr => {
                 app.set_repo_state(RepoState::Busy(format!(
@@ -500,12 +503,32 @@ fn set_workspace(app: &mut App, session: &mut Session, text: String) {
         app.set_prompt_error(PromptKind::Workspace, &text, error);
         return;
     }
-    if let Err(error) = config::append_workspace_dir(&session.config_path, &text) {
+    let saved = config::save_setting(
+        &session.config_path,
+        "workspace_dir",
+        &config::quoted(&text),
+    );
+    if let Err(error) = saved {
         app.set_prompt_error(PromptKind::Workspace, &text, format!("{error:#}"));
         return;
     }
-    session.config.workspace_dir = Some(text);
+    session.config.workspace_dir = Some(text.clone());
+    app.workspace_dir = Some(text);
+    // An open PR looks for its clone again, in the new folder.
     app.set_repo_state(RepoState::Unknown);
+}
+
+/// Saves how many days back the inbox looks, then reloads the inbox with it.
+fn set_updated_within(app: &mut App, session: &mut Session, days: u32) {
+    let saved = config::save_setting(
+        &session.config_path,
+        "updated_within_days",
+        &days.to_string(),
+    );
+    match saved {
+        Ok(()) => refresh(app, session),
+        Err(error) => app.error = Some(format!("not saved: {error:#}")),
+    }
 }
 
 fn start_repo_fetch(session: &Session, job: RepoJob, dir: PathBuf, clone_first: bool) {
@@ -612,6 +635,8 @@ fn refresh(app: &mut App, session: &mut Session) {
                 app.forget_colors();
             }
             app.theme_name = theme::name_of(&config.theme).unwrap_or(app.theme_name);
+            app.workspace_dir = config.workspace_dir.clone();
+            app.updated_within_days = config.updated_within_days;
             session.config = config;
         }
         Err(error) => {
