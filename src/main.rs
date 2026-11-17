@@ -424,6 +424,7 @@ fn fetch_local_repo(job: &RepoJob, dir: &std::path::Path, clone_first: bool) -> 
 /// The renderer's shell command for this job, with its values quoted.
 fn renderer_command(session: &Session, job: &DiffJob) -> Option<String> {
     let renderer = session.config.diff_renderers.get(job.key.renderer)?;
+    let theme = &session.config.theme;
     let paths: Vec<String> = job
         .paths
         .iter()
@@ -436,6 +437,15 @@ fn renderer_command(session: &Session, job: &DiffJob) -> Option<String> {
             ("head", repo::shell_quote(&job.head)),
             ("paths", paths.join(" ")),
             ("width", job.key.width.to_string()),
+            ("syntax_theme", repo::shell_quote(theme.bat_theme)),
+            (
+                "added_bg",
+                repo::shell_quote(&theme::color_name(theme.added_bg)),
+            ),
+            (
+                "removed_bg",
+                repo::shell_quote(&theme::color_name(theme.removed_bg)),
+            ),
         ],
     ))
 }
@@ -484,6 +494,9 @@ fn refresh(app: &mut App, session: &mut Session) {
     match config::load_or_init(&session.config_path) {
         Ok(config) => {
             app.renderer_names = renderer_names(&config);
+            if config.theme != session.config.theme {
+                app.forget_diffs();
+            }
             session.config = config;
         }
         Err(error) => {

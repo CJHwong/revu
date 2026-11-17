@@ -1145,6 +1145,14 @@ impl App {
     }
 
     /// The open PR's view, unless the user has already left that PR.
+    /// Drops the drawn diffs, whose colors came from the old theme; the next draw asks
+    /// for them again.
+    pub fn forget_diffs(&mut self) {
+        if let Screen::Detail(view) = &mut self.screen {
+            view.diffs.clear();
+        }
+    }
+
     fn view_for(&mut self, pr: &PrRef) -> Option<&mut DetailView> {
         match &mut self.screen {
             Screen::Detail(view) if view.pr == *pr => Some(view),
@@ -1943,6 +1951,23 @@ mod tests {
         );
         app.handle_key(key(KeyCode::Char('z')));
         assert!(view(&app).file_list_hidden);
+    }
+
+    #[test]
+    fn forgetting_diffs_asks_for_them_again() {
+        let files = vec![file("a.md", ViewedState::Unviewed)];
+        let (mut app, pr) = files_tab(files);
+        ready_repo(&mut app, &pr);
+        let job = app
+            .take_diff_request()
+            .expect("the open file asks for its diff");
+        app.set_diff(&pr, job.key, crate::highlight::to_text(b"x\n", None));
+        assert!(app.take_diff_request().is_none());
+        app.forget_diffs();
+        assert!(
+            app.take_diff_request().is_some(),
+            "a new theme renders the diff again"
+        );
     }
 
     #[test]

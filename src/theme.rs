@@ -60,6 +60,16 @@ const TERMINAL: Theme = Theme {
     removed_bg: Color::Indexed(52),
 };
 
+/// A color as delta and git write it: "#rrggbb" or a 256-color number.
+pub fn color_name(color: Color) -> String {
+    match color {
+        Color::Rgb(red, green, blue) => format!("#{red:02x}{green:02x}{blue:02x}"),
+        Color::Indexed(number) => number.to_string(),
+        // The tints are always RGB or indexed; "normal" leaves the text untinted.
+        _ => "normal".to_string(),
+    }
+}
+
 pub fn by_name(name: &str) -> Result<Theme> {
     match name {
         "dracula" => Ok(DRACULA),
@@ -73,6 +83,12 @@ pub fn by_name(name: &str) -> Result<Theme> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tints_are_named_the_way_delta_reads_them() {
+        assert_eq!(color_name(DRACULA.added_bg), "#1f3d2b");
+        assert_eq!(color_name(TERMINAL.removed_bg), "52");
+    }
+
     use super::*;
 
     #[test]

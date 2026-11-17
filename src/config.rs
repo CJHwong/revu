@@ -22,15 +22,17 @@ open_diff: "gh pr diff {number} -R {repo} | delta"
 
 # Diff views for the Files changed and Commits tabs; m switches between them.
 # Each command runs in the repo's clone. {base} and {head} are commits, {paths} is
-# the file (both names for a rename), {width} is the pane width. Values are quoted
-# for the shell, so write {paths}, not "{paths}". highlight: true adds syntax colors
-# from bat to a renderer that has none of its own.
+# the file (both names for a rename), {width} is the pane width. {syntax_theme},
+# {added_bg} and {removed_bg} come from the app's theme, so a renderer that colors
+# code itself can match the others. Values are quoted for the shell, so write
+# {paths}, not "{paths}". highlight: true adds syntax colors from bat to a renderer
+# that has none of its own.
 diff_renderers:
   - name: word
     command: git diff --color=always --word-diff=color {base}...{head} -- {paths}
     highlight: true
   - name: delta
-    command: git diff {base}...{head} -- {paths} | delta --paging=never --width={width}
+    command: git diff {base}...{head} -- {paths} | delta --paging=never --width={width} --syntax-theme={syntax_theme} --plus-style="syntax "{added_bg} --plus-emph-style="syntax "{added_bg} --plus-non-emph-style=syntax --minus-style="syntax "{removed_bg} --minus-emph-style="syntax "{removed_bg} --minus-non-emph-style=syntax
   - name: difftastic
     command: GIT_EXTERNAL_DIFF="difft --color=always --width={width}" git diff --ext-diff {base}...{head} -- {paths}
     highlight: true
