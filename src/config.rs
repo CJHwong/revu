@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -111,6 +111,56 @@ pub fn save_theme(path: &Path, name: &str) -> Result<()> {
     fs::write(path, text).with_context(|| format!("write {}", path.display()))
 }
 
+/// The view toggles the app brings back on the next start. The app writes them to
+/// view.yaml next to the config, so config.yaml stays as the user wrote it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ViewPrefs {
+    pub newest_first: bool,
+    pub no_bots: bool,
+    pub diff_wrap: bool,
+    /// The renderer's name, so a reordered renderer list keeps the choice.
+    pub renderer: Option<String>,
+    pub tree_view: bool,
+    pub hide_viewed: bool,
+    pub file_list_hidden: bool,
+}
+
+impl Default for ViewPrefs {
+    fn default() -> Self {
+        Self {
+            newest_first: false,
+            no_bots: false,
+            diff_wrap: true,
+            renderer: None,
+            tree_view: true,
+            hide_viewed: false,
+            file_list_hidden: false,
+        }
+    }
+}
+
+pub fn prefs_path(config_path: &Path) -> PathBuf {
+    config_path.with_file_name("view.yaml")
+}
+
+/// The saved toggles, or the defaults when the file does not exist yet.
+pub fn load_prefs(path: &Path) -> Result<ViewPrefs> {
+    if !path.exists() {
+        return Ok(ViewPrefs::default());
+    }
+    let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    serde_yaml::from_str(&text).with_context(|| format!("parse {}", path.display()))
+}
+
+pub fn save_prefs(path: &Path, prefs: &ViewPrefs) -> Result<()> {
+    let text = format!(
+        "# Written by rs-github-inbox when you change a view toggle.\n{}",
+        serde_yaml::to_string(prefs)?
+    );
+    fs::write(path, text).with_context(|| format!("write {}", path.display()))
+}
+
 fn default_theme() -> Theme {
     theme::by_name("dracula").expect("dracula is a built-in theme")
 }
@@ -218,6 +268,29 @@ mod tests {
         assert_eq!(
             parse(&text).unwrap().workspace_dir.as_deref(),
             Some("~/My \"Work\"")
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn view_prefs_round_trip_and_default_when_missing() {
+        let dir =
+            std::env::temp_dir().join(format!("rs-github-inbox-prefs-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = prefs_path(&dir.join("config.yaml"));
+        assert_eq!(load_prefs(&path).unwrap(), ViewPrefs::default());
+        let prefs = ViewPrefs {
+            newest_first: true,
+            no_bots: true,
+            renderer: Some("delta".to_string()),
+            ..ViewPrefs::default()
+        };
+        save_prefs(&path, &prefs).unwrap();
+        assert_eq!(load_prefs(&path).unwrap(), prefs);
+        fs::write(&path, "no_bots: true\n").unwrap();
+        assert!(
+            load_prefs(&path).unwrap().diff_wrap,
+            "a missing key keeps its default"
         );
         fs::remove_dir_all(dir).unwrap();
     }

@@ -11,7 +11,7 @@ use crate::file_tree::{self, FileRow};
 use crate::markdown::TextRow;
 use crate::repo::{GrepHit, LocalRepo};
 
-use crate::config::GroupConfig;
+use crate::config::{GroupConfig, ViewPrefs};
 use crate::model::{
     ChangedFile, Group, PrActivity, PrDetail, PrRef, PrSummary, ViewedState, parse_pr_ref,
 };
@@ -260,7 +260,12 @@ pub struct DetailView {
 }
 
 impl DetailView {
-    fn new(pr: PrRef) -> Self {
+    fn new(pr: PrRef, prefs: &ViewPrefs, renderer_names: &[String]) -> Self {
+        let renderer = prefs
+            .renderer
+            .as_ref()
+            .and_then(|name| renderer_names.iter().position(|known| known == name))
+            .unwrap_or(0);
         Self {
             pr,
             detail: None,
@@ -269,7 +274,11 @@ impl DetailView {
             cursor: 0,
             scroll: 0,
             toggled_folds: HashSet::new(),
-            comments: crate::overview::CommentView::default(),
+            comments: crate::overview::CommentView {
+                newest_first: prefs.newest_first,
+                no_bots: prefs.no_bots,
+                ..Default::default()
+            },
             overview: None,
             page: 20,
             commits: ListState::default().with_selected(Some(0)),
@@ -277,16 +286,16 @@ impl DetailView {
             files: None,
             files_requested: false,
             file_state: ListState::default().with_selected(Some(0)),
-            tree_view: true,
+            tree_view: prefs.tree_view,
             folded_dirs: HashSet::new(),
-            file_list_hidden: false,
+            file_list_hidden: prefs.file_list_hidden,
             file_list_top: None,
             file_list_height: 0,
-            hide_viewed: false,
+            hide_viewed: prefs.hide_viewed,
             repo: RepoState::Unknown,
-            renderer: 0,
+            renderer,
             diff_scroll: 0,
-            diff_wrap: true,
+            diff_wrap: prefs.diff_wrap,
             diff_shift: 0,
             diff_width: 0,
             diff_left: 0,
@@ -962,6 +971,8 @@ pub struct App {
     inbox_generation: u64,
     /// Names of the configured diff renderers, in order; `m` cycles through them.
     pub renderer_names: Vec<String>,
+    /// The view toggles a newly opened PR starts with; they follow the open PR.
+    pub prefs: ViewPrefs,
 }
 
 /// Ctrl+L everywhere; Cmd+L only where the terminal reports the Super modifier.
@@ -990,7 +1001,30 @@ impl App {
             group_loading: Vec::new(),
             inbox_generation: 0,
             renderer_names: Vec::new(),
+            prefs: ViewPrefs::default(),
         }
+    }
+
+    /// Takes the open PR's view toggles as the ones to keep. Returns true when they
+    /// changed, so the caller saves them.
+    pub fn sync_prefs(&mut self) -> bool {
+        let Screen::Detail(view) = &self.screen else {
+            return false;
+        };
+        let prefs = ViewPrefs {
+            newest_first: view.comments.newest_first,
+            no_bots: view.comments.no_bots,
+            diff_wrap: view.diff_wrap,
+            renderer: self.renderer_names.get(view.renderer).cloned(),
+            tree_view: view.tree_view,
+            hide_viewed: view.hide_viewed,
+            file_list_hidden: view.file_list_hidden,
+        };
+        if prefs == self.prefs {
+            return false;
+        }
+        self.prefs = prefs;
+        true
     }
 
     fn open_view(&mut self) -> Option<&mut DetailView> {
@@ -1483,7 +1517,8 @@ impl App {
 
     fn open_pr(&mut self, pr: PrRef) -> Action {
         self.error = None;
-        self.screen = Screen::Detail(Box::new(DetailView::new(pr.clone())));
+        let view = DetailView::new(pr.clone(), &self.prefs, &self.renderer_names);
+        self.screen = Screen::Detail(Box::new(view));
         Action::FetchDetail(pr)
     }
 
@@ -1633,7 +1668,9 @@ impl App {
                 return Some(Action::OpenBrowser(view.link()));
             }
             KeyCode::Char('d') => return Some(Action::RunDiff(view.pr.clone())),
-            KeyCode::Char('r') => return Some(Self::reload(view)),
+            KeyCode::Char('r') => {
+                return Some(Self::reload(view, &self.prefs, &self.renderer_names));
+            }
             _ => {}
         }
         None
@@ -1641,10 +1678,10 @@ impl App {
 
     /// Starts the PR over on the same tab. The file list and the clone are looked up
     /// again when a tab needs them.
-    fn reload(view: &mut DetailView) -> Action {
+    fn reload(view: &mut DetailView, prefs: &ViewPrefs, renderer_names: &[String]) -> Action {
         let tab = view.tab;
         let renderer = view.renderer;
-        *view = DetailView::new(view.pr.clone());
+        *view = DetailView::new(view.pr.clone(), prefs, renderer_names);
         view.tab = tab;
         view.renderer = renderer;
         Action::FetchDetail(view.pr.clone())
@@ -2309,6 +2346,25 @@ mod tests {
             panic!("expected detail screen")
         };
         view
+    }
+
+    #[test]
+    fn view_toggles_carry_over_to_the_next_pull_request() {
+        let (mut app, _) = files_tab(Vec::new());
+        app.renderer_names = vec!["word".to_string(), "delta".to_string()];
+        app.sync_prefs();
+        assert!(!app.sync_prefs(), "nothing changed since");
+        for code in ['m', 'w', 't', 'V', 'z', '1', 'n', 'F'] {
+            app.handle_key(key(KeyCode::Char(code)));
+        }
+        assert!(app.sync_prefs());
+        assert!(!app.sync_prefs(), "saved once per change");
+        app.handle_key(key(KeyCode::Esc));
+        app.handle_key(key(KeyCode::Enter));
+        let view = view(&app);
+        assert_eq!(view.renderer, 1);
+        assert!(!view.diff_wrap && !view.tree_view && view.hide_viewed && view.file_list_hidden);
+        assert!(view.comments.newest_first && view.comments.no_bots);
     }
 
     #[test]

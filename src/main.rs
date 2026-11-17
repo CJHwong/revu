@@ -115,6 +115,10 @@ fn main() -> Result<()> {
     };
     let mut app = App::new();
     app.renderer_names = renderer_names(&session.config);
+    match config::load_prefs(&config::prefs_path(&session.config_path)) {
+        Ok(prefs) => app.prefs = prefs,
+        Err(error) => app.set_inbox_error(format!("view toggles not loaded: {error:#}")),
+    }
     app.theme_name = theme::name_of(&session.config.theme).unwrap_or(app.theme_name);
     start_inbox_fetch(&session, &mut app);
 
@@ -170,6 +174,18 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App, session: &mut Session) -> 
             }
             input = next_input(Duration::ZERO)?;
         }
+        save_prefs(app, session);
+    }
+}
+
+/// Saves the open PR's view toggles when they changed, so the next start keeps them.
+fn save_prefs(app: &mut App, session: &Session) {
+    if !app.sync_prefs() {
+        return;
+    }
+    let path = config::prefs_path(&session.config_path);
+    if let Err(error) = config::save_prefs(&path, &app.prefs) {
+        app.error = Some(format!("view toggles not saved: {error:#}"));
     }
 }
 
