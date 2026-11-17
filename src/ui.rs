@@ -766,15 +766,18 @@ fn render_diff_pane(
                     }
                 };
                 let first = view.diff_scroll as usize;
+                let pattern = view.find.as_deref().map(crate::find::Pattern::parse);
                 let lines: Vec<Line> = text
                     .lines
                     .iter()
                     .enumerate()
                     .skip(first)
                     .take(inner.height as usize)
-                    .map(|(index, line)| match &view.find {
-                        Some(query) => mark_matches(line.clone(), query, marks(index)),
-                        None => line.clone(),
+                    .map(|(index, line)| match &pattern {
+                        Some(pattern) if pattern.matches_drawn(line) => {
+                            mark_matches(line.clone(), &pattern.text, marks(index))
+                        }
+                        _ => line.clone(),
                     })
                     .collect();
                 if view.diff_wrap {

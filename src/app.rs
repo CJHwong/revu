@@ -215,13 +215,6 @@ fn step(key: KeyCode) -> Option<i16> {
     }
 }
 
-fn line_text(line: &ratatui::text::Line) -> String {
-    line.spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect()
-}
-
 pub struct OverviewLayout {
     pub width: usize,
     pub rows: Vec<TextRow>,
@@ -711,11 +704,12 @@ impl DetailView {
         let Some(DiffOutput::Done(Ok(text))) = self.diffs.get(&key) else {
             return Err("the diff is not ready".to_string());
         };
+        let pattern = crate::find::Pattern::parse(query);
         let matches = text
             .lines
             .iter()
             .enumerate()
-            .filter(|(_, line)| line_text(line).to_lowercase().contains(query))
+            .filter(|(_, line)| pattern.matches_drawn(line))
             .map(|(index, _)| index)
             .collect();
         Ok((key, matches))

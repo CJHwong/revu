@@ -358,7 +358,7 @@ pub fn files_with_text(
     let output = git(dir, &["diff", "--no-color", "--no-ext-diff", &range])?;
     ensure_success(&output, "git diff")?;
     let diff = String::from_utf8_lossy(&output.stdout);
-    Ok(count_lines_with(&diff, &query.to_lowercase()))
+    Ok(count_lines_with(&diff, &crate::find::Pattern::parse(query)))
 }
 
 /// The words of the PR's changed lines, the most used first, for the find prompt to
@@ -392,13 +392,13 @@ fn changed_words(diff: &str) -> Vec<String> {
         .collect()
 }
 
-fn count_lines_with(diff: &str, query: &str) -> Vec<(String, usize)> {
+fn count_lines_with(diff: &str, pattern: &crate::find::Pattern) -> Vec<(String, usize)> {
     let mut found: Vec<(String, usize)> = Vec::new();
     for line in diff.lines() {
         if let Some(paths) = line.strip_prefix("diff --git ") {
             let path = paths.rsplit_once(" b/").map_or(paths, |(_, path)| path);
             found.push((path.to_string(), 0));
-        } else if line.to_lowercase().contains(query)
+        } else if pattern.matches_raw(line)
             && let Some((_, count)) = found.last_mut()
         {
             *count += 1;
@@ -442,7 +442,7 @@ mod tests {
                     diff --git a/old.py b/new.py\n+nothing here\n\
                     diff --git a/c.py b/c.py\n+an INVOICE\n";
         assert_eq!(
-            count_lines_with(diff, "invoice"),
+            count_lines_with(diff, &crate::find::Pattern::parse("invoice")),
             [("a.py".to_string(), 2), ("c.py".to_string(), 1)]
         );
     }
