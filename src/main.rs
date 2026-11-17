@@ -7,7 +7,13 @@ mod ui;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, Utc};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
+use crossterm::execute;
+use crossterm::terminal::supports_keyboard_enhancement;
 use ratatui::DefaultTerminal;
 use std::io::Write;
 use std::path::PathBuf;
@@ -18,16 +24,20 @@ use std::time::Duration;
 
 use app::{Action, App};
 use config::Config;
-use model::{Group, PrDetail, PrSummary};
+use model::{Group, PrDetail, PrRef};
 
 /// Results from the fetch threads. Errors are strings because they only get displayed.
 enum Message {
     Inbox(Result<Vec<Group>, String>, DateTime<Utc>),
     Detail {
-        repo: String,
-        number: u64,
+        pr: PrRef,
         result: Result<Box<PrDetail>, String>,
     },
+}
+
+enum Input {
+    Key(KeyEvent),
+    Paste(String),
 }
 
 struct Session {
@@ -35,6 +45,8 @@ struct Session {
     config_path: PathBuf,
     sender: Sender<Message>,
     receiver: Receiver<Message>,
+    /// Whether the terminal reports modifiers such as Cmd (kitty keyboard protocol).
+    enhanced_keys: bool,
 }
 
 fn main() -> Result<()> {
@@ -46,27 +58,58 @@ fn main() -> Result<()> {
         config_path,
         sender,
         receiver,
+        enhanced_keys: false,
     };
     let mut app = App::new();
     start_inbox_fetch(&session, &mut app);
 
     let mut terminal = ratatui::init();
+    // Query once, in raw mode, before any extra terminal modes are on.
+    session.enhanced_keys = supports_keyboard_enhancement().unwrap_or(false);
+    enable_input_modes(session.enhanced_keys)?;
     let result = run(&mut terminal, &mut app, &mut session);
+    let restored = disable_input_modes(session.enhanced_keys);
     ratatui::restore();
-    result
+    result.and(restored)
+}
+
+/// Bracketed paste delivers a pasted link as one event. The keyboard flags make
+/// terminals that support them report Cmd as the Super modifier.
+fn enable_input_modes(enhanced_keys: bool) -> Result<()> {
+    let mut stdout = std::io::stdout();
+    execute!(stdout, EnableBracketedPaste)?;
+    if enhanced_keys {
+        let flags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
+        execute!(stdout, PushKeyboardEnhancementFlags(flags))?;
+    }
+    Ok(())
+}
+
+fn disable_input_modes(enhanced_keys: bool) -> Result<()> {
+    let mut stdout = std::io::stdout();
+    if enhanced_keys {
+        execute!(stdout, PopKeyboardEnhancementFlags)?;
+    }
+    execute!(stdout, DisableBracketedPaste)?;
+    Ok(())
 }
 
 fn run(terminal: &mut DefaultTerminal, app: &mut App, session: &mut Session) -> Result<()> {
     loop {
         terminal.draw(|frame| ui::render(frame, app, &session.config.theme, Utc::now()))?;
         apply_messages(app, &session.receiver);
-        let Some(key) = next_key()? else {
-            continue;
+        let key = match next_input()? {
+            None => continue,
+            Some(Input::Paste(text)) => {
+                app.handle_paste(&text);
+                continue;
+            }
+            Some(Input::Key(key)) => key,
         };
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return Ok(());
         }
-        let Some(action) = app.handle_key(key.code) else {
+        let Some(action) = app.handle_key(key) else {
             continue;
         };
         if !perform(action, terminal, app, session)? {
@@ -76,12 +119,13 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App, session: &mut Session) -> 
 }
 
 /// Waits briefly so fetch results still redraw when no key arrives.
-fn next_key() -> Result<Option<KeyEvent>> {
+fn next_input() -> Result<Option<Input>> {
     if !event::poll(Duration::from_millis(100))? {
         return Ok(None);
     }
     match event::read()? {
-        Event::Key(key) if key.kind == KeyEventKind::Press => Ok(Some(key)),
+        Event::Key(key) if key.kind == KeyEventKind::Press => Ok(Some(Input::Key(key))),
+        Event::Paste(text) => Ok(Some(Input::Paste(text))),
         _ => Ok(None),
     }
 }
@@ -91,11 +135,7 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
         match message {
             Message::Inbox(Ok(groups), fetched_at) => app.set_groups(groups, fetched_at),
             Message::Inbox(Err(error), _) => app.set_inbox_error(error),
-            Message::Detail {
-                repo,
-                number,
-                result,
-            } => app.set_detail(&repo, number, result.map(|detail| *detail)),
+            Message::Detail { pr, result } => app.set_detail(&pr, result.map(|detail| *detail)),
         }
     }
 }
@@ -112,7 +152,7 @@ fn perform(
         Action::Refresh => refresh(app, session),
         Action::FetchDetail(pr) => start_detail_fetch(session, pr),
         Action::OpenBrowser(url) => open_browser(app, &url),
-        Action::RunDiff(pr) => run_diff(terminal, app, &session.config.open_diff, &pr)?,
+        Action::RunDiff(pr) => run_diff(terminal, app, session, &pr)?,
     }
     Ok(true)
 }
@@ -141,17 +181,13 @@ fn start_inbox_fetch(session: &Session, app: &mut App) {
     });
 }
 
-fn start_detail_fetch(session: &Session, pr: PrSummary) {
+fn start_detail_fetch(session: &Session, pr: PrRef) {
     let sender = session.sender.clone();
     thread::spawn(move || {
         let result = github::fetch_detail(&pr.repo, pr.number)
             .map(Box::new)
             .map_err(|error| format!("{error:#}"));
-        let _ = sender.send(Message::Detail {
-            repo: pr.repo,
-            number: pr.number,
-            result,
-        });
+        let _ = sender.send(Message::Detail { pr, result });
     });
 }
 
@@ -170,13 +206,16 @@ fn open_browser(app: &mut App, url: &str) {
 fn run_diff(
     terminal: &mut DefaultTerminal,
     app: &mut App,
-    template: &str,
-    pr: &PrSummary,
+    session: &Session,
+    pr: &PrRef,
 ) -> Result<()> {
-    let command = template
+    let command = session
+        .config
+        .open_diff
         .replace("{repo}", &pr.repo)
         .replace("{number}", &pr.number.to_string())
-        .replace("{url}", &pr.url);
+        .replace("{url}", &pr.url());
+    disable_input_modes(session.enhanced_keys)?;
     ratatui::restore();
     let status = Command::new("sh").arg("-c").arg(&command).status();
     let failure = match status {
@@ -188,6 +227,7 @@ fn run_diff(
         wait_for_enter(message)?;
     }
     *terminal = ratatui::init();
+    enable_input_modes(session.enhanced_keys)?;
     terminal.clear()?;
     app.error = failure;
     Ok(())

@@ -49,11 +49,15 @@ pub fn detail_document() -> String {
     format!(
         "query($owner: String!, $name: String!, $number: Int!) {{ \
          repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ \
-         {ROW_FIELDS} body createdAt additions deletions changedFiles baseRefName headRefName \
+         {ROW_FIELDS} id body createdAt additions deletions changedFiles baseRefName headRefName \
          commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 100) {{ {ROLLUP_COUNTS} \
            nodes {{ __typename \
-             ... on CheckRun {{ name conclusion status }} \
-             ... on StatusContext {{ context state }} }} }} }} }} }} }} \
+             ... on CheckRun {{ name conclusion status detailsUrl startedAt completedAt \
+               checkSuite {{ workflowRun {{ workflow {{ name }} }} }} }} \
+             ... on StatusContext {{ context state targetUrl createdAt }} }} }} }} }} }} }} \
+         commitList: commits(first: 100) {{ totalCount nodes {{ commit {{ \
+           oid messageHeadline authoredDate url author {{ name user {{ login }} }} \
+           statusCheckRollup {{ state }} }} }} }} \
          labels(first: 20) {{ nodes {{ name }} }} \
          assignees(first: 10) {{ nodes {{ login }} }} \
          reviewRequests(first: 20) {{ nodes {{ requestedReviewer {{ \

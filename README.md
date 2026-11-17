@@ -29,14 +29,20 @@ A search shows at most 100 pull requests. A group with more matches shows a coun
 
 | Screen | Key | Action |
 |---|---|---|
+| Anywhere | `Ctrl+L` (or `Cmd+L`, see below) | Open a pull request by link or `owner/repo#123` |
+| Anywhere | paste | Opens the same link box with the pasted text |
 | Inbox | `j` / `k` | Move |
 | Inbox | `Enter` | Open the pull request, or fold a group header |
 | Inbox | `Space` | Fold the current group |
 | Inbox | `g` / `G` | Top / bottom |
 | Inbox | `r` | Reload the config and fetch again |
-| Pull request | `j` / `k`, `Space` / `b` | Scroll the description |
+| Pull request | `Tab` / `Shift+Tab`, `1`-`3` | Switch between Overview, Commits and Checks |
+| Pull request | `j` / `k`, `Space` / `b` | Scroll the description, or move in a list |
+| Pull request | `Enter` | Open the selected commit or check in the browser |
 | Pull request | `r` | Fetch the pull request again |
 | Pull request | `Esc` | Back to the inbox |
 | Both | `o` | Open in the browser |
 | Both | `d` | Run the `open_diff` command |
 | Both | `q` | Quit from the inbox, back from a pull request |
+
+`Cmd+L` works only in terminals that pass Cmd to applications through the kitty keyboard protocol and do not use `Cmd+L` themselves. `Ctrl+L` works everywhere.

@@ -28,6 +28,51 @@ pub struct CheckSummary {
     pub state: CheckState,
 }
 
+/// Enough to fetch and link a pull request, from an inbox row or a pasted link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrRef {
+    pub repo: String,
+    pub number: u64,
+}
+
+impl PrRef {
+    pub fn url(&self) -> String {
+        format!("https://github.com/{}/pull/{}", self.repo, self.number)
+    }
+}
+
+/// Accepts a pull request URL (with or without the scheme, and with any tab suffix
+/// such as `/files`) or the short form `owner/repo#123`.
+pub fn parse_pr_ref(text: &str) -> Option<PrRef> {
+    let text = text.trim();
+    let without_scheme = text
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let Some(path) = without_scheme.strip_prefix("github.com/") else {
+        let (repo, number) = text.split_once('#')?;
+        return pr_ref_from_parts(repo, number);
+    };
+    let mut parts = path.split('/');
+    let (owner, name, kind, number) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    if kind != "pull" {
+        return None;
+    }
+    pr_ref_from_parts(&format!("{owner}/{name}"), number)
+}
+
+fn pr_ref_from_parts(repo: &str, number: &str) -> Option<PrRef> {
+    let (owner, name) = repo.split_once('/')?;
+    if owner.is_empty() || name.is_empty() || name.contains('/') {
+        return None;
+    }
+    // A URL can carry a query or fragment after the number.
+    let digits: String = number.chars().take_while(char::is_ascii_digit).collect();
+    Some(PrRef {
+        repo: repo.to_string(),
+        number: digits.parse().ok()?,
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct PrSummary {
     pub repo: String,
@@ -40,6 +85,15 @@ pub struct PrSummary {
     pub review: ReviewState,
     pub checks: Option<CheckSummary>,
     pub comments: u64,
+}
+
+impl PrSummary {
+    pub fn reference(&self) -> PrRef {
+        PrRef {
+            repo: self.repo.clone(),
+            number: self.number,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -55,6 +109,21 @@ pub struct Group {
 pub struct CheckLine {
     pub name: String,
     pub state: CheckState,
+    /// The Actions workflow that ran the check. Status contexts have none.
+    pub workflow: Option<String>,
+    pub url: Option<String>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitLine {
+    pub oid: String,
+    pub headline: String,
+    pub author: String,
+    pub authored_at: DateTime<Utc>,
+    pub url: String,
+    pub checks: Option<CheckState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +143,8 @@ pub struct Activity {
 
 #[derive(Debug, Clone)]
 pub struct PrDetail {
+    /// GraphQL node id, which the viewed-file mutations take.
+    pub id: String,
     pub summary: PrSummary,
     pub body: String,
     pub created_at: DateTime<Utc>,
@@ -89,6 +160,9 @@ pub struct PrDetail {
     pub checks: Vec<CheckLine>,
     /// Newest first.
     pub activity: Vec<Activity>,
+    /// Oldest first, like GitHub's Commits tab. At most 100.
+    pub commits: Vec<CommitLine>,
+    pub commit_count: u64,
 }
 
 // ---- GitHub GraphQL shapes ----
@@ -148,17 +222,75 @@ struct StateCount {
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "__typename")]
+#[serde(tag = "__typename", rename_all_fields = "camelCase")]
 enum RawCheck {
     CheckRun {
         name: String,
         conclusion: Option<String>,
         status: String,
+        #[serde(default)]
+        details_url: Option<String>,
+        #[serde(default)]
+        started_at: Option<DateTime<Utc>>,
+        #[serde(default)]
+        completed_at: Option<DateTime<Utc>>,
+        #[serde(default)]
+        check_suite: Option<RawCheckSuite>,
     },
     StatusContext {
         context: String,
         state: String,
+        #[serde(default)]
+        target_url: Option<String>,
+        #[serde(default)]
+        created_at: Option<DateTime<Utc>>,
     },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawCheckSuite {
+    workflow_run: Option<RawWorkflowRun>,
+}
+
+#[derive(Deserialize)]
+struct RawWorkflowRun {
+    workflow: Name,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawCommitList {
+    total_count: u64,
+    nodes: Vec<RawCommitNode>,
+}
+
+#[derive(Deserialize)]
+struct RawCommitNode {
+    commit: RawCommitInfo,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawCommitInfo {
+    oid: String,
+    message_headline: String,
+    authored_date: DateTime<Utc>,
+    url: String,
+    author: Option<RawGitActor>,
+    status_check_rollup: Option<RawRollupState>,
+}
+
+/// A commit author is a git identity; `user` is set only when it maps to a GitHub account.
+#[derive(Deserialize)]
+struct RawGitActor {
+    name: Option<String>,
+    user: Option<Login>,
+}
+
+#[derive(Deserialize)]
+struct RawRollupState {
+    state: String,
 }
 
 #[derive(Deserialize)]
@@ -188,6 +320,8 @@ struct RawSearch {
 struct RawDetail {
     #[serde(flatten)]
     row: RawRow,
+    id: String,
+    commit_list: RawCommitList,
     body: String,
     created_at: DateTime<Utc>,
     additions: u64,
@@ -267,7 +401,16 @@ pub fn parse_detail(pull_request: &Value) -> Result<PrDetail> {
     let checks = check_lines(&raw.row);
     let reviewers = reviewers_from(&raw.review_requests, &raw.latest_opinionated_reviews);
     let activity = activity_from(&raw.comments, &raw.reviews);
+    let commits = raw
+        .commit_list
+        .nodes
+        .into_iter()
+        .map(|node| commit_line(node.commit))
+        .collect();
     Ok(PrDetail {
+        id: raw.id,
+        commit_count: raw.commit_list.total_count,
+        commits,
         summary: summary_from(raw.row),
         body: raw.body,
         created_at: raw.created_at,
@@ -386,14 +529,50 @@ fn check_line(check: &RawCheck) -> CheckLine {
             name,
             conclusion,
             status,
+            details_url,
+            started_at,
+            completed_at,
+            check_suite,
         } => CheckLine {
             name: name.clone(),
             state: check_run_state(status, conclusion.as_deref()),
+            workflow: check_suite
+                .as_ref()
+                .and_then(|suite| suite.workflow_run.as_ref())
+                .map(|run| run.workflow.name.clone()),
+            url: details_url.clone(),
+            started_at: *started_at,
+            completed_at: *completed_at,
         },
-        RawCheck::StatusContext { context, state } => CheckLine {
+        RawCheck::StatusContext {
+            context,
+            state,
+            target_url,
+            created_at,
+        } => CheckLine {
             name: context.clone(),
             state: rollup_state(state),
+            workflow: None,
+            url: target_url.clone(),
+            started_at: *created_at,
+            completed_at: None,
         },
+    }
+}
+
+fn commit_line(commit: RawCommitInfo) -> CommitLine {
+    let author = commit
+        .author
+        .and_then(|actor| actor.user.map(|user| user.login).or(actor.name));
+    CommitLine {
+        oid: commit.oid,
+        headline: commit.message_headline,
+        author: author.unwrap_or_else(|| "unknown".to_string()),
+        authored_at: commit.authored_date,
+        url: commit.url,
+        checks: commit
+            .status_check_rollup
+            .map(|rollup| rollup_state(&rollup.state)),
     }
 }
 
@@ -578,7 +757,10 @@ mod tests {
                     "checkRunCountsByState": [],
                     "statusContextCountsByState": [],
                     "nodes": [
-                        { "__typename": "CheckRun", "name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS" },
+                        { "__typename": "CheckRun", "name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS",
+                      "detailsUrl": "https://ci/lint", "startedAt": "2026-11-12T10:00:00Z",
+                      "completedAt": "2026-11-12T10:02:30Z",
+                      "checkSuite": { "workflowRun": { "workflow": { "name": "CI" } } } },
                         { "__typename": "CheckRun", "name": "test", "status": "IN_PROGRESS", "conclusion": null },
                         { "__typename": "StatusContext", "context": "deploy", "state": "FAILURE" },
                     ]
@@ -586,6 +768,19 @@ mod tests {
             }}}]}),
         );
         let extra = json!({
+            "id": "PR_node",
+            "commitList": { "totalCount": 2, "nodes": [
+                { "commit": {
+                    "oid": "aaa111", "messageHeadline": "first", "authoredDate": "2026-11-12T10:00:00Z",
+                    "url": "https://github.com/acme/app/commit/aaa111",
+                    "author": { "name": "Octo Cat", "user": { "login": "octo" } },
+                    "statusCheckRollup": { "state": "SUCCESS" } } },
+                { "commit": {
+                    "oid": "bbb222", "messageHeadline": "second", "authoredDate": "2026-11-13T10:00:00Z",
+                    "url": "https://github.com/acme/app/commit/bbb222",
+                    "author": { "name": "No Account", "user": null },
+                    "statusCheckRollup": null } },
+            ]},
             "body": "## Reason\nBecause.",
             "createdAt": "2026-11-12T10:00:00Z",
             "additions": 55, "deletions": 0, "changedFiles": 2,
@@ -656,5 +851,54 @@ mod tests {
         assert_eq!(detail.activity[1].excerpt, "Looks fine");
         assert_eq!(detail.labels, ["created-by-skill"]);
         assert_eq!(detail.summary.number, 56);
+    }
+
+    #[test]
+    fn detail_carries_commits_and_check_metadata() {
+        let detail = parse_detail(&detail_fixture()).unwrap();
+        assert_eq!(detail.id, "PR_node");
+        assert_eq!(detail.commit_count, 2);
+        assert_eq!(detail.commits[0].author, "octo");
+        assert_eq!(detail.commits[0].checks, Some(CheckState::Passing));
+        assert_eq!(detail.commits[1].author, "No Account");
+        assert_eq!(detail.commits[1].checks, None);
+        let lint = detail
+            .checks
+            .iter()
+            .find(|check| check.name == "lint")
+            .unwrap();
+        assert_eq!(lint.workflow.as_deref(), Some("CI"));
+        assert_eq!(lint.url.as_deref(), Some("https://ci/lint"));
+        assert!(lint.completed_at.is_some());
+    }
+
+    #[test]
+    fn pr_links_parse_in_every_common_form() {
+        let expected = Some(PrRef {
+            repo: "acme/app".to_string(),
+            number: 2302,
+        });
+        for text in [
+            "https://github.com/acme/app/pull/2302",
+            "https://github.com/acme/app/pull/2302/changes#diff-4642e8",
+            "github.com/acme/app/pull/2302/files",
+            "  acme/app#2302 ",
+            "https://github.com/acme/app/pull/2302?w=1",
+        ] {
+            assert_eq!(parse_pr_ref(text), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn non_pr_links_are_rejected() {
+        for text in [
+            "https://github.com/acme/app/issues/1",
+            "https://gitlab.com/a/b/pull/1",
+            "app#1",
+            "acme/app#x",
+            "",
+        ] {
+            assert_eq!(parse_pr_ref(text), None, "{text}");
+        }
     }
 }

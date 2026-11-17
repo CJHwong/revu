@@ -3,16 +3,16 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use unicode_width::UnicodeWidthChar;
 
-use crate::app::{App, DetailView, Row, Screen};
-use crate::model::{Activity, CheckState, CheckSummary, Group, PrDetail, PrSummary, ReviewState};
+use crate::app::{App, DetailView, Prompt, Row, Screen, Tab};
+use crate::model::{
+    Activity, CheckLine, CheckState, CheckSummary, Group, PrDetail, PrRef, PrSummary, ReviewState,
+};
 use crate::theme::Theme;
 
-const INBOX_HELP: &str =
-    "j/k move | enter open | space fold | o browser | d diff | r refresh | q quit";
-const DETAIL_HELP: &str = "j/k scroll | space/b page | o browser | d diff | r reload | esc back";
+const INBOX_HELP: &str = "j/k move | enter open | space fold | o browser | d diff | r refresh | ctrl-l open link | q quit";
 
 /// What every render function needs besides the data it draws.
 #[derive(Clone, Copy)]
@@ -38,9 +38,13 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: &Theme, now: DateTime<Utc
     let paint = Paint { theme, now };
     let base = Style::new().bg(theme.background).fg(theme.foreground);
     frame.render_widget(Block::new().style(base), frame.area());
-    match &app.screen {
-        Screen::Inbox => render_inbox(frame, app, paint),
-        Screen::Detail(view) => render_detail(frame, view, paint),
+    if let Screen::Detail(view) = &mut app.screen {
+        render_detail(frame, view, paint);
+    } else {
+        render_inbox(frame, app, paint);
+    }
+    if let Some(prompt) = &app.prompt {
+        render_prompt(frame, prompt, paint);
     }
 }
 
@@ -200,19 +204,42 @@ fn pad_span(span: Span<'static>, width: usize) -> Span<'static> {
 
 // ---- Detail ----
 
-fn render_detail(frame: &mut Frame, view: &DetailView, paint: Paint) {
+fn detail_help(tab: Tab) -> &'static str {
+    match tab {
+        Tab::Overview => {
+            "tab/1-3 switch | j/k scroll | o browser | d diff | r reload | ctrl-l open link | esc back"
+        }
+        Tab::Commits | Tab::Checks => {
+            "tab/1-3 switch | j/k move | enter/o browser | d diff | r reload | ctrl-l open link | esc back"
+        }
+    }
+}
+
+fn render_detail(frame: &mut Frame, view: &mut DetailView, paint: Paint) {
     let theme = paint.theme;
-    let [top, body, bottom] = Layout::vertical([
+    let [top, tabs, body, bottom] = Layout::vertical([
         Constraint::Length(3),
+        Constraint::Length(1),
         Constraint::Min(0),
         Constraint::Length(1),
     ])
     .areas(frame.area());
-    frame.render_widget(Paragraph::new(paint.span(DETAIL_HELP, theme.muted)), bottom);
+    frame.render_widget(
+        Paragraph::new(paint.span(detail_help(view.tab), theme.muted)),
+        bottom,
+    );
 
-    let detail = match &view.detail {
+    let DetailView {
+        pr,
+        detail,
+        tab,
+        scroll,
+        commits,
+        checks,
+    } = view;
+    let detail = match detail {
         None => {
-            frame.render_widget(Paragraph::new(detail_title(&view.pr, paint)), top);
+            frame.render_widget(Paragraph::new(detail_title(pr, paint)), top);
             frame.render_widget(
                 Paragraph::new(paint.span("loading...", theme.warning)),
                 body,
@@ -220,36 +247,27 @@ fn render_detail(frame: &mut Frame, view: &DetailView, paint: Paint) {
             return;
         }
         Some(Err(error)) => {
-            frame.render_widget(Paragraph::new(detail_title(&view.pr, paint)), top);
-            frame.render_widget(
-                Paragraph::new(paint.span(error.clone(), theme.danger)).wrap(Wrap { trim: false }),
-                body,
-            );
+            frame.render_widget(Paragraph::new(detail_title(pr, paint)), top);
+            let message = paint.span(error.clone(), theme.danger);
+            frame.render_widget(Paragraph::new(message).wrap(Wrap { trim: false }), body);
             return;
         }
         Some(Ok(detail)) => detail,
     };
 
     frame.render_widget(Paragraph::new(detail_header(detail, paint)), top);
-    let [description, sidebar] =
-        Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)]).areas(body);
-    render_description(frame, detail, view.scroll, description, paint);
-    let border = Block::new()
-        .borders(Borders::LEFT)
-        .border_style(Style::new().fg(theme.muted));
-    let sidebar_text = Text::from(sidebar_lines(detail, paint));
-    frame.render_widget(
-        Paragraph::new(sidebar_text)
-            .wrap(Wrap { trim: true })
-            .block(border),
-        sidebar,
-    );
+    frame.render_widget(Paragraph::new(tab_bar(*tab, detail, paint)), tabs);
+    match tab {
+        Tab::Overview => render_overview(frame, detail, *scroll, body, paint),
+        Tab::Commits => render_commits(frame, detail, commits, body, paint),
+        Tab::Checks => render_checks(frame, detail, checks, body, paint),
+    }
 }
 
-fn detail_title(pr: &PrSummary, paint: Paint) -> Text<'static> {
+fn detail_title(pr: &PrRef, paint: Paint) -> Text<'static> {
     Text::from(vec![
-        Line::from(paint.bold(pr.title.clone(), paint.theme.foreground)),
-        Line::from(paint.span(format!("{}#{}", pr.repo, pr.number), paint.theme.muted)),
+        Line::from(paint.bold(format!("{}#{}", pr.repo, pr.number), paint.theme.foreground)),
+        Line::from(paint.span(pr.url(), paint.theme.muted)),
     ])
 }
 
@@ -283,6 +301,185 @@ fn detail_header(detail: &PrDetail, paint: Paint) -> Text<'static> {
         ]),
         Line::from(paint.span(pr.repo.clone(), theme.muted)),
     ])
+}
+
+fn tab_bar(current: Tab, detail: &PrDetail, paint: Paint) -> Line<'static> {
+    let theme = paint.theme;
+    let spans = Tab::ALL.iter().enumerate().map(|(index, tab)| {
+        let count = match tab {
+            Tab::Overview => String::new(),
+            Tab::Commits => format!(" {}", detail.commit_count),
+            Tab::Checks => format!(" {}", detail.checks.len()),
+        };
+        let label = format!(" {} {}{count} ", index + 1, tab.title());
+        if *tab == current {
+            let style = Style::new()
+                .fg(theme.heading)
+                .bg(theme.selection)
+                .add_modifier(Modifier::BOLD);
+            Span::styled(label, style)
+        } else {
+            paint.span(label, theme.muted)
+        }
+    });
+    Line::from(spans.collect::<Vec<_>>())
+}
+
+fn render_overview(frame: &mut Frame, detail: &PrDetail, scroll: u16, area: Rect, paint: Paint) {
+    let [description, sidebar] =
+        Layout::horizontal([Constraint::Percentage(65), Constraint::Percentage(35)]).areas(area);
+    render_description(frame, detail, scroll, description, paint);
+    let border = Block::new()
+        .borders(Borders::LEFT)
+        .border_style(Style::new().fg(paint.theme.muted));
+    let sidebar_text = Text::from(sidebar_lines(detail, paint));
+    frame.render_widget(
+        Paragraph::new(sidebar_text)
+            .wrap(Wrap { trim: true })
+            .block(border),
+        sidebar,
+    );
+}
+
+fn render_commits(
+    frame: &mut Frame,
+    detail: &PrDetail,
+    state: &mut ListState,
+    area: Rect,
+    paint: Paint,
+) {
+    let theme = paint.theme;
+    let selected = state.selected();
+    let items: Vec<ListItem> = detail
+        .commits
+        .iter()
+        .enumerate()
+        .map(|(index, commit)| {
+            let secondary = secondary_color(selected == Some(index), theme);
+            let symbol = match commit.checks {
+                Some(checks) => check_symbol(checks, theme),
+                None => (" ", theme.muted),
+            };
+            let short_oid: String = commit.oid.chars().take(7).collect();
+            let first = Line::from(vec![
+                paint.span(format!(" {} ", symbol.0), symbol.1),
+                paint.span(format!("{short_oid}  "), theme.accent),
+                paint.bold(commit.headline.clone(), theme.foreground),
+            ]);
+            let second = paint.span(
+                format!(
+                    "            {}, {}",
+                    commit.author,
+                    relative_time(commit.authored_at, paint.now)
+                ),
+                secondary,
+            );
+            ListItem::new(Text::from(vec![first, Line::from(second)]))
+        })
+        .collect();
+    let mut list = List::new(items).highlight_style(Style::new().bg(theme.selection));
+    if detail.commit_count > detail.commits.len() as u64 {
+        let title = format!(
+            " first {} of {} commits ",
+            detail.commits.len(),
+            detail.commit_count
+        );
+        list = list.block(Block::new().title(paint.span(title, theme.warning)));
+    }
+    frame.render_stateful_widget(list, area, state);
+}
+
+fn render_checks(
+    frame: &mut Frame,
+    detail: &PrDetail,
+    state: &mut ListState,
+    area: Rect,
+    paint: Paint,
+) {
+    let theme = paint.theme;
+    if detail.checks.is_empty() {
+        frame.render_widget(
+            Paragraph::new(paint.span(" No checks ran on the head commit.", theme.muted)),
+            area,
+        );
+        return;
+    }
+    let selected = state.selected();
+    let items: Vec<ListItem> = detail
+        .checks
+        .iter()
+        .enumerate()
+        .map(|(index, check)| {
+            let secondary = secondary_color(selected == Some(index), theme);
+            let (symbol, color) = check_symbol(check.state, theme);
+            let first = Line::from(vec![
+                paint.span(format!(" {symbol} "), color),
+                paint.bold(check.name.clone(), theme.foreground),
+            ]);
+            ListItem::new(Text::from(vec![
+                first,
+                Line::from(paint.span(check_details(check), secondary)),
+            ]))
+        })
+        .collect();
+    let list = List::new(items).highlight_style(Style::new().bg(theme.selection));
+    frame.render_stateful_widget(list, area, state);
+}
+
+/// "CI, took 2m 30s" for a finished check run; status contexts have no workflow.
+fn check_details(check: &CheckLine) -> String {
+    let duration = match (check.started_at, check.completed_at) {
+        (Some(start), Some(end)) => Some(format!("took {}", format_duration(end - start))),
+        (Some(_), None) if check.state == CheckState::Pending => Some("running".to_string()),
+        _ => None,
+    };
+    let parts: Vec<String> = check.workflow.iter().cloned().chain(duration).collect();
+    format!("   {}", parts.join(", "))
+}
+
+fn format_duration(duration: chrono::Duration) -> String {
+    let seconds = duration.num_seconds().max(0);
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        60..3_600 => format!("{}m {}s", seconds / 60, seconds % 60),
+        _ => format!("{}h {}m", seconds / 3_600, seconds % 3_600 / 60),
+    }
+}
+
+// ---- Link box ----
+
+fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
+    let theme = paint.theme;
+    let area = frame.area();
+    let width = area.width.saturating_sub(4).min(90);
+    let box_area = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + 2,
+        width,
+        height: 4,
+    };
+    let hint = match &prompt.error {
+        Some(error) => paint.span(error.clone(), theme.danger),
+        None => paint.span(
+            "paste a PR link or owner/repo#123, enter to open, esc to cancel",
+            theme.muted,
+        ),
+    };
+    let text = Text::from(vec![
+        Line::from(vec![
+            paint.span("> ", theme.accent),
+            Span::from(prompt.text.clone()),
+            paint.span("▏", theme.accent),
+        ]),
+        Line::from(hint),
+    ]);
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(theme.heading))
+        .title(paint.bold(" Open a pull request ", theme.heading))
+        .style(Style::new().bg(theme.background).fg(theme.foreground));
+    frame.render_widget(Clear, box_area);
+    frame.render_widget(Paragraph::new(text).block(block), box_area);
 }
 
 fn render_description(frame: &mut Frame, detail: &PrDetail, scroll: u16, area: Rect, paint: Paint) {
@@ -496,5 +693,12 @@ mod tests {
         let theme = theme::by_name("dracula").unwrap();
         assert_eq!(secondary_color(true, &theme), theme.foreground);
         assert_eq!(secondary_color(false, &theme), theme.muted);
+    }
+
+    #[test]
+    fn durations_use_two_units_at_most() {
+        assert_eq!(format_duration(chrono::Duration::seconds(42)), "42s");
+        assert_eq!(format_duration(chrono::Duration::seconds(150)), "2m 30s");
+        assert_eq!(format_duration(chrono::Duration::seconds(3_900)), "1h 5m");
     }
 }
