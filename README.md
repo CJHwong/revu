@@ -1,91 +1,27 @@
 # revu
 
-A terminal version of GitHub's pull request inbox. It shows the pull requests you care about across every repository, grouped like the web inbox, and opens each one like GitHub's Overview: the description, the comments and reviews with their threads, folded `<details>` blocks, reviewers and labels. A merge box on top says whether the PR can merge and counts failing and pending checks, unresolved review threads and pending approvals; `Enter` on its Checks row opens the Checks tab, and on its Comments row shows only unresolved threads. The sidebar counts what others did since your last comment or review, lists every reviewer with their state (a member who reviewed for a team sits under the team), and shows Assignees, Labels, Milestone and linked issues only when set. It writes to GitHub only when you ask: a review (`R`), line comments in your pending review (`c`), labels (`e`), discarding your pending review (`X`), and the Viewed checkbox on a file (`v`).
+Your GitHub pull requests, reviewed in the terminal. revu collects the pull requests that wait on you across every repository, opens each one the way GitHub's Overview does, and shows the diff in word diff, delta or difftastic. You can review, comment on lines and label without opening the browser.
 
-## Requirements
-
-- The GitHub CLI (`gh`), logged in. The tool calls `gh api graphql` and stores no token of its own. When any GitHub call fails, the app asks gh why. If gh is missing, logged out, or cannot reach GitHub, a full screen says which, with the command or the network error, from the inbox or from a PR; `r` checks again. Any other failure that empties every inbox group, such as the rate limit or a GitHub outage, shows GitHub's error in place of the groups.
-- git. Without it, diffs, find and `s` say git is missing and how to install it.
-- Rust, to build it.
+![revu on ripgrep: the inbox, a pull request's Overview, three diff views and a find](docs/demo.gif)
 
 ## Install
+
+You need the GitHub CLI (`gh`), logged in, git, and Rust to build revu.
 
 ```bash
 cargo install --git https://github.com/CJHwong/revu
 revu
 ```
 
-## Local clones
+The first run writes `~/.config/revu/config.yaml`. Set `workspace_dir` in it to the folder that holds your clones, so the diffs can load.
 
-The diff panes need the PR's commits locally. The tool looks for your clone in `workspace_dir`: first the folder named after the repo, then any folder whose `origin` is that repo. If there is none, it asks before cloning. It fetches the PR into `refs/revu/pr/<number>/` only, with `--no-write-fetch-head`, and never checks out a branch or touches your working tree.
+## Documentation
 
-Versions from before the rename to revu fetched into `refs/rs-github-inbox/pr/`. Those refs are no longer used. To delete them from a clone:
-
-```bash
-git for-each-ref --format='delete %(refname)' refs/rs-github-inbox/ | git update-ref --stdin
-```
-
-## Configuration
-
-The first run writes `~/.config/revu/config.yaml` (or `$XDG_CONFIG_HOME/revu/config.yaml`). A `rs-github-inbox` folder from before the rename moves there on the first run. Press `r` in the inbox to reload it. The view toggles go to `view.yaml` beside it whenever you change one, and the next start brings them back: the comment order (`F`) and No bots (`n`), wrapping (`w`) and the renderer (`m`), and the file list's tree view (`t`), hidden viewed files (`V`) and hidden list (`z`).
-
-- `groups`: one GitHub search per group, in display order. The tool adds `is:pr is:open archived:false` to each query, and `sort:updated-desc` unless the query has its own `sort:`. A group shows at most 100 PRs, the newest ones, and its header says "100 of N" when it has more. `collapsed: true` folds the group on start.
-- `updated_within_days`: adds `updated:>=<date>` to every query. Remove the key to see older pull requests.
-- `theme`: `dracula` (the default) or `terminal`, which uses your terminal's own colors.
-- `workspace_dir`: the folder that holds your clones. The Files changed tab asks for it once and appends it here.
-- `diff_renderers`: the diff views that `m` switches between, as shell commands run inside the clone. `{base}`, `{head}`, `{paths}` and `{width}` are replaced and quoted for the shell. `{syntax_theme}`, `{added_bg}` and `{removed_bg}` come from the app's theme; the default `delta` command passes them, so all three renderers share one set of syntax colors and change tints, and follow a theme change. The defaults are `word` (`git diff --word-diff`), `delta` and `difftastic`. `highlight: true` on a renderer adds syntax colors from `bat`, and shows the renderer's red and green as a background tint. It is on for `word` and `difftastic`, which color little of the code themselves. Without `bat`, the output shows as the renderer drew it. `requires` names the program a renderer needs, and `install` how to get it. At startup, a renderer whose program is not on PATH drops out of `m`, a saved choice of it shows `word` instead without being forgotten, and the first diff you open says what is missing and how to add it. A renderer without `requires` that fails with "command not found" is skipped the same way. When the diff pane is narrower than 100 columns, difftastic draws one column instead of two, unless you set `DFT_DISPLAY` yourself.
-- `open_diff`: the shell command that `d` runs. `{repo}`, `{number}` and `{url}` are replaced. The default is `gh pr diff {number} -R {repo} | delta`.
-
-A search shows at most 100 pull requests. A group with more matches shows a count like `100 of 140`.
-
-## Keys
-
-Text boxes (reviews and comments) are multi-line: `Enter` adds a line, `shift`+arrows select, `alt`+arrows move by word, `ctrl+a` selects everything, `ctrl+c` and `ctrl+x` copy and cut to the clipboard, a paste replaces the selection, and `esc` twice throws the text away. Copying uses OSC 52 and `pbcopy`; inside tmux, OSC 52 needs `set -g set-clipboard on`.
-
-Press `?` anywhere for this list.
-
-| Where | Key | Action |
-|---|---|---|
-| Anywhere | `Ctrl+L` (or `Cmd+L`, see below), or paste | Open a pull request by link or `owner/repo#123` |
-| Anywhere | `?` | Show every key. `j`/`k` and `Space`/`b` scroll it; any other key closes it. |
-| Anywhere | `,`, then Theme | Pick a color theme: `dracula`, `terminal` (your terminal's own colors), `catppuccin_mocha`, `catppuccin_macchiato`, `catppuccin_frappe`, `nord`, `gruvbox_dark`, `solarized_dark`, `one_half_dark`, `monokai`, or the light `catppuccin_latte`, `gruvbox_light`, `solarized_light`, `one_half_light` and `github`. Each pairs with the bat theme of the same name, so code in diffs matches the page. `Enter` applies it at once, diffs included, and saves it as the `theme:` line in the config. |
-| Anywhere | `,` | Settings: the theme, the workspace folder, and how many days back the inbox looks. `Enter` edits the selected one and saves it to its line in the config at once; comments and other lines stay as they are. A new number of days reloads the inbox. |
-| Inbox | `j` / `k`, `g` / `G` | Move, top, bottom |
-| Inbox | `Enter`, `l` | Open the pull request, or fold a group header |
-| Inbox | `Space` | Fold the current group |
-| Inbox | `Tab` / `Shift+Tab` | Next or previous group |
-| Inbox | `r` | Reload the config and fetch again |
-| Inbox | `q` | Quit |
-| Pull request | `1`-`4`, `Tab` / `Shift+Tab` | Switch between Overview, Commits, Checks and Files changed. The tabs show GitHub's counts, not the digits. |
-| Pull request | `Esc`, `h`, `q` | Back to the inbox |
-| Pull request | `g` / `G`, `Space` / `b` | Top, bottom, page down, page up |
-| Pull request | `s` | Search every file in the repo at the PR head, not only the changed ones. `Tab` completes a word or file name from the PR's changes, as in find. `Enter` opens the file at the match, with syntax colors from `bat` when it is installed. It needs the local clone, which the Files changed or Commits tab finds first. |
-| Pull request | `r` | Fetch the pull request again |
-| Pull request | `R` | Review: `Tab` picks Comment, Approve or Request changes (only Comment on your own PR, as GitHub requires). `ctrl+s` asks to confirm and `y` sends. Your pending line comments go with it. Request changes needs a comment; Comment needs a comment or line comments. |
-| Pull request | `X` | Discard your pending review and every line comment in it, after a `y`. |
-| Overview | `e` | Labels: type to filter, `↑`/`↓` move, `Space` ticks, `Enter` applies the changes to GitHub. |
-| Overview | `j` / `k` | Next or previous comment, review thread or folded block. Inside one taller than the screen, a third of a screen. The cursor never stops on an empty line. |
-| Overview | `Enter` | Open or close the card, review thread or `<details>` block under the cursor |
-| Overview | `]` / `[` | Next or previous card or folded block |
-| Overview | `f` / `F` / `n` | Filter the comments (All, Unresolved, Mine), flip oldest or newest first, hide bots. Mine shows only your own words, with the threads you replied in open. |
-| Files changed | `Enter` | Show the whole file with its changes marked, drawn by the current renderer, with syntax colors. On a folder, fold or open it. |
-| Files changed | `t` | Switch the list between a folder tree and flat paths |
-| Files changed | `z` | Hide or show the list, so the diff gets the full width |
-| Files changed | `v` | Toggle Viewed. It syncs to GitHub's Viewed checkbox at once. |
-| Files changed | `V` | Hide viewed files |
-| Files changed | `c` | Comment mode on the selected file: its plain diff with line numbers. `j`/`k` move, `V` marks a range (on one side only, as GitHub requires), `Enter` writes a comment, `esc` goes back. The comment joins your pending review on GitHub, which only you see until `R` submits it; a dot marks lines it already covers. |
-| Files changed | `]` / `[` | Next or previous unviewed file |
-| Files changed, Commits | `J` / `K`, `Space` / `b` | Scroll the diff |
-| Files changed, Commits | `m` | Switch the diff renderer |
-| Files changed, Commits | `w` | Wrap long lines (the default) or not. Unwrapped, `H` / `L` scroll the diff sideways, as `J` / `K` scroll it down and up. |
-| Files changed, Commits | `/`, then `n` / `N` | Find text, ignoring case. `^` at the start ties it to where the code starts, after line numbers, the +/- mark and indentation (so `^def ` finds definitions), and `$` at the end to where the code ends; in difftastic each column counts on its own. `\^` and `\$` find the characters. While you type, the prompt offers the most used word of the PR's changed lines that starts with your text, or a changed file's path, name or folder; `Tab` takes it. In the diff, every match is marked, the current one stronger, and the pane title shows `/text  match 2 of 3 in file 5 of 63`. On Files changed, `n` past a file's last match goes on to the next file that holds the text, opening its folder; on Commits it searches the commit on screen. `s` searches the whole repo. |
-| Commits, Checks | `Enter` | Open the selected commit or check in the browser |
-| Inbox, pull request | `o` | Open in the browser |
-| Inbox, pull request | `d` | Run the `open_diff` command |
-
-`Cmd+L` works only in terminals that pass Cmd to applications through the kitty keyboard protocol and do not use `Cmd+L` themselves. `Ctrl+L` works everywhere.
-
-The top line shows what is left of GitHub's API budget (`API: 4676/5000 left, resets 19:23`), from the headers of the latest call. It turns yellow under 20% and red under 5%. A click works like the keys on what it hits: it opens a pull request in the inbox, switches a tab, selects a file, commit, check or search hit, folds a folder, and opens or closes a card, thread or folded block on the Overview. The mouse wheel scrolls the pane under the pointer: the diff or the list beside it. Over the Files changed list, it scrolls the list and leaves the selected file and its diff alone; `j` or `k` brings the list back to the selection. On the Overview one tick goes to the next card, or a third of a screen inside a card taller than the screen. The app captures the mouse for this, so selecting text needs the terminal's bypass modifier (Shift in most terminals, Option or Fn in some).
+- [Getting started](docs/getting-started.md): a first session, from install to a submitted review.
+- [How-to guides](docs/how-to.md): set up your inbox, add a diff view, review a pull request, fix common errors.
+- [Keys](docs/keys.md): every key, by where it works. Press `?` in the app for the same list.
+- [Configuration](docs/configuration.md): every setting in `config.yaml` and `view.yaml`.
+- [How it works](docs/how-it-works.md): local clones, what revu writes to GitHub, the API budget, and error handling.
 
 ## License
 
