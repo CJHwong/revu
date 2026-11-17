@@ -1691,18 +1691,27 @@ impl App {
     fn jump_group(&mut self, forward: bool) {
         let rows = self.rows();
         let current = self.list_state.selected().unwrap_or(0);
-        let mut headers = rows
+        let headers: Vec<usize> = rows
             .iter()
             .enumerate()
             .filter(|(_, row)| matches!(row, Row::Header(_)))
-            .map(|(index, _)| index);
+            .map(|(index, _)| index)
+            .collect();
+        // Past the last group it goes round to the first, and back from the first to the last.
         let target = if forward {
-            headers.find(|index| *index > current)
+            headers
+                .iter()
+                .find(|index| **index > current)
+                .or(headers.first())
         } else {
-            headers.rev().find(|index| *index < current)
+            headers
+                .iter()
+                .rev()
+                .find(|index| **index < current)
+                .or(headers.last())
         };
         if let Some(target) = target {
-            self.list_state.select(Some(target));
+            self.list_state.select(Some(*target));
         }
     }
 
@@ -2231,6 +2240,18 @@ mod tests {
         app.handle_key(key(KeyCode::BackTab));
         assert_eq!(app.selected_row(), Some(Row::Header(0)));
         assert!(!app.groups[0].collapsed, "Tab no longer folds");
+        app.handle_key(key(KeyCode::BackTab));
+        assert_eq!(
+            app.selected_row(),
+            Some(Row::Header(1)),
+            "back from the first goes to the last"
+        );
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(
+            app.selected_row(),
+            Some(Row::Header(0)),
+            "past the last goes to the first"
+        );
     }
 
     #[test]
