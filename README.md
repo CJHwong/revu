@@ -22,7 +22,7 @@ The diff panes need the PR's commits locally. The tool looks for your clone in `
 
 The first run writes `~/.config/rs-github-inbox/config.yaml` (or `$XDG_CONFIG_HOME/rs-github-inbox/config.yaml`). Press `r` in the inbox to reload it.
 
-- `groups`: one GitHub search per group, in display order. The tool adds `is:pr is:open archived:false` to each query. `collapsed: true` folds the group on start.
+- `groups`: one GitHub search per group, in display order. The tool adds `is:pr is:open archived:false` to each query, and `sort:updated-desc` unless the query has its own `sort:`. A group shows at most 100 PRs, the newest ones, and its header says "100 of N" when it has more. `collapsed: true` folds the group on start.
 - `updated_within_days`: adds `updated:>=<date>` to every query. Remove the key to see older pull requests.
 - `theme`: `dracula` (the default) or `terminal`, which uses your terminal's own colors.
 - `workspace_dir`: the folder that holds your clones. The Files changed tab asks for it once and appends it here.

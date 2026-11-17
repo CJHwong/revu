@@ -7,7 +7,8 @@ use crate::theme::{self, Theme};
 
 pub const DEFAULT_CONFIG: &str = r#"# rs-github-inbox config. Press r in the inbox to reload it.
 # Every group query gets "is:pr is:open archived:false" added,
-# plus "updated:>=<date>" when updated_within_days is set.
+# plus "updated:>=<date>" when updated_within_days is set, and
+# "sort:updated-desc" unless the query has its own sort:.
 updated_within_days: 30
 
 # Color theme: dracula or terminal (your terminal's own colors).

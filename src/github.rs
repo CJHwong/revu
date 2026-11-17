@@ -23,6 +23,10 @@ pub fn search_query(group_query: &str, updated_since: Option<NaiveDate>) -> Stri
     if let Some(date) = updated_since {
         query.push_str(&format!(" updated:>={date}"));
     }
+    // A group past one page keeps its newest PRs; a group's own sort wins.
+    if !group_query.contains("sort:") {
+        query.push_str(" sort:updated-desc");
+    }
     query
 }
 
@@ -217,11 +221,11 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2026, 10, 18).unwrap();
         assert_eq!(
             search_query("author:@me", Some(date)),
-            "is:pr is:open archived:false author:@me updated:>=2026-10-18"
+            "is:pr is:open archived:false author:@me updated:>=2026-10-18 sort:updated-desc"
         );
         assert_eq!(
-            search_query("author:@me", None),
-            "is:pr is:open archived:false author:@me"
+            search_query("author:@me sort:created-asc", None),
+            "is:pr is:open archived:false author:@me sort:created-asc"
         );
     }
 
