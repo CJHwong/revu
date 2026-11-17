@@ -34,23 +34,62 @@ pub fn to_text(bytes: &[u8], syntax: Option<Syntax>) -> Result<Text<'static>, St
 fn add_syntax(mut text: Text<'static>, syntax: Syntax) -> Text<'static> {
     let plain: Vec<String> = text.lines.iter().map(plain_line).collect();
     for (path, indexes) in sections(&plain) {
-        let code: Vec<&str> = indexes.iter().map(|index| plain[*index].as_str()).collect();
-        // End every line with a newline, so `bat` keeps an empty last line.
-        let Some(mut colored) = bat_lines(&(code.join("\n") + "\n"), &path, syntax.bat_theme)
-        else {
+        // difftastic draws two files side by side; each column gets its own `bat` run, so
+        // a comment on the left cannot color the code on the right.
+        let (left, right): (Vec<String>, Vec<String>) = indexes
+            .iter()
+            .map(|index| split_columns(&text.lines[*index], &plain[*index]))
+            .unzip();
+        let (Some(left), Some(right)) = (
+            bat_column(&left, &path, syntax.bat_theme),
+            bat_column(&right, &path, syntax.bat_theme),
+        ) else {
             continue;
         };
-        colored.truncate(indexes.len());
-        if colored.len() != indexes.len() {
-            continue;
-        }
-        for (index, colored) in indexes.into_iter().zip(colored) {
+        for ((index, left), right) in indexes.into_iter().zip(left).zip(right) {
+            let colored = Line::from([left.spans, right.spans].concat());
             if let Some(merged) = merge(&text.lines[index], &colored, syntax) {
                 text.lines[index] = merged;
             }
         }
     }
     text
+}
+
+/// A line's text before and after the right column's line numbers: the second run of dim
+/// text. A one-column line is all left.
+fn split_columns(line: &Line<'static>, plain: &str) -> (String, String) {
+    let mut runs = 0;
+    let mut was_dim = false;
+    let mut split = None;
+    for (position, (_, style)) in cells(line).into_iter().enumerate() {
+        let dim = style.add_modifier.contains(Modifier::DIM);
+        if dim && !was_dim {
+            runs += 1;
+        }
+        if runs == 2 {
+            split = Some(position);
+            break;
+        }
+        was_dim = dim;
+    }
+    let split = split.unwrap_or(usize::MAX);
+    (
+        plain.chars().take(split).collect(),
+        plain.chars().skip(split).collect(),
+    )
+}
+
+/// `bat`'s colors for one column, one line per input line, or None when `bat` fails or
+/// the line count differs.
+fn bat_column(column: &[String], path: &str, theme: &str) -> Option<Vec<Line<'static>>> {
+    if column.iter().all(String::is_empty) {
+        return Some(vec![Line::default(); column.len()]);
+    }
+    // End every line with a newline, so `bat` keeps an empty last line.
+    let mut colored = bat_lines(&(column.join("\n") + "\n"), path, theme)?;
+    colored.resize(column.len(), Line::default());
+    Some(colored)
 }
 
 fn plain_line(line: &Line) -> String {
@@ -255,6 +294,43 @@ mod tests {
                 .add_modifier(Modifier::BOLD),
             "an added word gets bat's color on the added tint, still bold"
         );
+    }
+
+    #[test]
+    fn a_side_by_side_line_splits_at_the_second_line_number() {
+        let dim = Style::new().add_modifier(Modifier::DIM);
+        let line = Line::from(vec![
+            Span::styled(" 1 ", dim),
+            Span::raw("# note  "),
+            Span::styled(" 1 ", dim),
+            Span::raw("x=1"),
+        ]);
+        let plain = plain_line(&line);
+        assert_eq!(
+            split_columns(&line, &plain),
+            (" 1 # note  ".to_string(), " 1 x=1".to_string())
+        );
+        let one_column = Line::from(vec![Span::styled(" 1 ", dim), Span::raw("x=1")]);
+        let plain = plain_line(&one_column);
+        assert_eq!(
+            split_columns(&one_column, &plain),
+            (plain.clone(), String::new())
+        );
+    }
+
+    #[test]
+    fn bat_keeps_an_empty_last_line() {
+        if std::process::Command::new("bat")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let column = ["a=1".to_string(), String::new()];
+        let colored = bat_column(&column, "x.sh", "ansi").unwrap();
+        assert_eq!(colored.len(), 2);
+        assert_eq!(plain_line(&colored[0]), "a=1");
     }
 
     #[test]
