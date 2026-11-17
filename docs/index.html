@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>revu: GitHub pull requests, reviewed in your terminal</title>
+<meta name="description" content="revu is a terminal app for the GitHub pull requests that wait on you: an inbox like GitHub's, the full Overview, three diff views, find, and reviews, without the browser.">
+<style>
+  :root {
+    --bg: #282a36;
+    --bg-raised: #21222c;
+    --fg: #f8f8f2;
+    --muted: #6272a4;
+    --line: #44475a;
+    --heading: #bd93f9;
+    --accent: #8be9fd;
+    --green: #50fa7b;
+    --yellow: #f1fa8c;
+    --red: #ff5555;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.6 var(--mono);
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { color: var(--accent); }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 20px; }
+
+  nav {
+    position: sticky; top: 0; z-index: 1;
+    background: rgba(40, 42, 54, 0.92);
+    backdrop-filter: blur(6px);
+    border-bottom: 1px solid var(--line);
+  }
+  nav .wrap { display: flex; align-items: center; gap: 22px; height: 52px; }
+  nav .brand { color: var(--heading); font-weight: 700; margin-right: auto; }
+  nav a:not(.brand) { color: var(--muted); }
+  nav a:not(.brand):hover { color: var(--fg); text-decoration: none; }
+
+  header { padding: 64px 0 24px; }
+  h1 { font-size: clamp(30px, 5vw, 46px); line-height: 1.15; margin: 0 0 18px; }
+  h1 .prompt { color: var(--green); }
+  .lede { color: #c9cbd6; max-width: 720px; margin: 0 0 28px; }
+  .lede em { color: var(--heading); font-style: normal; }
+
+  .install { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 10px; }
+  .cmd {
+    display: flex; align-items: center; gap: 14px;
+    background: var(--bg-raised); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 10px 10px 16px; max-width: 100%; overflow-x: auto;
+  }
+  .cmd code { color: var(--fg); white-space: nowrap; }
+  .cmd code::before { content: "$ "; color: var(--green); }
+  button.copy {
+    font: inherit; font-size: 13px; cursor: pointer;
+    color: var(--muted); background: transparent;
+    border: 1px solid var(--line); border-radius: 6px; padding: 3px 10px;
+  }
+  button.copy:hover { color: var(--fg); border-color: var(--muted); }
+  .button {
+    border: 1px solid var(--heading); color: var(--heading);
+    border-radius: 8px; padding: 10px 16px;
+  }
+  .button:hover { background: rgba(189, 147, 249, 0.12); text-decoration: none; }
+  .needs { color: var(--muted); font-size: 13px; margin: 6px 0 0; }
+
+  .window {
+    margin: 40px 0 8px;
+    border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
+    background: var(--bg); box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+  }
+  .titlebar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 9px 14px; background: var(--bg-raised); border-bottom: 1px solid var(--line);
+    color: var(--muted); font-size: 13px;
+  }
+  .dot { width: 11px; height: 11px; border-radius: 50%; background: var(--line); }
+  .titlebar span { margin-left: 10px; }
+  .window img { display: block; width: 100%; height: auto; }
+  .caption { color: var(--muted); font-size: 13px; text-align: center; margin: 0 0 8px; }
+
+  section { padding: 56px 0 8px; }
+  h2 { font-size: 22px; margin: 0; color: var(--heading); }
+  h2::before { content: "## "; color: var(--muted); }
+  .sub { color: var(--muted); margin: 4px 0 26px; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .card {
+    background: var(--bg-raised); border: 1px solid var(--line); border-radius: 8px;
+    padding: 18px 20px;
+  }
+  .card h3 { margin: 0 0 8px; font-size: 15px; }
+  .card h3 .num { color: var(--muted); font-weight: 400; margin-right: 6px; }
+  .card p { margin: 0 0 10px; color: #c9cbd6; font-size: 14px; }
+  .card .keys { color: var(--muted); font-size: 13px; margin: 0; }
+  .card .keys kbd { color: var(--accent); }
+
+  .keygroups { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 16px; }
+  .keygroups h3 { margin: 0 0 8px; font-size: 14px; color: var(--yellow); }
+  table.keys { border-collapse: collapse; width: 100%; font-size: 14px; }
+  table.keys td { padding: 3px 0; vertical-align: top; }
+  table.keys td:first-child { color: var(--accent); white-space: nowrap; padding-right: 16px; width: 1%; }
+  table.keys td:last-child { color: #c9cbd6; }
+  kbd { font: inherit; }
+
+  .steps { margin: 0; padding-left: 22px; color: #c9cbd6; }
+  .steps li { margin-bottom: 14px; }
+  .steps li::marker { color: var(--muted); }
+  .steps .cmd { margin-top: 8px; width: fit-content; }
+  ul.plain { margin: 8px 0 0; padding-left: 20px; color: #c9cbd6; }
+  ul.plain li::marker { color: var(--muted); }
+
+  footer { margin-top: 72px; border-top: 1px solid var(--line); padding: 22px 0 40px; color: var(--muted); font-size: 13px; }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 18px; }
+  footer .wrap span { margin-right: auto; }
+  footer a { color: var(--muted); }
+  footer a:hover { color: var(--fg); }
+
+  @media (max-width: 640px) {
+    nav a.optional { display: none; }
+    header { padding-top: 40px; }
+    /* A long command wraps so the copy button stays on screen. */
+    .cmd { align-items: flex-start; }
+    .cmd code { white-space: normal; word-break: break-all; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="#">revu</a>
+    <a class="optional" href="#features">features</a>
+    <a class="optional" href="#keys">keys</a>
+    <a href="#install">install</a>
+    <a href="https://github.com/CJHwong/revu">github</a>
+  </div>
+</nav>
+
+<main class="wrap">
+  <header>
+    <h1><span class="prompt">&gt;</span> Your pull requests,<br>reviewed in the terminal.</h1>
+    <p class="lede">
+      <em>revu</em> collects the GitHub pull requests that wait on you, opens each one the way GitHub's Overview does, and shows the diff the way you like to read it. Review, comment on lines and label without opening the browser.
+    </p>
+    <div class="install">
+      <div class="cmd"><code id="install-cmd">cargo install --git https://github.com/CJHwong/revu</code><button class="copy" data-copy="install-cmd">copy</button></div>
+      <a class="button" href="https://github.com/CJHwong/revu">View on GitHub &rarr;</a>
+    </div>
+    <p class="needs">Needs the GitHub CLI (<code>gh</code>), logged in, and git. revu stores no token of its own.</p>
+
+    <div class="window">
+      <div class="titlebar"><i class="dot"></i><i class="dot"></i><i class="dot"></i><span>revu</span></div>
+      <img src="demo.gif" width="941" height="588" alt="revu demo: the inbox, a pull request's Overview, its diff in difftastic, word diff and delta, a find across the changed files, and the key list.">
+    </div>
+    <p class="caption">The inbox, a pull request's Overview, three diff views, find, and the key list.</p>
+  </header>
+
+  <section id="features">
+    <h2>features</h2>
+    <p class="sub">what you get without leaving the terminal</p>
+    <div class="grid">
+      <div class="card">
+        <h3><span class="num">[01]</span>An inbox like GitHub's</h3>
+        <p>Your pull requests in groups, each one a GitHub search you write in the config. Every row shows its review state, checks and comments.</p>
+        <p class="keys"><kbd>j</kbd>/<kbd>k</kbd> move, <kbd>tab</kbd> next group, <kbd>ctrl-l</kbd> open a link</p>
+      </div>
+      <div class="card">
+        <h3><span class="num">[02]</span>The whole Overview</h3>
+        <p>The description, comments and review threads, a merge box, reviewers with their state, and what changed since you last commented.</p>
+        <p class="keys"><kbd>enter</kbd> fold, <kbd>f</kbd> filter, <kbd>n</kbd> hide bots</p>
+      </div>
+      <div class="card">
+        <h3><span class="num">[03]</span>Three diff views</h3>
+        <p>Word diff, delta and difftastic, with syntax colors. Views you have not installed drop out, and narrow panes switch difftastic to one column.</p>
+        <p class="keys"><kbd>m</kbd> switch view, <kbd>w</kbd> wrap, <kbd>enter</kbd> full file</p>
+      </div>
+      <div class="card">
+        <h3><span class="num">[04]</span>Find, then search</h3>
+        <p>Find text in every changed file, with <code>^</code> and <code>$</code> anchors and completion from the diff's words and file names. Or search the whole repo at the PR's head.</p>
+        <p class="keys"><kbd>/</kbd> find, <kbd>n</kbd>/<kbd>N</kbd> next, <kbd>s</kbd> search the repo</p>
+      </div>
+      <div class="card">
+        <h3><span class="num">[05]</span>Review without the browser</h3>
+        <p>Comment on a line or a range into your pending review, then submit it as a comment, an approval or a change request. Edit labels and mark files viewed.</p>
+        <p class="keys"><kbd>c</kbd> comment, <kbd>R</kbd> review, <kbd>e</kbd> labels, <kbd>v</kbd> viewed</p>
+      </div>
+      <div class="card">
+        <h3><span class="num">[06]</span>Your clones stay as they are</h3>
+        <p>Diffs come from your local clone. revu fetches a PR's commits into its own refs and never checks out a branch or touches your working tree.</p>
+        <p class="keys">needs <code>workspace_dir</code> in the config</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="keys">
+    <h2>keys</h2>
+    <p class="sub">enough for a first session. press <kbd>?</kbd> in the app for the rest</p>
+    <div class="keygroups">
+      <div>
+        <h3>Inbox</h3>
+        <table class="keys">
+          <tr><td>j / k</td><td>move</td></tr>
+          <tr><td>enter</td><td>open the pull request</td></tr>
+          <tr><td>space</td><td>fold the group</td></tr>
+          <tr><td>ctrl-l</td><td>open a link or owner/repo#123</td></tr>
+          <tr><td>r</td><td>refresh</td></tr>
+          <tr><td>,</td><td>settings</td></tr>
+        </table>
+      </div>
+      <div>
+        <h3>Pull request</h3>
+        <table class="keys">
+          <tr><td>1 - 4</td><td>Overview, Commits, Checks, Files</td></tr>
+          <tr><td>R</td><td>submit a review</td></tr>
+          <tr><td>e</td><td>labels</td></tr>
+          <tr><td>s</td><td>search the repo</td></tr>
+          <tr><td>o</td><td>open in the browser</td></tr>
+          <tr><td>h</td><td>back to the inbox</td></tr>
+        </table>
+      </div>
+      <div>
+        <h3>Diff</h3>
+        <table class="keys">
+          <tr><td>m</td><td>next diff view</td></tr>
+          <tr><td>/</td><td>find in every changed file</td></tr>
+          <tr><td>c</td><td>comment on lines</td></tr>
+          <tr><td>v</td><td>mark the file viewed</td></tr>
+          <tr><td>]</td><td>next unviewed file</td></tr>
+          <tr><td>t</td><td>tree or flat list</td></tr>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section id="install">
+    <h2>install</h2>
+    <p class="sub">built from source with cargo</p>
+    <ol class="steps">
+      <li>Install and log in to the GitHub CLI.
+        <div class="cmd"><code>gh auth login</code></div>
+      </li>
+      <li>Install revu.
+        <div class="cmd"><code id="install-cmd-2">cargo install --git https://github.com/CJHwong/revu</code><button class="copy" data-copy="install-cmd-2">copy</button></div>
+      </li>
+      <li>Run it. The first run writes <code>~/.config/revu/config.yaml</code>. Set <code>workspace_dir</code> to the folder that holds your clones, so the diffs can load.
+        <div class="cmd"><code>revu</code></div>
+      </li>
+    </ol>
+    <p class="sub" style="margin-bottom:0">optional, for the other diff views</p>
+    <ul class="plain">
+      <li><code>delta</code> and <code>difftastic</code>: two more ways to draw the diff</li>
+      <li><code>bat</code>: syntax colors in the word diff and in whole files</li>
+    </ul>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>revu, MIT license</span>
+    <a href="https://github.com/CJHwong/revu">github</a>
+    <a href="https://github.com/CJHwong/revu#readme">docs</a>
+    <a href="https://github.com/CJHwong/revu/issues">issues</a>
+    <a href="https://github.com/CJHwong/revu/blob/main/LICENSE">license</a>
+  </div>
+</footer>
+
+<script>
+  for (const button of document.querySelectorAll("button.copy")) {
+    button.addEventListener("click", async () => {
+      const text = document.getElementById(button.dataset.copy).textContent;
+      try {
+        await navigator.clipboard.writeText(text);
+        button.textContent = "copied";
+      } catch (error) {
+        button.textContent = "select and copy";
+      }
+      setTimeout(() => { button.textContent = "copy"; }, 1600);
+    });
+  }
+</script>
+</body>
+</html>
