@@ -331,6 +331,8 @@ pub struct DetailView {
     find_words_requested: bool,
     /// Comment mode on Files changed: a line cursor over the file's plain diff.
     pub line_mode: Option<LineMode>,
+    /// The repo's labels, loaded the first time the label menu opens on this PR.
+    pub repo_labels: Option<Vec<RepoLabel>>,
     /// n or N moved to another file; the find runs there once its diff is drawn. True
     /// goes to its first match, false to its last.
     find_pending: Option<bool>,
@@ -389,6 +391,7 @@ impl DetailView {
             find_words: None,
             find_words_requested: false,
             line_mode: None,
+            repo_labels: None,
         }
     }
 
@@ -2370,21 +2373,26 @@ impl App {
             .iter()
             .map(|label| label.name.clone())
             .collect();
+        let cached = view.repo_labels.clone();
+        let fetch = cached.is_none().then(|| Action::FetchLabels {
+            pr: view.pr.clone(),
+        });
         self.label_menu = Some(LabelMenu {
             pr: view.pr.clone(),
             pull_request_id: detail.id.clone(),
-            labels: None,
+            labels: cached.map(Ok),
             chosen: current.clone(),
             current,
             filter: String::new(),
             selected: 0,
         });
-        Some(Action::FetchLabels {
-            pr: view.pr.clone(),
-        })
+        fetch
     }
 
     pub fn set_repo_labels(&mut self, pr: &PrRef, result: Result<Vec<RepoLabel>, String>) {
+        if let (Ok(labels), Some(view)) = (&result, self.view_for(pr)) {
+            view.repo_labels = Some(labels.clone());
+        }
         if let Some(menu) = self.label_menu.as_mut().filter(|menu| &menu.pr == pr) {
             menu.labels = Some(result);
         }
@@ -3407,6 +3415,15 @@ mod tests {
             (vec!["L2".to_string()], Vec::<String>::new())
         );
         assert!(app.label_menu.is_none());
+        let again = app.handle_key(key(KeyCode::Char('e')));
+        assert!(
+            again.is_none(),
+            "the second open uses the labels already loaded"
+        );
+        assert!(matches!(
+            app.label_menu.as_ref().unwrap().labels,
+            Some(Ok(_))
+        ));
     }
 
     #[test]
