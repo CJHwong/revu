@@ -2136,21 +2136,21 @@ fn selected_thread_note(view: &DetailView) -> String {
     }
 }
 
-/// " threads at 40, 88-90 ", or nothing when the file has none.
+/// " 4 threads (3 outdated), S to read ", or nothing when the file has none. Line
+/// numbers would not help: most renderers draw none, and an outdated thread's line is
+/// gone from the diff.
 fn thread_note(activity: &PrActivity, path: &str) -> String {
-    let lines: Vec<&str> = activity
+    let (total, outdated) = activity
         .threads_on(path)
-        .map(|thread| {
-            thread
-                .lines
-                .trim_start_matches("lines ")
-                .trim_start_matches("line ")
-        })
-        .collect();
-    match lines.len() {
-        0 => String::new(),
-        1 => format!(" thread at {} ", lines[0]),
-        _ => format!(" threads at {} ", lines.join(", ")),
+        .fold((0, 0), |(total, outdated), thread| {
+            (total + 1, outdated + usize::from(thread.at.is_none()))
+        });
+    let noun = if total == 1 { "thread" } else { "threads" };
+    match (total, outdated) {
+        (0, _) => String::new(),
+        (_, 0) => format!(" {total} {noun}, S to read "),
+        _ if outdated == total => format!(" {total} outdated {noun}, S to read "),
+        _ => format!(" {total} {noun} ({outdated} outdated), S to read "),
     }
 }
 
@@ -3786,8 +3786,11 @@ mod tests {
             display_width(&none),
             "the mark takes path room"
         );
-        assert_eq!(thread_note(&activity, "a.md"), " thread at 827-830 ");
-        assert_eq!(thread_note(&activity, "b.md"), " thread at 12 ");
+        assert_eq!(
+            thread_note(&activity, "a.md"),
+            " 1 outdated thread, S to read "
+        );
+        assert_eq!(thread_note(&activity, "b.md"), " 1 thread, S to read ");
         assert_eq!(thread_note(&activity, "c.md"), "");
     }
 
