@@ -875,7 +875,7 @@ fn render_overlay(
     frame: &mut Frame,
     overlay: &mut Overlay,
     area: Rect,
-    place: Vec<Piece>,
+    place: (Vec<Piece>, Vec<Piece>),
     finding: Option<&RepoFinding>,
     paint: Paint,
 ) -> Vec<ClickTarget> {
@@ -893,9 +893,12 @@ fn render_overlay(
                 path_piece(path_style, [" ", path, &format!("{at_line} ")]),
                 Piece::new(paint.span("at the PR head ", theme.heading), RANK_HINT),
             ];
-            let block = Block::new().title(fit_title(usize::from(area.width), left, place));
+            let (right, below) = place;
+            let title = TitleRows::new(usize::from(area.width), left, right, below);
+            let block = Block::new().title(title.first.clone());
             let inner = block.inner(area);
             frame.render_widget(block, area);
+            let inner = title.draw_second(frame, inner);
             let text = match lines {
                 None => Text::from(paint.span(" loading...", theme.warning)),
                 Some(Err(error)) => Text::from(paint.span(format!(" {error}"), theme.danger)),
@@ -1079,20 +1082,23 @@ fn render_diff_pane(
         Piece::new(paint.span("m switches ", theme.muted), RANK_HINT),
         Piece::new(paint.span(wrap_note(view), theme.muted), RANK_WRAP),
         path_piece(path_style, [edge, path, edge]),
-        Piece::new(
-            paint.span(selected_thread_note(view), theme.accent),
-            RANK_THREADS,
-        ),
     ];
-    let mut right = find_note(view, paint);
-    right.extend(view.hunk_place().map(|place| block_piece(&place, paint)));
+    let right = find_note(view, paint);
+    let mut below = Vec::new();
+    let threads = selected_thread_note(view);
+    if !threads.is_empty() {
+        below.push(Piece::new(paint.span(threads, theme.accent), RANK_THREADS));
+    }
+    below.extend(view.hunk_place().map(|place| block_piece(&place, paint)));
     let title_width = usize::from(area.width.saturating_sub(1));
+    let title = TitleRows::new(title_width, left, right, below);
     let block = Block::new()
         .borders(Borders::LEFT)
         .border_style(Style::new().fg(theme.muted))
-        .title(fit_title(title_width, left, right));
+        .title(title.first.clone());
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let inner = title.draw_second(frame, inner);
     view.diff_width = inner.width;
     view.diff_left = area.x;
     view.diff_height = inner.height;
@@ -1321,17 +1327,19 @@ fn render_line_mode(frame: &mut Frame, view: &mut DetailView, area: Rect, paint:
         Piece::new(paint.bold(" select lines ", theme.accent), RANK_VIEW),
         path_piece(path_style, [" ", &mode.path, " "]),
     ];
-    let right = place
+    let below = place
         .map(|place| block_piece(&place, paint))
         .into_iter()
         .collect();
     let title_width = usize::from(area.width.saturating_sub(1));
+    let title = TitleRows::new(title_width, left, Vec::new(), below);
     let block = Block::new()
         .borders(Borders::LEFT)
         .border_style(Style::new().fg(theme.accent))
-        .title(fit_title(title_width, left, right));
+        .title(title.first.clone());
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let inner = title.draw_second(frame, inner);
     let rows = match &mode.rows {
         None => {
             frame.render_widget(
@@ -1468,7 +1476,7 @@ fn keep_in_view(heights: &[usize], scroll: usize, cursor: usize, height: usize) 
 /// " /query  2 of 5 lines ", at the right of the diff pane's title, so the find text and
 /// the place among its matches stay in view. In another file it says n finds there.
 /// "/text  repo match 3 of 155", over the file a repo match opened.
-fn repo_place(view: &DetailView, paint: Paint) -> Vec<Piece> {
+fn repo_place(view: &DetailView, paint: Paint) -> (Vec<Piece>, Vec<Piece>) {
     let muted = paint.theme.muted;
     let piece = |text: String, rank| Piece::new(paint.span(text, muted), rank);
     // The name, the long and short words for what is walked, its place, and a count.
@@ -1486,7 +1494,7 @@ fn repo_place(view: &DetailView, paint: Paint) -> Vec<Piece> {
     } else {
         let (Some(query), Some(hit), Some(Ok(hits))) = (&view.find, view.repo_hit, &view.find_repo)
         else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
         let total = repo_count(view, hits.len());
         let in_diff = view
@@ -1514,8 +1522,11 @@ fn repo_place(view: &DetailView, paint: Paint) -> Vec<Piece> {
     pieces.push(piece("  n/N next/previous ".to_string(), RANK_HINT));
     // A definition's own name says nothing more; "Foo > bar" names its class.
     let block = view.file_view_place().filter(|place| *place != name.trim());
-    pieces.extend(block.map(|place| block_piece(&place, paint)));
-    pieces
+    let below = block
+        .map(|place| block_piece(&place, paint))
+        .into_iter()
+        .collect();
+    (pieces, below)
 }
 
 /// One piece of a pane's title row, with the steps it gives way by when the row is
@@ -1639,6 +1650,54 @@ fn place_piece(span: Span<'static>, short: Option<String>, shortest: Option<Stri
     forms.extend(short.map(|text| (RANK_PLACE_SHORT, text)));
     forms.extend(shortest.map(|text| (RANK_PLACE_SHORTEST, text)));
     Piece::with_forms(span, forms, RANK_FIND)
+}
+
+/// A pane's title. It takes one row when that holds every piece but the key hints,
+/// with `below` at the right end; otherwise `below` moves to a second row, under it.
+struct TitleRows {
+    first: Line<'static>,
+    second: Option<Line<'static>>,
+}
+
+impl TitleRows {
+    fn new(width: usize, left: Vec<Piece>, mut right: Vec<Piece>, below: Vec<Piece>) -> Self {
+        let needed: usize = left
+            .iter()
+            .chain(&right)
+            .chain(&below)
+            .filter(|piece| piece.steps.first().is_some_and(|step| step.0 > RANK_WRAP))
+            .map(Piece::width)
+            .sum();
+        if below.is_empty() || needed <= width {
+            right.extend(below);
+            return TitleRows {
+                first: fit_title(width, left, right),
+                second: None,
+            };
+        }
+        TitleRows {
+            first: fit_title(width, left, right),
+            second: Some(fit_title(width, below, Vec::new())),
+        }
+    }
+
+    /// Draws the second row, if there is one, at the top of `inner`, and returns the
+    /// room left under it.
+    fn draw_second(self, frame: &mut Frame, inner: Rect) -> Rect {
+        let Some(second) = self.second else {
+            return inner;
+        };
+        let row = Rect {
+            height: inner.height.min(1),
+            ..inner
+        };
+        frame.render_widget(Paragraph::new(second), row);
+        Rect {
+            y: inner.y + row.height,
+            height: inner.height - row.height,
+            ..inner
+        }
+    }
 }
 
 /// One title row `width` wide: the left pieces in order, then the right ones against
@@ -3404,6 +3463,39 @@ mod tests {
         for (width, row_text) in expected {
             assert_eq!(row(width), row_text, "at {width}");
         }
+    }
+
+    #[test]
+    fn the_block_takes_a_second_row_only_when_one_row_cannot_hold_it() {
+        let text = |line: &Line| -> String {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        };
+        let rows = |width| {
+            let left = vec![
+                Piece::new(Span::raw(" word "), RANK_VIEW),
+                Piece::new(Span::raw("m switches "), RANK_HINT),
+            ];
+            let right = vec![Piece::new(Span::raw(" /needle "), RANK_FIND)];
+            let below = vec![Piece::shrinking(
+                Style::new(),
+                ["  in ", "App > run_loop", " "],
+                " > ",
+                [RANK_BLOCK, RANK_BLOCK],
+            )];
+            let title = TitleRows::new(width, left, right, below);
+            (text(&title.first), title.second.as_ref().map(text))
+        };
+        // 6 + 9 + 20 columns hold the view, the find and the block; the hint drops.
+        assert_eq!(
+            rows(36),
+            (" word   /needle   in App > run_loop ".to_string(), None)
+        );
+        let (first, second) = rows(30);
+        assert_eq!(first, " word m switches      /needle ");
+        assert_eq!(second.as_deref(), Some("  in App > run_loop "));
     }
 
     #[test]
