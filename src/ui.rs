@@ -1432,7 +1432,7 @@ fn render_line_mode(frame: &mut Frame, view: &mut DetailView, area: Rect, paint:
         .saturating_sub(1);
     let skip = mode.scroll - starts[first_row];
     let (first, last) = mode.marked();
-    let lines: Vec<Line> = rows
+    let lines: Vec<Tagged> = rows
         .iter()
         .enumerate()
         .skip(first_row)
@@ -1448,12 +1448,12 @@ fn render_line_mode(frame: &mut Frame, view: &mut DetailView, area: Rect, paint:
                 (false, false) => Span::raw(" "),
             };
             let lines = select_row(row, mark, width, wrap, paint);
-            let lines: Vec<Line> = match (first..=last).contains(&index) {
+            let lines: Vec<Tagged> = match (first..=last).contains(&index) {
                 true => lines
                     .into_iter()
-                    .map(|line| line.style(Style::new().bg(theme.selection)))
+                    .map(|line| (line.style(Style::new().bg(theme.selection)), None))
                     .collect(),
-                false => lines,
+                false => lines.into_iter().map(|line| (line, None)).collect(),
             };
             let above = if index == 0 {
                 top_threads.clone()
@@ -1466,6 +1466,15 @@ fn render_line_mode(frame: &mut Frame, view: &mut DetailView, area: Rect, paint:
         .skip(skip)
         .take(height)
         .collect();
+    for (offset, (_, thread)) in lines.iter().enumerate() {
+        if let Some(index) = thread {
+            view.clicks.push(ClickTarget {
+                area: Rect::new(inner.x, inner.y + offset as u16, inner.width, 1),
+                click: Click::Thread(*index),
+            });
+        }
+    }
+    let lines: Vec<Line> = lines.into_iter().map(|(line, _)| line).collect();
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -1475,22 +1484,39 @@ fn line_mode_threads(
     view: &DetailView,
     width: usize,
     paint: Paint,
-) -> (Vec<Line<'static>>, Vec<Vec<Line<'static>>>) {
+) -> (Vec<Tagged>, Vec<Vec<Tagged>>) {
     let (Some(mode), Some(Ok(activity))) = (&view.line_mode, &view.activity) else {
         return (Vec::new(), Vec::new());
     };
     let Some(Ok(rows)) = &mode.rows else {
         return (Vec::new(), Vec::new());
     };
-    let under: Vec<Vec<Line<'static>>> = rows
+    let band = Style::new().bg(paint.theme.thread_band());
+    // A thread's lines, on the band, each tagged with the thread's place so a click
+    // finds it.
+    let drawn = |thread: &ThreadLine, place: Option<&str>| -> Vec<Tagged> {
+        let index = activity
+            .threads_on(&mode.path)
+            .position(|other| other.id == thread.id);
+        let open = view.thread_open(&thread.id);
+        thread_lines(thread, open, place, width, paint)
+            .into_iter()
+            .map(|mut line| {
+                // Padded to the pane's width, so the band fills the row.
+                let pad = width.saturating_sub(markdown::line_width(&line));
+                line.spans.push(Span::raw(" ".repeat(pad)));
+                (line.patch_style(band), index)
+            })
+            .collect()
+    };
+    let under: Vec<Vec<Tagged>> = rows
         .iter()
         .map(|row| {
-            let open = view.threads_open;
             let threads = view.threads_on_row(&mode.path, row);
-            let lines = threads
+            threads
                 .iter()
-                .flat_map(|thread| thread_lines(thread, open, None, width, paint));
-            lines.collect()
+                .flat_map(|thread| drawn(thread, None))
+                .collect()
         })
         .collect();
     let placed = |thread: &&ThreadLine| {
@@ -1504,19 +1530,16 @@ fn line_mode_threads(
     let mut top = Vec::new();
     if !outdated.is_empty() {
         let note = " outdated review threads, no longer on a line of this diff:";
-        top.push(Line::from(paint.span(note, paint.theme.muted)));
+        top.push((Line::from(paint.span(note, paint.theme.muted)), None));
         for thread in outdated {
-            top.extend(thread_lines(
-                thread,
-                view.threads_open,
-                Some(&thread.lines),
-                width,
-                paint,
-            ));
+            top.extend(drawn(thread, Some(&thread.lines)));
         }
     }
     (top, under)
 }
+
+/// A line in select lines, with the place of the review thread it belongs to.
+type Tagged = (Line<'static>, Option<usize>);
 
 /// A review thread under its line: folded to its first comment, or open with every
 /// comment. `place` names the line of a thread that is not drawn under one.

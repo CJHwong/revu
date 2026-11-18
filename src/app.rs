@@ -230,6 +230,8 @@ pub enum Click {
     Page {
         first: usize,
     },
+    /// A review thread in select lines, by its place among the file's threads.
+    Thread(usize),
 }
 
 /// What the main loop needs to render one diff off the UI thread.
@@ -433,6 +435,8 @@ pub struct DetailView {
     pub line_mode: Option<LineMode>,
     /// t opened every review thread in select lines.
     pub threads_open: bool,
+    /// The threads a click flipped from what t set, by ID.
+    pub flipped_threads: HashSet<String>,
     /// The select-lines cursor the scroll last brought into view. While it stays there,
     /// J, K, space and b scroll freely, so a thread taller than the pane can be read.
     pub line_followed: Option<usize>,
@@ -528,6 +532,7 @@ impl DetailView {
             hunk_firsts: HashMap::new(),
             structure_asked: HashSet::new(),
             threads_open: false,
+            flipped_threads: HashSet::new(),
             line_followed: None,
             def_walk: None,
             repo_labels: None,
@@ -653,6 +658,7 @@ impl DetailView {
         };
         let job = diff_job(&self.pr, repo, detail, key);
         self.threads_open = false;
+        self.flipped_threads.clear();
         self.line_followed = None;
         self.line_mode = Some(LineMode {
             path,
@@ -895,8 +901,29 @@ impl DetailView {
             return Err("this file has no review threads".to_string());
         }
         self.threads_open = !self.threads_open;
+        self.flipped_threads.clear();
         self.line_followed = None;
         Ok(())
+    }
+
+    /// Whether a review thread shows every comment in select lines.
+    pub fn thread_open(&self, id: &str) -> bool {
+        self.threads_open != self.flipped_threads.contains(id)
+    }
+
+    /// A click on a thread in select lines opens or closes that one thread. `index` is
+    /// its place among the file's threads.
+    fn flip_thread(&mut self, index: usize) {
+        let (Some(mode), Some(Ok(activity))) = (&self.line_mode, &self.activity) else {
+            return;
+        };
+        let Some(thread) = activity.threads_on(&mode.path).nth(index) else {
+            return;
+        };
+        let id = thread.id.clone();
+        if !self.flipped_threads.remove(&id) {
+            self.flipped_threads.insert(id);
+        }
     }
 
     /// ] and [ in select lines: the cursor goes to the next or previous line that holds a
@@ -1650,6 +1677,7 @@ impl DetailView {
                 self.cursor = (first + (row - target.area.y) as usize).min(last);
                 self.press_row();
             }
+            Click::Thread(index) => self.flip_thread(index),
             // A file view over the tab takes no row clicks.
             Click::Row(_) if !self.overlays.is_empty() => return Ok(None),
             Click::Row(index) => {
@@ -5542,6 +5570,34 @@ mod tests {
         assert_eq!(
             app.error.as_deref(),
             Some("this file has no review threads")
+        );
+    }
+
+    #[test]
+    fn a_click_flips_one_thread_and_t_resets_every_one() {
+        let (mut app, pr) = files_tab(vec![file("b.md", ViewedState::Unviewed)]);
+        app.set_activity(&pr, Ok(crate::model::tests::sample_activity()));
+        view_mut(&mut app).line_mode = Some(LineMode {
+            path: "b.md".to_string(),
+            rows: Some(Ok(crate::line_diff::parse("@@ -12,1 +12,1 @@\n z\n"))),
+            cursor: 1,
+            anchor: None,
+            scroll: 0,
+        });
+        view_mut(&mut app).clicks = vec![ClickTarget {
+            area: ratatui::layout::Rect::new(0, 9, 40, 1),
+            click: Click::Thread(0),
+        }];
+        app.handle_click(5, 9);
+        assert!(view(&app).thread_open("T2"), "the click opens it");
+        app.handle_click(5, 9);
+        assert!(!view(&app).thread_open("T2"), "a second click closes it");
+        app.handle_click(5, 9);
+        app.handle_key(key(KeyCode::Char('t')));
+        assert!(view(&app).thread_open("T2"), "t opens every thread");
+        assert!(
+            view(&app).flipped_threads.is_empty(),
+            "and forgets the clicks"
         );
     }
 

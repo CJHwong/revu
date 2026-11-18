@@ -369,6 +369,21 @@ pub enum PrState {
 pub const ON_STATE: Color = Color::Rgb(0xff, 0xff, 0xff);
 
 impl Theme {
+    /// A band behind review threads in select lines: the background a little toward the
+    /// text, so a thread stands apart from the code without a loud color. A theme with the
+    /// terminal's own background uses the selection color instead.
+    pub fn thread_band(&self) -> Color {
+        match (self.background, self.foreground) {
+            (Color::Rgb(r, g, b), Color::Rgb(fr, fg, fb)) => {
+                let mix = |back: u8, front: u8| {
+                    ((u16::from(back) * 93 + u16::from(front) * 7) / 100) as u8
+                };
+                Color::Rgb(mix(r, fr), mix(g, fg), mix(b, fb))
+            }
+            _ => self.selection,
+        }
+    }
+
     /// GitHub's color for a state (Primer's emphasis colors), the same under every theme
     /// so a state reads as it does on GitHub. Light themes get GitHub's light-mode shade,
     /// the rest its dark-mode one.
