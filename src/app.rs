@@ -1026,7 +1026,7 @@ impl DetailView {
         if query.trim().is_empty() {
             return Err("type some text to find".to_string());
         }
-        self.find = Some(query.to_lowercase());
+        self.find = Some(query.to_string());
         self.find_hit = None;
         self.find_files = None;
         self.find_repo = None;
@@ -1047,7 +1047,7 @@ impl DetailView {
             dir,
             base,
             head,
-            query: query.to_lowercase(),
+            query: query.to_string(),
         }))
     }
 
@@ -6226,14 +6226,19 @@ mod tests {
         app.handle_key(key(KeyCode::Char('/')));
         type_text(&mut app, "Needle");
         app.handle_key(key(KeyCode::Enter));
-        app.set_find_files(&pr, "needle", Ok(vec![("a.md".to_string(), 1)]));
+        assert_eq!(
+            view(&app).find.as_deref(),
+            Some("Needle"),
+            "the find keeps its case"
+        );
+        app.set_find_files(&pr, "Needle", Ok(vec![("a.md".to_string(), 1)]));
         let hit = |path: &str, line| GrepHit {
             path: path.to_string(),
             line,
             text: "needle".to_string(),
         };
         let found = vec![hit("a.md", 1), hit("x.py", 3), hit("y.py", 40)];
-        app.set_find_repo(&pr, "needle", Ok(found));
+        app.set_find_repo(&pr, "Needle", Ok(found));
         let repo = view(&app).find_repo.clone().unwrap().unwrap();
         assert_eq!(
             repo.len(),
