@@ -50,6 +50,8 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 
 ## Files changed
 
+A file with review threads shows their count, such as `●3`, and the diff pane's title lists their lines.
+
 | Key | Action |
 |---|---|
 | `Enter` | Show the whole file with its changes marked, drawn by the current renderer, with syntax colors. On a folder, fold or open it. |

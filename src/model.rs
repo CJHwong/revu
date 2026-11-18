@@ -701,6 +701,14 @@ pub fn parse_hunks(pull_request: &Value) -> Result<HashMap<String, Vec<HunkLine>
 }
 
 impl PrActivity {
+    /// The review threads on one file, in timeline order.
+    pub fn threads_on<'a>(&'a self, path: &'a str) -> impl Iterator<Item = &'a ThreadLine> {
+        self.timeline
+            .iter()
+            .flat_map(|comment| &comment.threads)
+            .filter(move |thread| thread.path == path)
+    }
+
     /// Puts the hunks from `parse_hunks` under their threads.
     pub fn set_code(&mut self, hunks: &HashMap<String, Vec<HunkLine>>) {
         let threads = self

@@ -975,7 +975,12 @@ fn render_file_list(frame: &mut Frame, view: &mut DetailView, area: Rect, paint:
         .iter()
         .enumerate()
         .map(|(index, row)| {
-            let item = ListItem::new(file_row_line(row, files, view.tree_view, width, paint));
+            let activity = view
+                .activity
+                .as_ref()
+                .and_then(|result| result.as_ref().ok());
+            let line = file_row_line(row, files, activity, view.tree_view, width, paint);
+            let item = ListItem::new(line);
             // Styled here, not by the list, so it shows while the wheel scrolls the list
             // away from the selection.
             match Some(index) == selected {
@@ -1075,7 +1080,8 @@ fn render_diff_pane(
         .title(paint.span("m switches ", theme.muted))
         .title(paint.span(wrap_note(view), theme.muted))
         .title(find_note(view, paint))
-        .title(paint.bold(diff_pane_path(view), theme.foreground));
+        .title(paint.bold(diff_pane_path(view), theme.foreground))
+        .title(paint.span(selected_thread_note(view), theme.accent));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     view.diff_width = inner.width;
@@ -1458,6 +1464,37 @@ fn wrap_note(view: &DetailView) -> String {
 
 /// "✓ src/app/ main.rs  +3 -1", with the directory muted so the file name stands out.
 /// With the file list hidden, the diff pane names the file it shows.
+/// The selected file's review threads for the diff pane's title, on Files changed.
+fn selected_thread_note(view: &DetailView) -> String {
+    let (Some(Ok(activity)), Some(files), Some(index)) =
+        (&view.activity, view.loaded_files(), view.selected_file())
+    else {
+        return String::new();
+    };
+    match files.get(index) {
+        Some(file) if view.tab == Tab::Files => thread_note(activity, &file.path),
+        _ => String::new(),
+    }
+}
+
+/// " threads at 40, 88-90 ", or nothing when the file has none.
+fn thread_note(activity: &PrActivity, path: &str) -> String {
+    let lines: Vec<&str> = activity
+        .threads_on(path)
+        .map(|thread| {
+            thread
+                .lines
+                .trim_start_matches("lines ")
+                .trim_start_matches("line ")
+        })
+        .collect();
+    match lines.len() {
+        0 => String::new(),
+        1 => format!(" thread at {} ", lines[0]),
+        _ => format!(" threads at {} ", lines.join(", ")),
+    }
+}
+
 fn diff_pane_path(view: &DetailView) -> String {
     let path = view
         .loaded_files()
@@ -1504,6 +1541,7 @@ fn file_name(path: &str) -> &str {
 fn file_row_line(
     row: &FileRow,
     files: &[ChangedFile],
+    activity: Option<&PrActivity>,
     tree: bool,
     width: usize,
     paint: Paint,
@@ -1527,9 +1565,12 @@ fn file_row_line(
         }
         FileRow::File { index, depth } => {
             let indent = "  ".repeat(*depth);
+            let file = &files[*index];
+            let threads = activity.map_or(0, |activity| activity.threads_on(&file.path).count());
             let mut line = file_line(
-                &files[*index],
+                file,
                 tree,
+                threads,
                 width.saturating_sub(indent.len()),
                 paint,
             );
@@ -1539,7 +1580,14 @@ fn file_row_line(
     }
 }
 
-fn file_line(file: &ChangedFile, tree: bool, width: usize, paint: Paint) -> Line<'static> {
+/// `threads` is the number of review threads on the file, shown as ●N before the counts.
+fn file_line(
+    file: &ChangedFile,
+    tree: bool,
+    threads: usize,
+    width: usize,
+    paint: Paint,
+) -> Line<'static> {
     let theme = paint.theme;
     let (marker, marker_color) = match file.viewed {
         ViewedState::Viewed => ("✓", theme.success),
@@ -1552,8 +1600,12 @@ fn file_line(file: &ChangedFile, tree: bool, width: usize, paint: Paint) -> Line
         Some((directory, name)) => (format!("{directory}/"), name.to_string()),
         None => (String::new(), file.path.clone()),
     };
+    let mark = match threads {
+        0 => String::new(),
+        count => format!(" ●{count}"),
+    };
     let counts = format!(" +{} -{}", file.additions, file.deletions);
-    let path_width = width.saturating_sub(display_width(&counts) + 4);
+    let path_width = width.saturating_sub(display_width(&counts) + display_width(&mark) + 4);
     let name_width = display_width(&name).min(path_width);
     let directory = truncate_to_width(&directory, path_width - name_width);
     let padding = path_width.saturating_sub(display_width(&directory) + name_width);
@@ -1562,6 +1614,7 @@ fn file_line(file: &ChangedFile, tree: bool, width: usize, paint: Paint) -> Line
         paint.span(directory, theme.muted),
         paint.bold(truncate_to_width(&name, name_width), theme.foreground),
         Span::from(" ".repeat(padding)),
+        paint.span(mark, theme.accent),
         paint.span(format!(" +{}", file.additions), theme.success),
         paint.span(format!(" -{}", file.deletions), theme.danger),
     ])
@@ -2577,6 +2630,35 @@ mod tests {
                 .collect()
         };
         lines.iter().map(text).collect()
+    }
+
+    #[test]
+    fn a_file_with_review_threads_shows_their_count_and_lines() {
+        let theme = theme::by_name("dracula").unwrap();
+        let paint = Paint {
+            theme: &theme,
+            now: Utc::now(),
+        };
+        let activity = crate::model::tests::sample_activity();
+        let file = ChangedFile {
+            path: "a.md".to_string(),
+            additions: 1,
+            deletions: 2,
+            change: "modified".to_string(),
+            viewed: ViewedState::Unviewed,
+        };
+        let row = texts(&[file_line(&file, false, 2, 40, paint)]).remove(0);
+        assert!(row.contains("●2 +1 -2"), "{row:?}");
+        let none = texts(&[file_line(&file, false, 0, 40, paint)]).remove(0);
+        assert!(!none.contains('●'), "{none:?}");
+        assert_eq!(
+            display_width(&row),
+            display_width(&none),
+            "the mark takes path room"
+        );
+        assert_eq!(thread_note(&activity, "a.md"), " thread at 827-830 ");
+        assert_eq!(thread_note(&activity, "b.md"), " thread at 12 ");
+        assert_eq!(thread_note(&activity, "c.md"), "");
     }
 
     #[test]
