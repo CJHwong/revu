@@ -291,9 +291,33 @@ pub fn definitions(
     paths.sort_by_key(|path| !changed.contains(path));
     let capped = paths.len() > MAX_DEFINITION_FILES;
     paths.truncate(MAX_DEFINITION_FILES);
+    let files = read_files(dir, commit, &paths)?;
+    // Parsing is most of the time, and each file parses on its own, so the files are
+    // split across the cores. The chunks keep their order.
+    let cores = std::thread::available_parallelism().map_or(1, usize::from);
+    let chunk = files.len().div_ceil(cores).max(1);
+    let hits = std::thread::scope(|scope| {
+        let workers: Vec<_> = files
+            .chunks(chunk)
+            .map(|files| scope.spawn(move || definitions_in(files, name)))
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| {
+                worker
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("parsing the files for {name} failed"))
+            })
+            .collect::<Result<Vec<_>>>()
+    })?;
+    Ok((hits.into_iter().flatten().collect(), capped))
+}
+
+/// The lines in `files` that define `name`, each file parsed by tree-sitter.
+fn definitions_in(files: &[(String, String)], name: &str) -> Vec<GrepHit> {
     let mut hits = Vec::new();
-    for (path, text) in read_files(dir, commit, &paths)? {
-        let Some(outline) = crate::syntax::outline(&path, text.as_bytes()) else {
+    for (path, text) in files {
+        let Some(outline) = crate::syntax::outline(path, text.as_bytes()) else {
             continue;
         };
         let lines: Vec<&str> = text.lines().collect();
@@ -306,7 +330,7 @@ pub fn definitions(
             });
         }
     }
-    Ok((hits, capped))
+    hits
 }
 
 /// Many files at a commit in one `git cat-file --batch`, rather than a git per file.

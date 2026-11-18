@@ -507,6 +507,7 @@ fn perform(
         } => {
             let sender = session.sender.clone();
             let bat_theme = session.config.theme.bat_theme;
+            let parse = !app.knows_outline(&pr, &commit, &path);
             thread::spawn(move || {
                 let result = repo::highlight_file(&dir, &commit, &path, line, bat_theme)
                     .map_err(|error| format!("{error:#}"))
@@ -517,6 +518,9 @@ fn perform(
                     result,
                 });
                 // The title names the block around the line once the file is parsed.
+                if !parse {
+                    return;
+                }
                 let outline = repo::show_file(&dir, &commit, &path)
                     .ok()
                     .and_then(|text| syntax::outline(&path, text.as_bytes()));
@@ -583,6 +587,10 @@ fn perform(
         }),
         Action::LineDiff(job) => {
             let sender = session.sender.clone();
+            let old = job.paths.first().cloned().unwrap_or_default();
+            let new = job.paths.last().cloned().unwrap_or_default();
+            let parse_head = !app.knows_outline(&job.pr, &job.head, &new);
+            let parse_base = !app.knows_outline(&job.pr, &job.base, &old);
             thread::spawn(move || {
                 let path = job.paths.last().cloned().unwrap_or_default();
                 let result = repo::file_diff(&job.dir, &job.base, &job.head, &job.paths)
@@ -594,9 +602,13 @@ fn perform(
                 });
                 // The head's version for added and kept lines, the base's (by its old
                 // name, for a rename) for removed ones.
-                let old = job.paths.first().cloned().unwrap_or_default();
-                send_outline(&sender, &job, &job.head, &path);
-                send_outline(&sender, &job, &job.base, &old);
+                // A file already parsed keeps its outline.
+                if parse_head {
+                    send_outline(&sender, &job, &job.head, &path);
+                }
+                if parse_base {
+                    send_outline(&sender, &job, &job.base, &old);
+                }
             });
         }
         Action::FetchLabels { pr } => {

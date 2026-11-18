@@ -3567,6 +3567,17 @@ impl App {
 
     /// Whether this diff job's file still needs its structure read; asking marks it.
     /// Commits and whole-commit diffs have none.
+    /// Whether a file at a commit is parsed already, so a worker need not parse it again.
+    pub fn knows_outline(&self, pr: &PrRef, commit: &str, path: &str) -> bool {
+        let Screen::Detail(view) = &self.screen else {
+            return false;
+        };
+        view.pr == *pr
+            && view
+                .outlines
+                .contains_key(&(commit.to_string(), path.to_string()))
+    }
+
     pub fn wants_structure(&mut self, job: &DiffJob) -> bool {
         let Some(view) = self.view_for(&job.pr) else {
             return false;
@@ -5614,6 +5625,21 @@ mod tests {
         let mode = view(&app).line_mode.as_ref().unwrap();
         assert_eq!((mode.cursor, mode.scroll), (0, 0), "the top shows them");
         assert_eq!(view(&app).line_followed, Some(0), "and stays there");
+    }
+
+    #[test]
+    fn a_parsed_file_is_known_so_it_is_not_parsed_again() {
+        let (mut app, pr) = files_tab(vec![file("b.py", ViewedState::Unviewed)]);
+        assert!(!app.knows_outline(&pr, "c1", "b.py"));
+        app.set_outline(&pr, "c1".to_string(), "b.py".to_string(), None);
+        assert!(
+            app.knows_outline(&pr, "c1", "b.py"),
+            "a file with no outline counts too"
+        );
+        assert!(
+            !app.knows_outline(&pr, "c2", "b.py"),
+            "another commit is another file"
+        );
     }
 
     #[test]
