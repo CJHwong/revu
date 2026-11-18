@@ -36,6 +36,40 @@ impl DiffRow {
     }
 }
 
+/// Where a hunk's first change is: an added line in the new file, or, for a hunk that
+/// only removes, a removed line in the old one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineAt {
+    New(u64),
+    Old(u64),
+}
+
+/// Each hunk's first changed line, in order. Its first context line can sit in the
+/// block before the change, so the change itself names the block.
+pub fn first_changes(rows: &[DiffRow]) -> Vec<LineAt> {
+    let mut firsts = Vec::new();
+    let mut hunk: Vec<&DiffRow> = Vec::new();
+    let mut flush = |hunk: &mut Vec<&DiffRow>| {
+        let added = hunk.iter().find(|row| row.kind == RowKind::Added);
+        let removed = hunk.iter().find(|row| row.kind == RowKind::Removed);
+        let first = added
+            .and_then(|row| row.new.map(LineAt::New))
+            .or_else(|| removed.and_then(|row| row.old.map(LineAt::Old)));
+        if let Some(first) = first {
+            firsts.push(first);
+        }
+        hunk.clear();
+    };
+    for row in rows {
+        if row.kind == RowKind::Hunk && !hunk.is_empty() {
+            flush(&mut hunk);
+        }
+        hunk.push(row);
+    }
+    flush(&mut hunk);
+    firsts
+}
+
 /// The rows of every hunk in a plain `git diff`; the file headers above the first hunk
 /// are left out.
 pub fn parse(diff: &str) -> Vec<DiffRow> {
@@ -140,6 +174,17 @@ fn backtick_run(line: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_hunk_is_found_by_its_first_change_not_its_context() {
+        let diff = "@@ -1,4 +1,4 @@\n a\n b\n-c\n+C\n@@ -20,3 +20,2 @@\n x\n-y\n z\n";
+        assert_eq!(
+            first_changes(&parse(diff)),
+            [LineAt::New(3), LineAt::Old(21)],
+            "an added line in the new file; a hunk that only removes, in the old"
+        );
+        assert!(first_changes(&[]).is_empty());
+    }
 
     const DIFF: &str = "diff --git a/a.rs b/a.rs\n\
 index 1..2 100644\n\

@@ -1064,7 +1064,18 @@ fn render_diff_pane(
         .title(paint.span(wrap_note(view), theme.muted))
         .title(find_note(view, paint))
         .title(paint.bold(diff_pane_path(view), theme.foreground))
-        .title(paint.span(selected_thread_note(view), theme.accent));
+        .title(paint.span(selected_thread_note(view), theme.accent))
+        .title(
+            Line::from(
+                paint.span(
+                    view.hunk_place()
+                        .map(|place| format!(" in {place} "))
+                        .unwrap_or_default(),
+                    theme.heading,
+                ),
+            )
+            .right_aligned(),
+        );
     let inner = block.inner(area);
     frame.render_widget(block, area);
     view.diff_width = inner.width;

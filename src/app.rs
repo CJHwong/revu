@@ -408,6 +408,10 @@ pub struct DetailView {
     /// Each parsed file's definitions, by commit and path; None for a language revu
     /// does not parse.
     pub outlines: HashMap<(String, String), Option<crate::syntax::Outline>>,
+    /// Each changed file's hunks by their first changed line, once git returns them.
+    pub hunk_firsts: HashMap<String, Vec<crate::line_diff::LineAt>>,
+    /// The files whose structure was asked for, so each is read once.
+    structure_asked: HashSet<String>,
     /// The repo's labels, loaded the first time the label menu opens on this PR.
     pub repo_labels: Option<Vec<RepoLabel>>,
     /// n or N moved to another file; the find runs there once its diff is drawn. True
@@ -488,6 +492,8 @@ impl DetailView {
             find_words_requested: false,
             line_mode: None,
             outlines: HashMap::new(),
+            hunk_firsts: HashMap::new(),
+            structure_asked: HashSet::new(),
             repo_labels: None,
         }
     }
@@ -698,6 +704,33 @@ impl DetailView {
             (Some(line), _) => (&detail.head_oid, mode.path.clone(), line),
             (None, Some(line)) => (&detail.base_oid, self.base_path(&mode.path), line),
             (None, None) => return None,
+        };
+        let outline = self.outlines.get(&(commit.clone(), path))?.as_ref()?;
+        outline.place(usize::try_from(line).ok()?)
+    }
+
+    /// The block the diff pane's top hunk changes, "BaseApp > on_mount". Only when the
+    /// drawn hunks match git's one for one; difftastic and whole files show none.
+    pub fn hunk_place(&self) -> Option<String> {
+        if self.tab != Tab::Files {
+            return None;
+        }
+        let key = self.current_diff_key()?;
+        let DiffTarget::File(path) = &key.target else {
+            return None;
+        };
+        let firsts = self.hunk_firsts.get(path)?;
+        let starts = self.hunk_starts();
+        if starts.len() != firsts.len() {
+            return None;
+        }
+        let top = usize::from(self.diff_scroll);
+        let shown = starts.iter().filter(|start| **start <= top).count();
+        let first = firsts.get(shown.saturating_sub(1))?;
+        let detail = self.loaded()?;
+        let (commit, path, line) = match *first {
+            crate::line_diff::LineAt::New(line) => (&detail.head_oid, path.clone(), line),
+            crate::line_diff::LineAt::Old(line) => (&detail.base_oid, self.base_path(path), line),
         };
         let outline = self.outlines.get(&(commit.clone(), path))?.as_ref()?;
         outline.place(usize::try_from(line).ok()?)
@@ -3170,6 +3203,29 @@ impl App {
         }
     }
 
+    /// Whether this diff job's file still needs its structure read; asking marks it.
+    /// Commits and whole-commit diffs have none.
+    pub fn wants_structure(&mut self, job: &DiffJob) -> bool {
+        let Some(view) = self.view_for(&job.pr) else {
+            return false;
+        };
+        let DiffTarget::File(path) = &job.key.target else {
+            return false;
+        };
+        view.tab == Tab::Files && view.structure_asked.insert(path.clone())
+    }
+
+    pub fn set_hunk_firsts(
+        &mut self,
+        pr: &PrRef,
+        path: String,
+        firsts: Vec<crate::line_diff::LineAt>,
+    ) {
+        if let Some(view) = self.view_for(pr) {
+            view.hunk_firsts.insert(path, firsts);
+        }
+    }
+
     pub fn set_line_rows(&mut self, pr: &PrRef, path: &str, result: Result<String, String>) {
         let Some(view) = self.view_for(pr) else {
             return;
@@ -4815,6 +4871,39 @@ mod tests {
         );
         app.set_loaded_activity(&pr, second, Ok(activity));
         assert!(matches!(view(&app).activity, Some(Ok(_))));
+    }
+
+    #[test]
+    fn the_diff_pane_names_the_block_of_the_hunk_at_its_top() {
+        let (mut app, pr) = files_tab(vec![file("app.py", ViewedState::Unviewed)]);
+        ready_repo(&mut app, &pr);
+        let job = app.take_diff_request().unwrap();
+        assert!(app.wants_structure(&job), "asked once");
+        assert!(!app.wants_structure(&job), "not again");
+        let drawn = "@@ -1,3 +1,3 @@\n a\n b\n@@ -10,3 +10,3 @@\n c\n d\n";
+        app.set_diff(
+            &pr,
+            job.key,
+            crate::highlight::to_text(drawn.as_bytes(), None),
+        );
+        let head = "class A:\n    def one(self):\n        x = 1\n\n\n\n\n\nclass B:\n    def two(self):\n        y = 2\n";
+        let outline = crate::syntax::outline("app.py", head.as_bytes());
+        app.set_outline(&pr, "head999".to_string(), "app.py".to_string(), outline);
+        let firsts = vec![
+            crate::line_diff::LineAt::New(3),
+            crate::line_diff::LineAt::New(11),
+        ];
+        app.set_hunk_firsts(&pr, "app.py".to_string(), firsts);
+        assert_eq!(view(&app).hunk_place().as_deref(), Some("A > one"));
+        view_mut(&mut app).diff_scroll = 3;
+        assert_eq!(view(&app).hunk_place().as_deref(), Some("B > two"));
+        // A renderer whose hunks do not line up with git's names nothing.
+        app.set_hunk_firsts(
+            &pr,
+            "app.py".to_string(),
+            vec![crate::line_diff::LineAt::New(3)],
+        );
+        assert_eq!(view(&app).hunk_place(), None);
     }
 
     #[test]

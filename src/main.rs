@@ -55,6 +55,12 @@ enum Message {
         path: String,
         result: Result<String, String>,
     },
+    /// The first changed line of each hunk in a file's plain diff.
+    HunkFirsts {
+        pr: PrRef,
+        path: String,
+        firsts: Vec<line_diff::LineAt>,
+    },
     /// A file's definitions at a commit; None for a language revu does not parse.
     Outline {
         pr: PrRef,
@@ -364,6 +370,7 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
                 path,
                 outline,
             } => app.set_outline(&pr, commit, path, outline),
+            Message::HunkFirsts { pr, path, firsts } => app.set_hunk_firsts(&pr, path, firsts),
             Message::Labels { pr, result } => app.set_repo_labels(&pr, result),
             Message::FilesProgress { pr, loaded, total } => {
                 app.set_files_progress(&pr, loaded, total)
@@ -645,6 +652,9 @@ fn dispatch_requests(app: &mut App, session: &mut Session) {
         prepare_repo(app, session, job);
     }
     if let Some(job) = app.take_diff_request() {
+        if app.wants_structure(&job) {
+            start_structure(session, &job);
+        }
         start_diff(session, job);
     }
 }
@@ -889,6 +899,27 @@ fn start_diff(session: &Session, job: DiffJob) {
             key: job.key,
             result,
         });
+    });
+}
+
+/// Reads a changed file's structure once: the first changed line of each hunk, and the
+/// file's definitions at base and head, so the diff pane can name the block it shows.
+fn start_structure(session: &Session, job: &DiffJob) {
+    let sender = session.sender.clone();
+    let job = job.clone();
+    thread::spawn(move || {
+        let path = job.paths.last().cloned().unwrap_or_default();
+        let old = job.paths.first().cloned().unwrap_or_default();
+        let firsts = repo::file_diff(&job.dir, &job.base, &job.head, &job.paths)
+            .map(|diff| line_diff::first_changes(&line_diff::parse(&diff)))
+            .unwrap_or_default();
+        let _ = sender.send(Message::HunkFirsts {
+            pr: job.pr.clone(),
+            path: path.clone(),
+            firsts,
+        });
+        send_outline(&sender, &job, &job.head, &path);
+        send_outline(&sender, &job, &job.base, &old);
     });
 }
 
