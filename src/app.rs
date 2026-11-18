@@ -613,6 +613,26 @@ impl DetailView {
             .collect()
     }
 
+    /// Whether the drawn hunks are difftastic's, read from the first hunk's header.
+    fn drawn_by_difftastic(&self, starts: &[usize]) -> bool {
+        let Some(DiffOutput::Done(Ok(text))) =
+            self.current_diff_key().and_then(|key| self.diffs.get(&key))
+        else {
+            return false;
+        };
+        starts
+            .first()
+            .and_then(|start| text.lines.get(*start))
+            .is_some_and(|line| {
+                let plain: String = line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect();
+                is_difftastic_hunk(plain.trim_end())
+            })
+    }
+
     /// The clone folder and the PR's head commit, once the clone is ready.
     /// S on Files changed: select lines in the selected file.
     fn start_line_mode(&mut self) -> Result<Action, String> {
@@ -750,7 +770,7 @@ impl DetailView {
         };
         let firsts = self.hunk_firsts.get(path)?;
         let starts = self.hunk_starts();
-        if starts.len() != firsts.len() {
+        if starts.len() != firsts.len() || self.drawn_by_difftastic(&starts) {
             return None;
         }
         let top = usize::from(self.diff_scroll);
@@ -3943,11 +3963,16 @@ fn is_hunk_start(line: &str) -> bool {
     let line = line.trim_end();
     let delta_box =
         line.ends_with('┐') && line.trim_end_matches('┐').chars().all(|char| char == '─');
-    let difftastic = line.split(" --- ").nth(1).is_some_and(|part| {
+    line.starts_with("@@") || delta_box || is_difftastic_hunk(line)
+}
+
+/// difftastic's "a.md --- 2/5 --- Text". It groups changes its own way, so its hunks
+/// need not be git's even when there are as many.
+fn is_difftastic_hunk(line: &str) -> bool {
+    line.split(" --- ").nth(1).is_some_and(|part| {
         part.split_once('/')
             .is_some_and(|(at, of)| at.parse::<u32>().is_ok() && of.parse::<u32>().is_ok())
-    });
-    line.starts_with("@@") || delta_box || difftastic
+    })
 }
 
 #[cfg(test)]
@@ -5084,6 +5109,16 @@ mod tests {
             vec![crate::line_diff::LineAt::New(3)],
         );
         assert_eq!(view(&app).hunk_place(), None);
+        // Nor does difftastic, even with as many hunks as git.
+        let firsts = vec![
+            crate::line_diff::LineAt::New(3),
+            crate::line_diff::LineAt::New(11),
+        ];
+        app.set_hunk_firsts(&pr, "app.py".to_string(), firsts);
+        let key = view(&app).current_diff_key().unwrap();
+        let drawn = "app.py --- 1/2 --- Python\n a\napp.py --- 2/2 --- Python\n b\n";
+        app.set_diff(&pr, key, crate::highlight::to_text(drawn.as_bytes(), None));
+        assert_eq!(view(&app).hunk_place(), None, "difftastic");
     }
 
     #[test]
@@ -5096,10 +5131,16 @@ mod tests {
             view(&app).files.is_some(),
             "the same commits keep the files"
         );
+        let firsts = vec![crate::line_diff::LineAt::New(1)];
+        app.set_hunk_firsts(&pr, "a.md".to_string(), firsts);
         let mut pushed = same;
         pushed.head_oid = "pushed".to_string();
         app.set_detail(&pr, Ok(pushed));
         assert!(view(&app).files.is_none(), "the file list loads again");
+        assert!(
+            view(&app).hunk_firsts.is_empty(),
+            "the hunks are read again"
+        );
         assert!(matches!(view(&app).repo, RepoState::Unknown));
         assert_eq!(view(&app).tab, Tab::Files);
         assert!(

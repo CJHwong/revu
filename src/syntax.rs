@@ -246,7 +246,7 @@ pub fn outline(path: &str, code: &[u8]) -> Option<Outline> {
             defs.push(Def {
                 kind,
                 name: name.to_string(),
-                first: block.start_position().row + 1,
+                first: decorated_start(block) + 1,
                 last: block.end_position().row + 1,
             });
         }
@@ -255,6 +255,24 @@ pub fn outline(path: &str, code: &[u8]) -> Option<Outline> {
     // A method also matches the plain function pattern; keep one per block.
     defs.dedup_by(|later, earlier| later.first == earlier.first && later.name == earlier.name);
     Some(defs).map(|defs| Outline { defs })
+}
+
+/// The row a block's decorators or attributes start on: Python wraps a decorated
+/// function in a parent node, while Rust's `#[test]` and TypeScript's decorators come
+/// just before it. A change to `@property` is a change to the method under it.
+fn decorated_start(block: Node) -> usize {
+    if let Some(parent) = block.parent()
+        && parent.kind() == "decorated_definition"
+    {
+        return parent.start_position().row;
+    }
+    let mut first = block;
+    while let Some(before) = first.prev_named_sibling()
+        && matches!(before.kind(), "attribute_item" | "decorator")
+    {
+        first = before;
+    }
+    first.start_position().row
 }
 
 /// The names a line uses or defines, for picking one to look up: calls and other
@@ -318,6 +336,19 @@ fn collect_identifiers(node: Node, row: usize, code: &[u8], names: &mut Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_block_starts_at_its_decorators_and_attributes() {
+        let python = "class A:\n    x = 1\n\n    @property\n    def d(self):\n        return 1\n";
+        let python = outline("a.py", python.as_bytes()).unwrap();
+        assert_eq!(python.place(4).as_deref(), Some("A > d"), "@property");
+        assert_eq!(python.place(2).as_deref(), Some("A"));
+        let rust =
+            "mod tests {\n    use super::*;\n\n    #[cfg(unix)]\n    #[test]\n    fn t() {}\n}\n";
+        let rust = outline("a.rs", rust.as_bytes()).unwrap();
+        assert_eq!(rust.place(4).as_deref(), Some("tests > t"), "#[cfg(unix)]");
+        assert_eq!(rust.place(2).as_deref(), Some("tests"));
+    }
 
     #[test]
     fn every_tags_query_compiles_against_its_grammar() {
