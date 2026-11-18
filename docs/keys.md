@@ -55,7 +55,7 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 | `Enter` | Show the whole file with its changes marked, drawn by the current renderer, with syntax colors. On a folder, fold or open it. |
 | `t` | Switch the list between a folder tree and flat paths |
 | `z` | Hide or show the list, so the diff gets the full width |
-| `v` | Toggle Viewed. It syncs to GitHub's Viewed checkbox at once. |
+| `v` | Toggle Viewed. It syncs to GitHub's Viewed checkbox at once. On a folder, it marks every file under it viewed, or unmarks them all when every one is viewed already. |
 | `V` | Hide viewed files |
 | `]` / `[` | Next or previous unviewed file |
 | `c` | Comment mode on the selected file: its plain diff with line numbers. `j`/`k` move, `V` marks a range (on one side only, as GitHub requires), `Enter` writes a comment, `esc` goes back. The comment joins your pending review on GitHub, which only you see until `R` submits it; a dot marks lines it already covers. |

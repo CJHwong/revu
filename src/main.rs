@@ -88,7 +88,7 @@ enum Message {
     },
     Viewed {
         pr: PrRef,
-        path: String,
+        paths: Vec<String>,
         viewed: bool,
         result: Result<(), String>,
     },
@@ -326,10 +326,10 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
             }
             Message::Viewed {
                 pr,
-                path,
+                paths,
                 viewed,
                 result,
-            } => app.set_viewed_result(&pr, &path, viewed, result),
+            } => app.set_viewed_result(&pr, &paths, viewed, result),
             Message::Repo { pr, result } => app.set_repo(&pr, result),
             Message::Diff { pr, key, result } => app.set_diff(&pr, key, result),
             Message::Grep { pr, query, result } => app.set_grep(&pr, &query, result),
@@ -506,9 +506,9 @@ fn perform(
         Action::SetViewed {
             pr,
             pull_request_id,
-            path,
+            paths,
             viewed,
-        } => start_viewed_sync(session, pr, pull_request_id, path, viewed),
+        } => start_viewed_sync(session, pr, pull_request_id, paths, viewed),
     }
     Ok(true)
 }
@@ -943,16 +943,16 @@ fn start_viewed_sync(
     session: &Session,
     pr: PrRef,
     pull_request_id: String,
-    path: String,
+    paths: Vec<String>,
     viewed: bool,
 ) {
     let sender = session.sender.clone();
     thread::spawn(move || {
-        let result = github::set_viewed(&pull_request_id, &path, viewed)
+        let result = github::set_viewed(&pull_request_id, &paths, viewed)
             .map_err(|error| format!("{error:#}"));
         let _ = sender.send(Message::Viewed {
             pr,
-            path,
+            paths,
             viewed,
             result,
         });

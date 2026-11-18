@@ -110,10 +110,11 @@ pub enum Action {
         pr: PrRef,
         dir: PathBuf,
     },
+    /// One file, or every file under a folder, in one request.
     SetViewed {
         pr: PrRef,
         pull_request_id: String,
-        path: String,
+        paths: Vec<String>,
         viewed: bool,
     },
 }
@@ -964,9 +965,47 @@ impl DetailView {
 
     /// Flips the selected file's Viewed state at once; the caller syncs it to GitHub.
     /// Marking a file viewed moves on to the next file, as GitHub's web view does.
+    /// v on a file flips it; on a folder, marks every file under it viewed, or unmarks
+    /// them all when every one is viewed already.
     fn toggle_viewed(&mut self) -> Option<Action> {
+        let row = self.file_rows().get(self.file_state.selected()?)?.clone();
+        match row {
+            FileRow::File { index, .. } => self.toggle_file_viewed(index),
+            FileRow::Dir { path, .. } => self.toggle_folder_viewed(&path),
+        }
+    }
+
+    fn toggle_folder_viewed(&mut self, folder: &str) -> Option<Action> {
         let pull_request_id = self.loaded()?.id.clone();
-        let index = self.selected_file()?;
+        let prefix = format!("{folder}/");
+        let files = self.files.as_mut()?.as_mut().ok()?;
+        let mut under: Vec<_> = files
+            .iter_mut()
+            .filter(|file| file.path.starts_with(&prefix))
+            .collect();
+        let viewed = under.iter().any(|file| file.viewed != ViewedState::Viewed);
+        let target = if viewed {
+            ViewedState::Viewed
+        } else {
+            ViewedState::Unviewed
+        };
+        let mut paths = Vec::new();
+        for file in under.iter_mut().filter(|file| file.viewed != target) {
+            file.viewed = target;
+            paths.push(file.path.clone());
+        }
+        // A folder that hides its viewed files may vanish; the cursor stays in the list.
+        self.clamp_file_selection();
+        (!paths.is_empty()).then(|| Action::SetViewed {
+            pr: self.pr.clone(),
+            pull_request_id,
+            paths,
+            viewed,
+        })
+    }
+
+    fn toggle_file_viewed(&mut self, index: usize) -> Option<Action> {
+        let pull_request_id = self.loaded()?.id.clone();
         let file = self.files.as_mut()?.as_mut().ok()?.get_mut(index)?;
         let viewed = file.viewed != ViewedState::Viewed;
         file.viewed = if viewed {
@@ -982,7 +1021,7 @@ impl DetailView {
         Some(Action::SetViewed {
             pr: self.pr.clone(),
             pull_request_id,
-            path,
+            paths: vec![path],
             viewed,
         })
     }
@@ -2117,25 +2156,31 @@ impl App {
     pub fn set_viewed_result(
         &mut self,
         pr: &PrRef,
-        path: &str,
+        paths: &[String],
         viewed: bool,
         result: Result<(), String>,
     ) {
         let Err(error) = result else {
             return;
         };
-        self.error = Some(format!("Viewed not saved for {path}: {error}"));
+        let what = match paths {
+            [path] => path.clone(),
+            _ => format!("{} files", paths.len()),
+        };
+        self.error = Some(format!("Viewed not saved for {what}: {error}"));
         let Some(view) = self.view_for(pr) else {
             return;
         };
-        let files = view.files.as_mut().and_then(|files| files.as_mut().ok());
-        let file = files.and_then(|files| files.iter_mut().find(|file| file.path == path));
-        if let Some(file) = file {
-            file.viewed = if viewed {
-                ViewedState::Unviewed
-            } else {
-                ViewedState::Viewed
-            };
+        let Some(Ok(files)) = view.files.as_mut() else {
+            return;
+        };
+        let before = if viewed {
+            ViewedState::Unviewed
+        } else {
+            ViewedState::Viewed
+        };
+        for file in files.iter_mut().filter(|file| paths.contains(&file.path)) {
+            file.viewed = before;
         }
     }
 
@@ -4097,8 +4142,8 @@ mod tests {
         ]);
         let action = app.handle_key(key(KeyCode::Char('v')));
         assert!(
-            matches!(action, Some(Action::SetViewed { ref path, viewed: true, ref pull_request_id, .. })
-            if path == "a.md" && pull_request_id == "PR_node")
+            matches!(action, Some(Action::SetViewed { ref paths, viewed: true, ref pull_request_id, .. })
+            if paths == &["a.md"] && pull_request_id == "PR_node")
         );
         assert_eq!(
             view(&app).loaded_files().unwrap()[0].viewed,
@@ -4111,12 +4156,80 @@ mod tests {
     fn a_failed_sync_puts_the_checkbox_back() {
         let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
         app.handle_key(key(KeyCode::Char('v')));
-        app.set_viewed_result(&pr, "a.md", true, Err("forbidden".to_string()));
+        app.set_viewed_result(
+            &pr,
+            &["a.md".to_string()],
+            true,
+            Err("forbidden".to_string()),
+        );
         assert_eq!(
             view(&app).loaded_files().unwrap()[0].viewed,
             ViewedState::Unviewed
         );
         assert!(app.error.as_deref().unwrap().contains("forbidden"));
+    }
+
+    /// The files tab as a folder tree, with the cursor on the `src` folder row.
+    fn on_src_folder(files: Vec<ChangedFile>) -> (App, PrRef) {
+        let (mut app, pr) = files_tab(files);
+        view_mut(&mut app).tree_view = true;
+        let rows = view(&app).file_rows();
+        let folder = rows
+            .iter()
+            .position(|row| matches!(row, FileRow::Dir { path, .. } if path == "src"))
+            .expect("a src folder row");
+        view_mut(&mut app).file_state.select(Some(folder));
+        (app, pr)
+    }
+
+    fn viewed_states(app: &App) -> Vec<ViewedState> {
+        let files = view(app).loaded_files().unwrap();
+        files.iter().map(|file| file.viewed).collect()
+    }
+
+    #[test]
+    fn v_on_a_folder_marks_every_unviewed_file_under_it() {
+        let (mut app, _) = on_src_folder(vec![
+            file("src/a.rs", ViewedState::Unviewed),
+            file("src/deep/b.rs", ViewedState::Viewed),
+            file("src/deep/c.rs", ViewedState::Unviewed),
+            file("srcx/d.rs", ViewedState::Unviewed),
+            file("e.md", ViewedState::Unviewed),
+        ]);
+        let action = app.handle_key(key(KeyCode::Char('v')));
+        assert!(
+            matches!(action, Some(Action::SetViewed { ref paths, viewed: true, .. })
+            if paths == &["src/a.rs", "src/deep/c.rs"]),
+            "only the unviewed files under src/ are sent: {action:?}"
+        );
+        use ViewedState::{Unviewed, Viewed};
+        assert_eq!(
+            viewed_states(&app),
+            [Viewed, Viewed, Viewed, Unviewed, Unviewed]
+        );
+    }
+
+    #[test]
+    fn v_on_a_fully_viewed_folder_unmarks_it_and_a_failure_restores_it() {
+        let (mut app, pr) = on_src_folder(vec![
+            file("src/a.rs", ViewedState::Viewed),
+            file("src/b.rs", ViewedState::Viewed),
+            file("c.md", ViewedState::Viewed),
+        ]);
+        let action = app.handle_key(key(KeyCode::Char('v')));
+        let Some(Action::SetViewed {
+            paths,
+            viewed: false,
+            ..
+        }) = action
+        else {
+            panic!("expected an unmark of the folder, got {action:?}");
+        };
+        use ViewedState::{Unviewed, Viewed};
+        assert_eq!(viewed_states(&app), [Unviewed, Unviewed, Viewed]);
+        app.set_viewed_result(&pr, &paths, false, Err("forbidden".to_string()));
+        assert_eq!(viewed_states(&app), [Viewed, Viewed, Viewed]);
+        assert!(app.error.as_deref().unwrap().contains("2 files"));
     }
 
     #[test]

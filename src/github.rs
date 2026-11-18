@@ -218,26 +218,39 @@ pub fn fetch_files(
     }
 }
 
-/// Sets the viewer's Viewed checkbox for one file, the same one the web shows.
-pub fn set_viewed(pull_request_id: &str, path: &str, viewed: bool) -> Result<()> {
+/// Sets the viewer's Viewed checkbox, the same one the web shows, for each path: one
+/// request with one mutation per file.
+pub fn set_viewed(pull_request_id: &str, paths: &[String], viewed: bool) -> Result<()> {
+    let mut args = vec![
+        "-f".to_string(),
+        format!("query={}", viewed_document(paths.len(), viewed)),
+        "-f".to_string(),
+        format!("id={pull_request_id}"),
+    ];
+    for (index, path) in paths.iter().enumerate() {
+        args.extend(["-f".to_string(), format!("p{index}={path}")]);
+    }
+    run_graphql(&args)?;
+    Ok(())
+}
+
+fn viewed_document(count: usize, viewed: bool) -> String {
     let mutation = if viewed {
         "markFileAsViewed"
     } else {
         "unmarkFileAsViewed"
     };
-    let document = format!(
-        "mutation($id: ID!, $path: String!) {{ {mutation}(input: {{ pullRequestId: $id, path: $path }}) {{ clientMutationId }} }}"
-    );
-    let args = [
-        "-f".to_string(),
-        format!("query={document}"),
-        "-f".to_string(),
-        format!("id={pull_request_id}"),
-        "-f".to_string(),
-        format!("path={path}"),
-    ];
-    run_graphql(&args)?;
-    Ok(())
+    let variables: String = (0..count)
+        .map(|index| format!(", $p{index}: String!"))
+        .collect();
+    let fields: String = (0..count)
+        .map(|index| {
+            format!(
+                " f{index}: {mutation}(input: {{ pullRequestId: $id, path: $p{index} }}) {{ clientMutationId }}"
+            )
+        })
+        .collect();
+    format!("mutation($id: ID!{variables}) {{{fields} }}")
 }
 
 /// A line comment to add to your pending review.

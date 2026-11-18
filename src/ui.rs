@@ -614,7 +614,10 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
         "Files changed",
         &[
             ("enter", "whole file with its changes; on a folder, fold it"),
-            ("v, V", "toggle Viewed (syncs to GitHub), hide viewed files"),
+            (
+                "v, V",
+                "toggle Viewed (syncs to GitHub; on a folder, every file in it), hide viewed files",
+            ),
             ("], [", "next or previous unviewed file"),
             ("t, z", "tree or flat list, hide or show the list"),
             (
