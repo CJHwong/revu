@@ -228,7 +228,21 @@ pub struct ThreadLine {
     pub resolved: bool,
     /// The thread's own comments, oldest first.
     pub comments: Vec<ThreadComment>,
+    /// The diff lines the thread is on, ending at the commented line.
+    pub code: Vec<HunkLine>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HunkLine {
+    /// The old file's number for a removed line, the new file's for the others.
+    pub number: u64,
+    /// '+', '-' or ' '.
+    pub mark: char,
+    pub text: String,
+}
+
+/// How many diff lines a thread shows, as GitHub's conversation tab does.
+const THREAD_CODE_LINES: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadComment {
@@ -641,7 +655,16 @@ struct RawThread {
     original_start_line: Option<u64>,
     #[serde(default)]
     diff_side: Option<String>,
+    /// The first comment's diff hunk; every reply carries the same one.
+    #[serde(default)]
+    hunk: Option<Nodes<RawHunk>>,
     comments: Nodes<RawThreadComment>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawHunk {
+    diff_hunk: String,
 }
 
 impl RawThread {
@@ -1326,12 +1349,61 @@ fn thread_line(thread: RawThread) -> ThreadLine {
             at: comment.created_at,
             body: comment.body,
         });
+    let hunk = thread
+        .hunk
+        .and_then(|hunk| hunk.nodes.into_iter().next())
+        .map(|hunk| hunk.diff_hunk)
+        .unwrap_or_default();
     ThreadLine {
         path: thread.path,
         lines,
         resolved: thread.is_resolved,
         comments: comments.collect(),
+        code: hunk_tail(&hunk, THREAD_CODE_LINES),
     }
+}
+
+/// The last `keep` lines of a diff hunk, numbered from its `@@ -old +new @@` header.
+fn hunk_tail(hunk: &str, keep: usize) -> Vec<HunkLine> {
+    let mut lines = hunk.lines();
+    let Some(header) = lines.next() else {
+        return Vec::new();
+    };
+    let start = |sign: char| {
+        header
+            .split_whitespace()
+            .find_map(|part| part.strip_prefix(sign))
+            .and_then(|range| range.split(',').next()?.parse::<u64>().ok())
+            .unwrap_or(1)
+    };
+    let (mut old, mut new) = (start('-'), start('+'));
+    let mut code = Vec::new();
+    for line in lines {
+        let mut chars = line.chars();
+        let mark = chars.next().unwrap_or(' ');
+        let number = match mark {
+            '-' => {
+                old += 1;
+                old - 1
+            }
+            '+' => {
+                new += 1;
+                new - 1
+            }
+            // "\ No newline at end of file" is a note, not a line.
+            '\\' => continue,
+            _ => {
+                old += 1;
+                new += 1;
+                new - 1
+            }
+        };
+        let mark = if matches!(mark, '-' | '+') { mark } else { ' ' };
+        let text = chars.as_str().replace('\t', "    ");
+        code.push(HunkLine { number, mark, text });
+    }
+    let skip = code.len().saturating_sub(keep);
+    code.split_off(skip)
 }
 
 fn humanize(state: &str) -> String {
@@ -1340,6 +1412,45 @@ fn humanize(state: &str) -> String {
 
 #[cfg(test)]
 pub mod tests {
+    #[test]
+    fn hunk_tail_keeps_the_last_lines_with_their_numbers() {
+        let hunk = "@@ -8,5 +8,6 @@ intro\n eight\n nine\n-old\tten\n+new ten\n+new eleven\n\\ No newline at end of file\n twelve";
+        let line = |number, mark, text: &str| HunkLine {
+            number,
+            mark,
+            text: text.to_string(),
+        };
+        assert_eq!(
+            hunk_tail(hunk, 4),
+            [
+                line(10, '-', "old    ten"),
+                line(10, '+', "new ten"),
+                line(11, '+', "new eleven"),
+                line(12, ' ', "twelve"),
+            ],
+            "a removed line keeps its old number, tabs become spaces, the no-newline note goes"
+        );
+        assert!(hunk_tail("", 4).is_empty());
+        assert_eq!(hunk_tail(hunk, 9).len(), 6, "a short hunk shows whole");
+    }
+
+    #[test]
+    fn a_thread_carries_the_tail_of_its_hunk() {
+        let activity = parse_activity(&activity_fixture()).unwrap();
+        let threads: Vec<_> = activity
+            .timeline
+            .iter()
+            .flat_map(|comment| &comment.threads)
+            .collect();
+        let open = threads.iter().find(|thread| thread.path == "b.md").unwrap();
+        assert_eq!(open.code.len(), 4);
+        assert_eq!(
+            open.code.last().map(|line| line.text.as_str()),
+            Some("twelve")
+        );
+        let resolved = threads.iter().find(|thread| thread.path == "a.md").unwrap();
+        assert!(resolved.code.is_empty(), "no hunk sent, no code shown");
+    }
     use super::*;
     use serde_json::json;
 
@@ -1521,6 +1632,7 @@ pub mod tests {
                       "createdAt": "2026-11-14T10:00:00Z", "body": "Rename this." }] } },
                 { "isResolved": false, "path": "b.md", "line": 12, "originalLine": 12,
                   "startLine": null, "originalStartLine": null,
+                  "hunk": { "nodes": [{ "diffHunk": "@@ -8,5 +8,6 @@ intro\n eight\n nine\n-old ten\n+new ten\n+new eleven\n twelve" }] },
                   "comments": { "nodes": [
                       { "pullRequestReview": { "id": "R1" }, "author": { "__typename": "User", "login": "lead" },
                         "createdAt": "2026-11-14T10:00:00Z", "body": "Why **here**?" },

@@ -114,7 +114,7 @@ pub fn activity_document() -> String {
            ... on HeadRefForcePushedEvent {{ createdAt }} ... on BaseRefChangedEvent {{ createdAt }} \
            ... on BaseRefForcePushedEvent {{ createdAt }} ... on ReviewRequestedEvent {{ createdAt }} }} }} \
          reviewThreads(first: 100) {{ nodes {{ isResolved path line originalLine startLine originalStartLine \
-           diffSide comments(first: 50) {{ nodes {{ pullRequestReview {{ id state }} viewerDidAuthor author {{ __typename login }} createdAt body }} }} }} }} \
+           diffSide hunk: comments(first: 1) {{ nodes {{ diffHunk }} }} comments(first: 50) {{ nodes {{ pullRequestReview {{ id state }} viewerDidAuthor author {{ __typename login }} createdAt body }} }} }} }} \
          pendingReviews: reviews(first: 1, states: PENDING) {{ nodes {{ id }} }} \
          }} }} }}"
     )

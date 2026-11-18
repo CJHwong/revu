@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use unicode_width::UnicodeWidthStr;
 
 use crate::markdown::{self, Block, FoldId, Folds, RowAction, TextRow, fold_key, line_width};
-use crate::model::{Comment, Lifecycle, PrActivity, PrDetail, ReviewState, ThreadLine};
+use crate::model::{Comment, HunkLine, Lifecycle, PrActivity, PrDetail, ReviewState, ThreadLine};
 use crate::theme::{PrState, Theme};
 use crate::ui::relative_time;
 
@@ -663,7 +663,10 @@ fn thread_block(context: &Context, thread: &ThreadLine) -> Block {
         "{status}   {}  {}",
         thread.path, thread.lines
     ))];
-    let mut body = Vec::new();
+    let mut body = code_lines(context, &thread.code);
+    if !body.is_empty() {
+        body.push(Block::Blank);
+    }
     for comment in &thread.comments {
         let title = vec![
             context.bold(comment.author.login.clone(), theme.foreground),
@@ -685,6 +688,33 @@ fn thread_block(context: &Context, thread: &ThreadLine) -> Block {
         body,
         open: !thread.resolved,
     }
+}
+
+/// The diff lines under a thread: the number, then the line in the diff's colors.
+fn code_lines(context: &Context, code: &[HunkLine]) -> Vec<Block> {
+    let theme = context.theme;
+    let width = code
+        .iter()
+        .map(|line| line.number.to_string().len())
+        .max()
+        .unwrap_or(0);
+    code.iter()
+        .map(|line| {
+            let color = match line.mark {
+                '+' => theme.success,
+                '-' => theme.danger,
+                _ => theme.foreground,
+            };
+            Block::Line {
+                spans: vec![
+                    context.span(format!("{:>width$} ", line.number), theme.muted),
+                    context.span(format!("{} {}", line.mark, line.text), color),
+                ],
+                // A wrapped line continues under the code, not under the number.
+                indent: width + 3,
+            }
+        })
+        .collect()
 }
 
 fn trim_blank_rows(rows: &mut Vec<TextRow>) {
@@ -730,6 +760,16 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    #[test]
+    fn an_open_thread_shows_its_code_before_the_comments() {
+        let lines = rendered(&[]);
+        let position = |text: &str| lines.iter().position(|line| line.contains(text));
+        let code = position("12   twelve").expect("the commented line shows");
+        assert!(position("10 - old ten").is_some(), "{lines:#?}");
+        assert!(position("b.md").unwrap() < code);
+        assert!(code < position("Why here?").unwrap());
     }
 
     #[test]
