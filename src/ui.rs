@@ -1449,9 +1449,27 @@ fn repo_place(view: &DetailView, paint: Paint) -> Option<Line<'static>> {
 
 /// "155", or "980+" when git stopped at its limit.
 fn repo_count(view: &DetailView, count: usize) -> String {
-    match view.find_repo_capped {
+    count_text(count, view.find_repo_capped)
+}
+
+fn count_text(count: usize, capped: bool) -> String {
+    match capped {
         true => format!("{count}+"),
         false => count.to_string(),
+    }
+}
+
+/// The footer when no changed file holds the text: what n does instead. `repo` is the
+/// number of repo matches, None while git looks, or Err when the search failed.
+fn not_in_diff_note(repo: Option<Result<usize, ()>>, capped: bool) -> String {
+    match repo {
+        None => "not in the diff, looking in the repo...".to_string(),
+        Some(Err(())) => "not in the diff; repo not searched".to_string(),
+        Some(Ok(0)) => "not in the diff or the repo".to_string(),
+        Some(Ok(count)) => format!(
+            "not in the diff; {} in the repo, n opens the first",
+            count_text(count, capped)
+        ),
     }
 }
 
@@ -1473,8 +1491,13 @@ fn find_note(view: &DetailView, paint: Paint) -> Line<'static> {
         Some(hit) => format!("match {} of {}", hit.ordinal, hit.total),
         None => "no match".to_string(),
     };
+    let repo = view
+        .find_repo
+        .as_ref()
+        .map(|result| result.as_ref().map(Vec::len).map_err(|_| ()));
     let place = match (view.find_file_place(), &view.find_files, view.tab) {
         (_, _, tab) if tab != Tab::Files => format!("{here} in this commit"),
+        (Some((None, 0)), _, _) => not_in_diff_note(repo, view.find_repo_capped),
         (Some((Some(at), files)), _, _) => format!("{here} in file {at} of {files}"),
         (Some((None, files)), _, _) => {
             let have = match files {
@@ -1486,8 +1509,9 @@ fn find_note(view: &DetailView, paint: Paint) -> Line<'static> {
         (None, None, _) => format!("{here} in this file, looking in the others..."),
         (None, _, _) => format!("{here} in this file, other files not searched"),
     };
-    let repo = match view.tab {
-        Tab::Files => repo_note(view),
+    let repo = match (view.tab, view.find_file_place()) {
+        (_, Some((None, 0))) => String::new(),
+        (Tab::Files, _) => repo_note(view),
         _ => String::new(),
     };
     let place = format!("{place}{repo}");
@@ -2877,6 +2901,30 @@ mod tests {
                 .collect()
         };
         lines.iter().map(text).collect()
+    }
+
+    #[test]
+    fn text_in_no_changed_file_says_n_opens_the_repo_matches() {
+        assert_eq!(
+            not_in_diff_note(Some(Ok(15)), false),
+            "not in the diff; 15 in the repo, n opens the first"
+        );
+        assert_eq!(
+            not_in_diff_note(Some(Ok(980)), true),
+            "not in the diff; 980+ in the repo, n opens the first"
+        );
+        assert_eq!(
+            not_in_diff_note(Some(Ok(0)), false),
+            "not in the diff or the repo"
+        );
+        assert_eq!(
+            not_in_diff_note(None, false),
+            "not in the diff, looking in the repo..."
+        );
+        assert_eq!(
+            not_in_diff_note(Some(Err(())), false),
+            "not in the diff; repo not searched"
+        );
     }
 
     #[test]
