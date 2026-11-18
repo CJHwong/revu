@@ -405,12 +405,15 @@ fn badge_spans(pr: &PrSummary, secondary: Color, paint: Paint) -> Vec<Span<'stat
         pad_span(review, 18),
         pad_span(checks_span(pr.checks.as_ref(), paint), 9),
         // No comments and no checks leave their cells blank, so the rows that have them
-        // stand out.
-        match pr.comments {
-            0 => Span::raw(""),
-            1 => paint.span("    1 comment", secondary),
-            count => paint.span(format!("{count:>5} comments"), secondary),
-        },
+        // stand out. The blank keeps the cell's width, so every row's badges line up.
+        pad_span(
+            match pr.comments {
+                0 => Span::raw(""),
+                1 => paint.span("    1 comment", secondary),
+                count => paint.span(format!("{count:>5} comments"), secondary),
+            },
+            14,
+        ),
     ]
 }
 
@@ -2881,6 +2884,32 @@ mod tests {
         assert_eq!(lines[1], "Since you last looked");
         assert_eq!(lines[3], format!("Commits{}5", " ".repeat(12)));
         assert_eq!(lines.len(), 5, "rows with nothing new stay out: {lines:?}");
+    }
+
+    #[test]
+    fn inbox_badges_take_the_same_width_with_or_without_comments() {
+        let theme = theme::by_name("dracula").unwrap();
+        let paint = Paint {
+            theme: &theme,
+            now: Utc::now(),
+        };
+        let width = |comments: u64| {
+            let pr = PrSummary {
+                repo: "acme/api".into(),
+                number: 1,
+                title: "Fix".into(),
+                url: String::new(),
+                author: "joey".into(),
+                updated_at: Utc::now(),
+                is_draft: false,
+                review: ReviewState::Awaiting,
+                checks: None,
+                comments,
+            };
+            Line::from(badge_spans(&pr, theme.muted, paint)).width()
+        };
+        assert_eq!(width(0), width(1));
+        assert_eq!(width(0), width(12));
     }
 
     #[test]
