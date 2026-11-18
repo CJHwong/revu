@@ -1013,6 +1013,17 @@ impl DetailView {
         }))
     }
 
+    /// Esc: ends the find, its marks and its counts.
+    fn clear_find(&mut self) {
+        self.find = None;
+        self.find_hit = None;
+        self.find_files = None;
+        self.find_repo = None;
+        self.find_repo_capped = false;
+        self.find_pending = None;
+        self.leave_repo_hits();
+    }
+
     /// Asks git once for the words the find prompt completes.
     fn words_request(&mut self) -> Option<Action> {
         if self.find_words_requested {
@@ -2629,13 +2640,18 @@ impl App {
         let Some(view) = self.view_for(pr) else {
             return;
         };
+        let width = usize::from(view.body_width);
         for overlay in &mut view.overlays {
             match overlay {
                 Overlay::File {
                     path: shown,
                     lines: slot @ None,
-                    ..
+                    scroll,
+                    line,
                 } if shown == path => {
+                    if let (Ok(text), Some(line)) = (&lines, line) {
+                        *scroll = context_scroll(text, line.saturating_sub(1), width);
+                    }
                     *slot = Some(lines);
                     return;
                 }
@@ -3793,7 +3809,8 @@ impl App {
             }
             KeyCode::Char('H') if diff_pane => view.shift_diff(false),
             KeyCode::Char('L') if diff_pane => view.shift_diff(true),
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Left => {
+            KeyCode::Esc => view.clear_find(),
+            KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Left => {
                 self.screen = Screen::Inbox;
                 self.error = None;
             }
@@ -3981,6 +3998,27 @@ fn diff_job(pr: &PrRef, repo: &LocalRepo, detail: &PrDetail, key: DiffKey) -> Di
     }
 }
 
+/// The file view's top line, so a few wrapped rows of context show above the line it
+/// opened at. A long line above takes several rows, so it leaves room for fewer.
+fn context_scroll(text: &Text, line: usize, width: usize) -> u16 {
+    const CONTEXT_ROWS: usize = 5;
+    // No width yet means the pane was never drawn; count each line as one row.
+    let rows = |index: usize| {
+        let length: usize = text.lines.get(index).map_or(1, ratatui::text::Line::width);
+        match width {
+            0 => 1,
+            width => length.div_ceil(width).max(1),
+        }
+    };
+    let mut top = line.min(text.lines.len().saturating_sub(1));
+    let mut above = 0;
+    while top > 0 && above + rows(top - 1) <= CONTEXT_ROWS {
+        top -= 1;
+        above += rows(top);
+    }
+    u16::try_from(top).unwrap_or(u16::MAX)
+}
+
 /// git's "@@ -1,3 +1,4 @@", delta's box top "─────┐", or difftastic's "a.md --- 2/5 --- Text".
 fn is_hunk_start(line: &str) -> bool {
     let line = line.trim_end();
@@ -4103,7 +4141,7 @@ mod tests {
         };
         assert_eq!(view.tab, Tab::Overview);
         assert!(matches!(app.screen, Screen::Detail(_)));
-        app.handle_key(key(KeyCode::Esc));
+        app.handle_key(key(KeyCode::Char('h')));
         assert!(matches!(app.screen, Screen::Inbox));
     }
 
@@ -4978,6 +5016,51 @@ mod tests {
         let outline = crate::syntax::outline("b.py", code.as_bytes());
         app.set_outline(&pr, "head999".to_string(), "b.py".to_string(), outline);
         assert_eq!(view(&app).file_view_place().as_deref(), Some("A > f"));
+    }
+
+    #[test]
+    fn esc_clears_the_find_and_never_leaves_the_pr() {
+        let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        clone_with(&mut app, &pr, &["a.md"]);
+        app.handle_key(key(KeyCode::Char('/')));
+        type_text(&mut app, "needle");
+        app.handle_key(key(KeyCode::Enter));
+        app.set_find_files(&pr, "needle", Ok(vec![("a.md".to_string(), 2)]));
+        app.handle_key(key(KeyCode::Esc));
+        let view = view(&app);
+        assert!(view.find.is_none() && view.find_files.is_none() && view.find_repo.is_none());
+        assert!(matches!(app.screen, Screen::Detail(_)), "still on the PR");
+        app.handle_key(key(KeyCode::Esc));
+        assert!(
+            matches!(app.screen, Screen::Detail(_)),
+            "with no find, esc does nothing"
+        );
+        app.handle_key(key(KeyCode::Char('h')));
+        assert!(matches!(app.screen, Screen::Inbox), "h goes back");
+    }
+
+    #[test]
+    fn the_file_view_opens_with_a_few_wrapped_rows_above_its_line() {
+        let text = Text::from(
+            ["a", "b", "c", "d", "e", "f", "g", "h"]
+                .iter()
+                .map(|line| ratatui::text::Line::from(*line))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(context_scroll(&text, 7, 80), 2, "five short lines above");
+        assert_eq!(context_scroll(&text, 2, 80), 0, "the top of the file");
+        let long = Text::from(vec![
+            ratatui::text::Line::from("x".repeat(600)),
+            ratatui::text::Line::from("y"),
+            ratatui::text::Line::from("needle"),
+        ]);
+        assert_eq!(
+            context_scroll(&long, 2, 100),
+            1,
+            "a 6-row line above does not fit"
+        );
+        assert_eq!(context_scroll(&long, 2, 200), 0, "at 3 rows it does");
+        assert_eq!(context_scroll(&long, 2, 0), 0, "no width yet: no wrap");
     }
 
     #[test]

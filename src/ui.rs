@@ -613,7 +613,8 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
         "Pull request",
         &[
             ("1-4, tab, shift-tab", "switch tab"),
-            ("esc, h, q", "back to the inbox"),
+            ("h, q", "back to the inbox"),
+            ("esc", "clear the find"),
             ("g/G, space/b", "top, bottom, page down, page up"),
             ("o, d, r", "open in the browser, run open_diff, fetch again"),
             ("o on a file", "open it on GitHub or in your editor"),
@@ -916,7 +917,12 @@ fn render_overlay(
                         .collect::<Vec<_>>(),
                 ),
             };
-            frame.render_widget(Paragraph::new(text), inner);
+            // A file read at the PR head wraps, so a match past the right edge shows.
+            let paragraph = match line {
+                Some(_) => Paragraph::new(text).wrap(Wrap { trim: false }),
+                None => Paragraph::new(text),
+            };
+            frame.render_widget(paragraph, inner);
         }
     }
     Vec::new()
@@ -1499,6 +1505,7 @@ fn repo_place(view: &DetailView, paint: Paint) -> (Vec<Piece>, Vec<Piece>) {
         let total = repo_count(view, hits.len());
         let in_diff = view
             .diff_match_count()
+            .filter(|count| *count > 0)
             .map(|count| format!(", {count} in the diff"));
         (
             format!(" /{query} "),

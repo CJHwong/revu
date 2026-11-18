@@ -29,7 +29,8 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 | Key | Action |
 |---|---|
 | `1`-`4`, `Tab` / `Shift+Tab` | Switch between Overview, Commits, Checks and Files changed. The tabs show GitHub's counts, not the digits. |
-| `Esc`, `h`, `q` | Back to the inbox |
+| `h`, `q` | Back to the inbox |
+| `Esc` | Clear the find; it never leaves the pull request |
 | `g` / `G`, `Space` / `b` | Top, bottom, page down, page up |
 | `r` | Fetch the pull request again |
 | `R` | Review: `Tab` picks Comment, Approve or Request changes. `ctrl+s` asks to confirm and `y` sends. Your pending line comments go with it. Request changes needs a comment; Comment needs a comment or line comments. Only Comment applies on your own PR, as GitHub requires, and on a merged or closed one. |
