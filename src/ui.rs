@@ -1286,20 +1286,24 @@ fn render_line_mode(frame: &mut Frame, view: &mut DetailView, area: Rect, paint:
             .collect(),
         _ => Vec::new(),
     };
+    // The block around the cursor's line, kept whole; the path gives way first.
+    let place = view.line_place().map(|place| format!(" in {place} "));
+    let place_width = place.as_deref().map_or(0, display_width);
     let Some(mode) = view.line_mode.as_mut() else {
         return;
     };
-    let block = Block::new()
+    let room = usize::from(area.width).saturating_sub(18 + place_width);
+    let mut block = Block::new()
         .borders(Borders::LEFT)
         .border_style(Style::new().fg(theme.accent))
         .title(paint.bold(" select lines ", theme.accent))
         .title(paint.bold(
-            format!(
-                " {} ",
-                truncate_start(&mode.path, usize::from(area.width).saturating_sub(18))
-            ),
+            format!(" {} ", truncate_start(&mode.path, room)),
             theme.foreground,
         ));
+    if let Some(place) = place {
+        block = block.title(Line::from(paint.span(place, theme.heading)).right_aligned());
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let rows = match &mode.rows {

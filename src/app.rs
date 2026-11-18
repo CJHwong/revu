@@ -405,6 +405,9 @@ pub struct DetailView {
     find_words_requested: bool,
     /// Select lines on Files changed: a line cursor over the file's plain diff.
     pub line_mode: Option<LineMode>,
+    /// Each parsed file's definitions, by commit and path; None for a language revu
+    /// does not parse.
+    pub outlines: HashMap<(String, String), Option<crate::syntax::Outline>>,
     /// The repo's labels, loaded the first time the label menu opens on this PR.
     pub repo_labels: Option<Vec<RepoLabel>>,
     /// n or N moved to another file; the find runs there once its diff is drawn. True
@@ -484,6 +487,7 @@ impl DetailView {
             find_words: None,
             find_words_requested: false,
             line_mode: None,
+            outlines: HashMap::new(),
             repo_labels: None,
         }
     }
@@ -679,6 +683,33 @@ impl DetailView {
             line,
             changes,
         })
+    }
+
+    /// The blocks around select lines' cursor, "BaseApp > on_mount": in the head's
+    /// version for an added or kept line, in the base's for a removed one.
+    pub fn line_place(&self) -> Option<String> {
+        let mode = self.line_mode.as_ref()?;
+        let Some(Ok(rows)) = &mode.rows else {
+            return None;
+        };
+        let row = rows.get(mode.cursor)?;
+        let detail = self.loaded()?;
+        let (commit, path, line) = match (row.new, row.old) {
+            (Some(line), _) => (&detail.head_oid, mode.path.clone(), line),
+            (None, Some(line)) => (&detail.base_oid, self.base_path(&mode.path), line),
+            (None, None) => return None,
+        };
+        let outline = self.outlines.get(&(commit.clone(), path))?.as_ref()?;
+        outline.place(usize::try_from(line).ok()?)
+    }
+
+    /// The file's name at the base: its old name when the PR renamed it.
+    fn base_path(&self, path: &str) -> String {
+        match &self.repo {
+            RepoState::Ready(repo) => repo.renames.get(path).cloned(),
+            _ => None,
+        }
+        .unwrap_or_else(|| path.to_string())
     }
 
     fn head_in_clone(&self) -> Result<(PathBuf, String), String> {
@@ -3127,6 +3158,18 @@ impl App {
         Ok(())
     }
 
+    pub fn set_outline(
+        &mut self,
+        pr: &PrRef,
+        commit: String,
+        path: String,
+        outline: Option<crate::syntax::Outline>,
+    ) {
+        if let Some(view) = self.view_for(pr) {
+            view.outlines.insert((commit, path), outline);
+        }
+    }
+
     pub fn set_line_rows(&mut self, pr: &PrRef, path: &str, result: Result<String, String>) {
         let Some(view) = self.view_for(pr) else {
             return;
@@ -4820,6 +4863,51 @@ mod tests {
         assert!(
             app.reload_after_write.is_none(),
             "other writes keep the screen as it is"
+        );
+    }
+
+    #[test]
+    fn select_lines_names_the_block_around_the_cursor_on_either_side() {
+        let (mut app, pr) = files_tab(vec![file("app.py", ViewedState::Unviewed)]);
+        let parse = |code: &str| crate::syntax::outline("app.py", code.as_bytes());
+        let base = "class A:\n    def old(self):\n        x = 1\n";
+        let head = "class A:\n    def new(self):\n        x = 2\n";
+        app.set_outline(
+            &pr,
+            "base000".to_string(),
+            "app.py".to_string(),
+            parse(base),
+        );
+        app.set_outline(
+            &pr,
+            "head999".to_string(),
+            "app.py".to_string(),
+            parse(head),
+        );
+        view_mut(&mut app).line_mode = Some(LineMode {
+            path: "app.py".to_string(),
+            rows: Some(Ok(crate::line_diff::parse(
+                "@@ -1,3 +1,3 @@\n class A:\n-    def old(self):\n-        x = 1\n+    def new(self):\n+        x = 2\n",
+            ))),
+            cursor: 1,
+            anchor: None,
+            scroll: 0,
+        });
+        let place = |app: &mut App, cursor| {
+            view_mut(app).line_mode.as_mut().unwrap().cursor = cursor;
+            view(app).line_place()
+        };
+        assert_eq!(place(&mut app, 0), None, "the hunk header");
+        assert_eq!(place(&mut app, 1).as_deref(), Some("A"));
+        assert_eq!(
+            place(&mut app, 3).as_deref(),
+            Some("A > old"),
+            "removed: the base"
+        );
+        assert_eq!(
+            place(&mut app, 5).as_deref(),
+            Some("A > new"),
+            "added: the head"
         );
     }
 

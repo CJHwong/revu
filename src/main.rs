@@ -11,6 +11,7 @@ mod model;
 mod overview;
 mod repo;
 mod sha256;
+mod syntax;
 mod syntax_theme;
 mod theme;
 mod ui;
@@ -53,6 +54,13 @@ enum Message {
         pr: PrRef,
         path: String,
         result: Result<String, String>,
+    },
+    /// A file's definitions at a commit; None for a language revu does not parse.
+    Outline {
+        pr: PrRef,
+        commit: String,
+        path: String,
+        outline: Option<syntax::Outline>,
     },
     /// A write to GitHub finished: a review, a line comment, or a discard.
     Written {
@@ -350,6 +358,12 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
             Message::Files { pr, result } => app.set_files(&pr, result),
             Message::Written { pr, result } => app.set_written(&pr, result),
             Message::LineDiff { pr, path, result } => app.set_line_rows(&pr, &path, result),
+            Message::Outline {
+                pr,
+                commit,
+                path,
+                outline,
+            } => app.set_outline(&pr, commit, path, outline),
             Message::Labels { pr, result } => app.set_repo_labels(&pr, result),
             Message::FilesProgress { pr, loaded, total } => {
                 app.set_files_progress(&pr, loaded, total)
@@ -508,10 +522,15 @@ fn perform(
                 let result = repo::file_diff(&job.dir, &job.base, &job.head, &job.paths)
                     .map_err(|error| format!("{error:#}"));
                 let _ = sender.send(Message::LineDiff {
-                    pr: job.pr,
-                    path,
+                    pr: job.pr.clone(),
+                    path: path.clone(),
                     result,
                 });
+                // The head's version for added and kept lines, the base's (by its old
+                // name, for a rename) for removed ones.
+                let old = job.paths.first().cloned().unwrap_or_default();
+                send_outline(&sender, &job, &job.head, &path);
+                send_outline(&sender, &job, &job.base, &old);
             });
         }
         Action::FetchLabels { pr } => {
@@ -1121,6 +1140,20 @@ fn run_diff(
     })?;
     app.error = failure;
     Ok(())
+}
+
+/// Parses a file at a commit and sends its definitions back; a file missing at that
+/// commit, such as one the PR adds, has none.
+fn send_outline(sender: &mpsc::Sender<Message>, job: &DiffJob, commit: &str, path: &str) {
+    let outline = repo::show_file(&job.dir, commit, path)
+        .ok()
+        .and_then(|text| syntax::outline(path, text.as_bytes()));
+    let _ = sender.send(Message::Outline {
+        pr: job.pr.clone(),
+        commit: commit.to_string(),
+        path: path.to_string(),
+        outline,
+    });
 }
 
 /// Runs $VISUAL or $EDITOR, else vi, on a file in the clone with `+LINE`, which vim,
