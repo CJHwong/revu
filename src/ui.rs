@@ -212,6 +212,16 @@ fn composer_header(composer: &Composer, paint: Paint) -> (String, Vec<Line<'stat
             let note = " it joins your pending review; R submits the review";
             (title, vec![Line::from(paint.span(note, theme.muted))])
         }
+        ComposeKind::Reply { author, place, .. } => {
+            let title = format!(" Reply to {author} on {place} ");
+            let note = match composer.pending_review {
+                Some(_) => {
+                    " you have a pending review, so the reply joins it; R submits the review"
+                }
+                None => " GitHub posts the reply at once",
+            };
+            (title, vec![Line::from(paint.span(note, theme.muted))])
+        }
     }
 }
 
@@ -509,6 +519,8 @@ fn detail_hints(view: &DetailView) -> Hints {
             ("enter", "comment"),
             ("t", "threads"),
             ("]/[", "next thread"),
+            ("r", "reply"),
+            ("u", "resolve"),
             ("y", "copy"),
             ("D", "definition"),
             ("o", "open"),
@@ -683,7 +695,7 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "S",
-                "select lines: j/k or the wheel pick a line, J/K and space/b scroll, V a range; enter comments in your pending review, y copies them as a Markdown diff, D goes to the definition of a name on the line, t opens or closes every review thread, ] and [ go to the next and previous thread, o opens them on GitHub",
+                "select lines: j/k or the wheel pick a line, J/K and space/b scroll, V a range; enter comments in your pending review, y copies them as a Markdown diff, D goes to the definition of a name on the line, t opens or closes every review thread, ] and [ go to the next and previous thread, r replies to the thread on the line and u resolves or reopens it, o opens them on GitHub",
             ),
         ],
     ),

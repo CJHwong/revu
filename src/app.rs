@@ -115,6 +115,20 @@ pub enum Action {
         pr: PrRef,
         pending_review: String,
     },
+    /// Reply to a review thread. `pending`: you have a pending review, which the reply
+    /// joins.
+    ReplyToThread {
+        pr: PrRef,
+        thread: String,
+        body: String,
+        pending: bool,
+    },
+    /// Resolve a review thread, or open it again.
+    ResolveThread {
+        pr: PrRef,
+        thread: String,
+        resolved: bool,
+    },
     /// Read one file's plain diff for select lines.
     LineDiff(DiffJob),
     /// Load the repo's labels for the label menu.
@@ -437,6 +451,8 @@ pub struct DetailView {
     pub threads_open: bool,
     /// The threads a click flipped from what t set, by ID.
     pub flipped_threads: HashSet<String>,
+    /// The thread last clicked: r and u act on it when a line holds several.
+    pub chosen_thread: Option<String>,
     /// The select-lines cursor the scroll last brought into view. While it stays there,
     /// J, K, space and b scroll freely, so a thread taller than the pane can be read.
     pub line_followed: Option<usize>,
@@ -533,6 +549,7 @@ impl DetailView {
             structure_asked: HashSet::new(),
             threads_open: false,
             flipped_threads: HashSet::new(),
+            chosen_thread: None,
             line_followed: None,
             def_walk: None,
             repo_labels: None,
@@ -659,6 +676,7 @@ impl DetailView {
         let job = diff_job(&self.pr, repo, detail, key);
         self.threads_open = false;
         self.flipped_threads.clear();
+        self.chosen_thread = None;
         self.line_followed = None;
         self.line_mode = Some(LineMode {
             path,
@@ -902,6 +920,7 @@ impl DetailView {
         }
         self.threads_open = !self.threads_open;
         self.flipped_threads.clear();
+        self.chosen_thread = None;
         self.line_followed = None;
         Ok(())
     }
@@ -921,9 +940,54 @@ impl DetailView {
             return;
         };
         let id = thread.id.clone();
+        self.chosen_thread = Some(id.clone());
         if !self.flipped_threads.remove(&id) {
             self.flipped_threads.insert(id);
         }
+    }
+
+    /// The review thread r and u act on: the one on the cursor's line, an outdated one
+    /// with the cursor on the first row, or the one clicked when there are several.
+    fn thread_here(&self) -> Result<&crate::model::ThreadLine, String> {
+        let mode = self.line_mode.as_ref().ok_or("select lines first")?;
+        let Some(Ok(rows)) = &mode.rows else {
+            return Err("the diff is still loading".to_string());
+        };
+        let Some(Ok(activity)) = &self.activity else {
+            return Err("the review threads are still loading".to_string());
+        };
+        let row = rows.get(mode.cursor).ok_or("no line here")?;
+        let mut here = self.threads_on_row(&mode.path, row);
+        if here.is_empty() && mode.cursor == 0 {
+            here = activity
+                .threads_on(&mode.path)
+                .filter(|thread| {
+                    !thread
+                        .at
+                        .is_some_and(|at| rows.iter().any(|row| row_holds(row, at)))
+                })
+                .collect();
+        }
+        if let [thread] = here[..] {
+            return Ok(thread);
+        }
+        if here.is_empty() {
+            return Err("no review thread on this line; ] goes to the next".to_string());
+        }
+        let chosen = self.chosen_thread.as_deref();
+        here.into_iter()
+            .find(|thread| Some(thread.id.as_str()) == chosen)
+            .ok_or_else(|| "several threads here; click the one you mean".to_string())
+    }
+
+    /// u in select lines: resolves the thread here, or opens it again.
+    fn resolve_thread(&self) -> Result<Option<Action>, String> {
+        let thread = self.thread_here()?;
+        Ok(Some(Action::ResolveThread {
+            pr: self.pr.clone(),
+            thread: thread.id.clone(),
+            resolved: !thread.resolved,
+        }))
     }
 
     /// ] and [ in select lines: the cursor goes to the next or previous line that holds a
@@ -1941,6 +2005,15 @@ impl Action {
                 "discarding your pending review...",
                 "pending review discarded",
             ),
+            Action::ReplyToThread { pending: true, .. } => (
+                "adding the reply to your pending review...",
+                "reply added to your pending review; R submits it",
+            ),
+            Action::ReplyToThread { .. } => ("posting the reply on GitHub...", "reply posted"),
+            Action::ResolveThread { resolved: true, .. } => {
+                ("resolving the thread...", "thread resolved")
+            }
+            Action::ResolveThread { .. } => ("reopening the thread...", "thread reopened"),
             _ => return None,
         };
         let reload_on_error = matches!(self, Action::SetLabels { .. });
@@ -2286,6 +2359,12 @@ pub enum ComposeKind {
         drafts: usize,
     },
     LineComment(LineTarget),
+    /// A reply to a review thread: its ID, and who started it and where, for the title.
+    Reply {
+        thread: String,
+        author: String,
+        place: String,
+    },
 }
 
 /// The text box for a review or a line comment, and what it sends.
@@ -2354,6 +2433,7 @@ impl Composer {
                 ..
             } if empty => Err("write a comment, or add line comments first".to_string()),
             ComposeKind::LineComment(_) if empty => Err("write the comment first".to_string()),
+            ComposeKind::Reply { .. } if empty => Err("write the reply first".to_string()),
             _ => Ok(()),
         }
     }
@@ -2377,6 +2457,13 @@ impl Composer {
             ComposeKind::LineComment(_) => {
                 "add this to your pending review on GitHub? y adds it, any other key goes back"
                     .to_string()
+            }
+            ComposeKind::Reply { .. } if self.pending_review.is_some() => {
+                "add this reply to your pending review on GitHub? y adds it, any other key goes back"
+                    .to_string()
+            }
+            ComposeKind::Reply { .. } => {
+                "post this reply on GitHub? y posts it, any other key goes back".to_string()
             }
         }
     }
@@ -2405,6 +2492,12 @@ impl Composer {
                 pending_review,
                 target: target.clone(),
                 body,
+            },
+            ComposeKind::Reply { thread, .. } => Action::ReplyToThread {
+                pr,
+                thread: thread.clone(),
+                body,
+                pending: pending_review.is_some(),
             },
         }
     }
@@ -3463,6 +3556,14 @@ impl App {
                 let result = view.toggle_threads();
                 self.error = result.err();
             }
+            KeyCode::Char('r') => {
+                let result = self.open_reply();
+                self.error = result.err();
+            }
+            KeyCode::Char('u') => {
+                let result = view.resolve_thread();
+                return self.report(result);
+            }
             KeyCode::Char('J') => mode.scroll = mode.scroll.saturating_add(3),
             KeyCode::Char('K') => mode.scroll = mode.scroll.saturating_sub(3),
             KeyCode::Char(' ') | KeyCode::PageDown => mode.scroll = mode.scroll.saturating_add(20),
@@ -3474,6 +3575,28 @@ impl App {
             _ => {}
         }
         None
+    }
+
+    /// r in select lines: a box for a reply to the thread on the cursor's line.
+    fn open_reply(&mut self) -> Result<(), String> {
+        let Screen::Detail(view) = &self.screen else {
+            return Ok(());
+        };
+        let thread = view.thread_here()?;
+        let (Some(Ok(detail)), Some(Ok(activity))) = (&view.detail, &view.activity) else {
+            return Err("wait for the PR to load before replying".to_string());
+        };
+        let author = thread
+            .comments
+            .first()
+            .map_or_else(String::new, |comment| comment.author.login.clone());
+        let kind = ComposeKind::Reply {
+            thread: thread.id.clone(),
+            author,
+            place: format!("{} {}", thread.path, thread.lines),
+        };
+        self.composer = Some(Composer::new(view.pr.clone(), detail, activity, kind));
+        Ok(())
     }
 
     /// Enter in select lines: a box for the line, or the range V marked.
@@ -5639,6 +5762,88 @@ mod tests {
         assert!(
             !app.knows_outline(&pr, "c2", "b.py"),
             "another commit is another file"
+        );
+    }
+
+    #[test]
+    fn r_replies_to_the_thread_on_the_line_and_u_resolves_it() {
+        let (mut app, pr) = files_tab(vec![file("b.md", ViewedState::Unviewed)]);
+        let lines = |cursor| LineMode {
+            path: "b.md".to_string(),
+            rows: Some(Ok(crate::line_diff::parse(
+                "@@ -10,3 +10,3 @@\n x\n y\n z\n",
+            ))),
+            cursor,
+            anchor: None,
+            scroll: 0,
+        };
+        view_mut(&mut app).line_mode = Some(lines(1));
+        app.handle_key(key(KeyCode::Char('r')));
+        assert_eq!(
+            app.error.as_deref(),
+            Some("no review thread on this line; ] goes to the next")
+        );
+        assert!(app.handle_key(key(KeyCode::Char('u'))).is_none());
+        view_mut(&mut app).line_mode = Some(lines(3));
+        app.handle_key(key(KeyCode::Char('r')));
+        let kind = app.composer.as_ref().map(|composer| composer.kind.clone());
+        assert_eq!(
+            kind,
+            Some(ComposeKind::Reply {
+                thread: "T2".to_string(),
+                author: "lead".to_string(),
+                place: "b.md line 12".to_string(),
+            })
+        );
+        type_text(&mut app, "thanks");
+        app.handle_key(ctrl('s'));
+        let pending = app.composer.as_ref().unwrap().pending_review.is_some();
+        let Some(Action::ReplyToThread {
+            pr: to,
+            thread,
+            body,
+            pending: joins,
+        }) = app.handle_key(key(KeyCode::Char('y')))
+        else {
+            panic!("y sends the reply");
+        };
+        assert_eq!(
+            (to, thread, body, joins),
+            (pr.clone(), "T2".to_string(), "thanks".to_string(), pending)
+        );
+        app.composer = None;
+        let Some(Action::ResolveThread {
+            thread, resolved, ..
+        }) = app.handle_key(key(KeyCode::Char('u')))
+        else {
+            panic!("u resolves the thread");
+        };
+        assert_eq!((thread.as_str(), resolved), ("T2", true));
+    }
+
+    #[test]
+    fn u_on_the_first_row_reopens_the_outdated_thread() {
+        let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        view_mut(&mut app).line_mode = Some(LineMode {
+            path: "a.md".to_string(),
+            rows: Some(Ok(crate::line_diff::parse("@@ -1,1 +1,1 @@\n x\n"))),
+            cursor: 0,
+            anchor: None,
+            scroll: 0,
+        });
+        let Some(Action::ResolveThread {
+            pr: on,
+            thread,
+            resolved,
+        }) = app.handle_key(key(KeyCode::Char('u')))
+        else {
+            panic!("u acts on the outdated thread");
+        };
+        assert_eq!(on, pr);
+        assert_eq!(
+            (thread.as_str(), resolved),
+            ("T1", false),
+            "T1 is resolved, so u reopens it"
         );
     }
 

@@ -398,6 +398,46 @@ pub fn submit_review(
     Ok(())
 }
 
+/// Replies to a review thread. With a pending review of yours on the PR, GitHub puts the
+/// reply in it, as its web page does; otherwise the reply is posted at once.
+pub fn reply_to_thread(thread: &str, body: &str) -> Result<()> {
+    let document = "mutation($thread: ID!, $body: String!) { addPullRequestReviewThreadReply(\
+                    input: { pullRequestReviewThreadId: $thread, body: $body }) { comment { id } } }";
+    let response = run_graphql(&graphql_args(
+        document,
+        &[("thread", thread), ("body", body)],
+        &[],
+    ))?;
+    if response
+        .pointer("/addPullRequestReviewThreadReply/comment")
+        .is_none_or(Value::is_null)
+    {
+        bail!("GitHub did not take the reply");
+    }
+    Ok(())
+}
+
+/// Resolves a review thread, or opens it again.
+pub fn set_thread_resolved(thread: &str, resolved: bool) -> Result<()> {
+    let mutation = if resolved {
+        "resolveReviewThread"
+    } else {
+        "unresolveReviewThread"
+    };
+    let document = format!(
+        "mutation($thread: ID!) {{ {mutation}(input: {{ threadId: $thread }}) {{ thread {{ isResolved }} }} }}"
+    );
+    let response = run_graphql(&graphql_args(&document, &[("thread", thread)], &[]))?;
+    let now = response.pointer(&format!("/{mutation}/thread/isResolved"));
+    if now.and_then(Value::as_bool) != Some(resolved) {
+        bail!(
+            "GitHub did not {} the thread",
+            if resolved { "resolve" } else { "reopen" }
+        );
+    }
+    Ok(())
+}
+
 /// Deletes your pending review and every line comment in it.
 pub fn discard_review(pending_review: &str) -> Result<()> {
     let document = "mutation($review: ID!) { deletePullRequestReview(input: { \

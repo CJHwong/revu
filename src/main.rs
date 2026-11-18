@@ -637,6 +637,16 @@ fn perform(
         Action::DiscardReview { pr, pending_review } => {
             start_write(session, pr, move || github::discard_review(&pending_review))
         }
+        Action::ReplyToThread {
+            pr, thread, body, ..
+        } => start_write(session, pr, move || github::reply_to_thread(&thread, &body)),
+        Action::ResolveThread {
+            pr,
+            thread,
+            resolved,
+        } => start_write(session, pr, move || {
+            github::set_thread_resolved(&thread, resolved)
+        }),
         Action::CloneRepo { pr, dir } => match session.pending_clone.take() {
             Some(job) if job.pr == pr => {
                 app.set_repo_state(RepoState::Busy(format!(
