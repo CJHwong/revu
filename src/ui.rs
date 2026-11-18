@@ -875,7 +875,7 @@ fn render_overlay(
     frame: &mut Frame,
     overlay: &mut Overlay,
     area: Rect,
-    place: Option<Line<'static>>,
+    place: Vec<Piece>,
     finding: Option<&RepoFinding>,
     paint: Paint,
 ) -> Vec<ClickTarget> {
@@ -887,16 +887,13 @@ fn render_overlay(
             scroll,
             line,
         } => {
-            // The path gives way first, from its start, so the match count stays whole.
             let at_line = line.map(|line| format!(":{line}")).unwrap_or_default();
-            let place_width = place.as_ref().map_or(0, Line::width);
-            let room = usize::from(area.width).saturating_sub(place_width + 17 + at_line.len());
-            let shown = truncate_start(path, room);
-            let mut block = Block::new()
-                .title(paint.bold(format!(" {shown}{at_line} at the PR head "), theme.heading));
-            if let Some(place) = place {
-                block = block.title(place);
-            }
+            let path_style = paint.bold("", theme.heading).style;
+            let left = vec![
+                path_piece(path_style, [" ", path, &format!("{at_line} ")]),
+                Piece::new(paint.span("at the PR head ", theme.heading), RANK_HINT),
+            ];
+            let block = Block::new().title(fit_title(usize::from(area.width), left, place));
             let inner = block.inner(area);
             frame.render_widget(block, area);
             let text = match lines {
@@ -1070,26 +1067,30 @@ fn render_diff_pane(
     let renderer = renderer_names
         .get(view.renderer)
         .map_or("diff", String::as_str);
+    let path = diff_pane_path(view);
+    let path = path.trim();
+    let edge = if path.is_empty() { "" } else { " " };
+    let path_style = paint.bold("", theme.foreground).style;
+    let left = vec![
+        Piece::new(
+            paint.bold(format!(" {renderer} "), theme.heading),
+            RANK_VIEW,
+        ),
+        Piece::new(paint.span("m switches ", theme.muted), RANK_HINT),
+        Piece::new(paint.span(wrap_note(view), theme.muted), RANK_WRAP),
+        path_piece(path_style, [edge, path, edge]),
+        Piece::new(
+            paint.span(selected_thread_note(view), theme.accent),
+            RANK_THREADS,
+        ),
+    ];
+    let mut right = find_note(view, paint);
+    right.extend(view.hunk_place().map(|place| block_piece(&place, paint)));
+    let title_width = usize::from(area.width.saturating_sub(1));
     let block = Block::new()
         .borders(Borders::LEFT)
         .border_style(Style::new().fg(theme.muted))
-        .title(paint.bold(format!(" {renderer} "), theme.heading))
-        .title(paint.span("m switches ", theme.muted))
-        .title(paint.span(wrap_note(view), theme.muted))
-        .title(find_note(view, paint))
-        .title(paint.bold(diff_pane_path(view), theme.foreground))
-        .title(paint.span(selected_thread_note(view), theme.accent))
-        .title(
-            Line::from(
-                paint.span(
-                    view.hunk_place()
-                        .map(|place| format!(" in {place} "))
-                        .unwrap_or_default(),
-                    theme.heading,
-                ),
-            )
-            .right_aligned(),
-        );
+        .title(fit_title(title_width, left, right));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     view.diff_width = inner.width;
@@ -1311,24 +1312,24 @@ fn render_line_mode(frame: &mut Frame, view: &mut DetailView, area: Rect, paint:
             .collect(),
         _ => Vec::new(),
     };
-    // The block around the cursor's line, kept whole; the path gives way first.
-    let place = view.line_place().map(|place| format!(" in {place} "));
-    let place_width = place.as_deref().map_or(0, display_width);
+    let place = view.line_place();
     let Some(mode) = view.line_mode.as_mut() else {
         return;
     };
-    let room = usize::from(area.width).saturating_sub(18 + place_width);
-    let mut block = Block::new()
+    let path_style = paint.bold("", theme.foreground).style;
+    let left = vec![
+        Piece::new(paint.bold(" select lines ", theme.accent), RANK_VIEW),
+        path_piece(path_style, [" ", &mode.path, " "]),
+    ];
+    let right = place
+        .map(|place| block_piece(&place, paint))
+        .into_iter()
+        .collect();
+    let title_width = usize::from(area.width.saturating_sub(1));
+    let block = Block::new()
         .borders(Borders::LEFT)
         .border_style(Style::new().fg(theme.accent))
-        .title(paint.bold(" select lines ", theme.accent))
-        .title(paint.bold(
-            format!(" {} ", truncate_start(&mode.path, room)),
-            theme.foreground,
-        ));
-    if let Some(place) = place {
-        block = block.title(Line::from(paint.span(place, theme.heading)).right_aligned());
-    }
+        .title(fit_title(title_width, left, right));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let rows = match &mode.rows {
@@ -1467,47 +1468,222 @@ fn keep_in_view(heights: &[usize], scroll: usize, cursor: usize, height: usize) 
 /// " /query  2 of 5 lines ", at the right of the diff pane's title, so the find text and
 /// the place among its matches stay in view. In another file it says n finds there.
 /// "/text  repo match 3 of 155", over the file a repo match opened.
-fn repo_place(view: &DetailView, paint: Paint) -> Option<Line<'static>> {
-    if let Some(walk) = &view.def_walk {
-        let more = if walk.capped {
-            ", more files not read"
-        } else {
-            ""
+fn repo_place(view: &DetailView, paint: Paint) -> Vec<Piece> {
+    let muted = paint.theme.muted;
+    let piece = |text: String, rank| Piece::new(paint.span(text, muted), rank);
+    // The name, the long and short words for what is walked, its place, and a count.
+    let (name, long, short, at, total, count) = if let Some(walk) = &view.def_walk {
+        let more = walk.capped.then(|| ", more files not read".to_string());
+        let total = walk.hits.len().to_string();
+        (
+            format!(" {} ", walk.name),
+            "definition",
+            "def",
+            walk.at + 1,
+            total,
+            more,
+        )
+    } else {
+        let (Some(query), Some(hit), Some(Ok(hits))) = (&view.find, view.repo_hit, &view.find_repo)
+        else {
+            return Vec::new();
         };
-        let place = format!(" definition {} of {}{more} ", walk.at + 1, walk.hits.len());
-        return Some(
-            Line::from(vec![
-                paint.bold(format!(" {} ", walk.name), paint.theme.warning),
-                paint.span(place, paint.theme.muted),
-            ])
-            .right_aligned(),
-        );
-    }
-    let (Some(query), Some(hit), Some(Ok(hits))) = (&view.find, view.repo_hit, &view.find_repo)
-    else {
-        return None;
+        let total = repo_count(view, hits.len());
+        let in_diff = view
+            .diff_match_count()
+            .map(|count| format!(", {count} in the diff"));
+        (
+            format!(" /{query} "),
+            "repo match",
+            "repo",
+            hit + 1,
+            total,
+            in_diff,
+        )
     };
-    let in_diff = view
-        .diff_match_count()
-        .map(|count| format!(", {count} in the diff"))
-        .unwrap_or_default();
-    let place = format!(
-        " repo match {} of {}{in_diff}  n/N next/previous ",
-        hit + 1,
-        repo_count(view, hits.len())
-    );
-    let block = view
-        .file_view_place()
-        .map(|block| format!("  in {block} "))
-        .unwrap_or_default();
-    Some(
-        Line::from(vec![
-            paint.bold(format!(" /{query} "), paint.theme.warning),
-            paint.span(place, paint.theme.muted),
-            paint.span(block, paint.theme.heading),
-        ])
-        .right_aligned(),
+    let place = paint.span(format!(" {long} {at} of {total}"), muted);
+    let mut pieces = vec![
+        Piece::new(paint.bold(name.clone(), paint.theme.warning), RANK_FIND),
+        place_piece(
+            place,
+            Some(format!(" {short} {at}/{total}")),
+            Some(format!(" {at}/{total}")),
+        ),
+    ];
+    pieces.extend(count.map(|count| piece(count, RANK_COUNT)));
+    pieces.push(piece("  n/N next/previous ".to_string(), RANK_HINT));
+    // A definition's own name says nothing more; "Foo > bar" names its class.
+    let block = view.file_view_place().filter(|place| *place != name.trim());
+    pieces.extend(block.map(|place| block_piece(&place, paint)));
+    pieces
+}
+
+/// One piece of a pane's title row, with the steps it gives way by when the row is
+/// too narrow: a shorter form, a shrink, or a drop. Each step has a rank, and the
+/// row takes the lowest-ranked next step of any piece first.
+struct Piece {
+    span: Span<'static>,
+    steps: Vec<(u8, GiveWay)>,
+}
+
+enum GiveWay {
+    Form(String),
+    Shrink(Shrink),
+    Drop,
+}
+
+/// How a path or a block name shrinks: whole parts go from its start, so
+/// "src/app/main.rs" becomes "…/app/main.rs" and "A > b > c" becomes "… > b > c".
+struct Shrink {
+    lead: String,
+    body: String,
+    tail: String,
+    separator: &'static str,
+}
+
+impl Shrink {
+    /// The text in `room` columns, or None below the floor.
+    fn to(&self, room: usize) -> Option<String> {
+        let edges = display_width(&self.lead) + display_width(&self.tail);
+        if room < SHRINK_FLOOR || room <= edges {
+            return None;
+        }
+        let body_room = room - edges;
+        let parts: Vec<&str> = self.body.split(self.separator).collect();
+        let fits = (1..parts.len())
+            .map(|first| format!("…{}{}", self.separator, parts[first..].join(self.separator)))
+            .find(|body| display_width(body) <= body_room);
+        let body = fits.unwrap_or_else(|| truncate_start(&self.body, body_room));
+        Some(format!("{}{body}{}", self.lead, self.tail))
+    }
+}
+
+impl Piece {
+    /// A piece that drops whole at `rank`.
+    fn new(span: Span<'static>, rank: u8) -> Self {
+        Piece {
+            span,
+            steps: vec![(rank, GiveWay::Drop)],
+        }
+    }
+
+    /// A piece that takes the shorter forms at their ranks, then drops at `drop`.
+    fn with_forms(span: Span<'static>, forms: Vec<(u8, String)>, drop: u8) -> Self {
+        let mut steps: Vec<(u8, GiveWay)> = forms
+            .into_iter()
+            .map(|(rank, text)| (rank, GiveWay::Form(text)))
+            .collect();
+        steps.push((drop, GiveWay::Drop));
+        Piece { span, steps }
+    }
+
+    /// `lead`, `body` and `tail` in one style; the body shrinks at `separator` at the
+    /// rank `shrink`, and the piece drops at `drop`.
+    fn shrinking(
+        style: Style,
+        [lead, body, tail]: [&str; 3],
+        separator: &'static str,
+        [shrink, drop]: [u8; 2],
+    ) -> Self {
+        let parts = Shrink {
+            lead: lead.to_string(),
+            body: body.to_string(),
+            tail: tail.to_string(),
+            separator,
+        };
+        Piece {
+            span: Span::styled(format!("{lead}{body}{tail}"), style),
+            steps: vec![(shrink, GiveWay::Shrink(parts)), (drop, GiveWay::Drop)],
+        }
+    }
+
+    fn width(&self) -> usize {
+        display_width(&self.span.content)
+    }
+}
+
+// The order titles give way in, from first to last.
+const RANK_HINT: u8 = 1;
+const RANK_WRAP: u8 = 2;
+const RANK_COUNT: u8 = 3;
+const RANK_BLOCK: u8 = 4;
+const RANK_THREADS: u8 = 5;
+const RANK_PLACE_SHORT: u8 = 5;
+const RANK_PATH_SHRINK: u8 = 6;
+const RANK_PLACE_SHORTEST: u8 = 7;
+const RANK_FIND: u8 = 8;
+const RANK_PATH: u8 = 9;
+const RANK_VIEW: u8 = 10;
+/// A path or block name shrinks no narrower than this, then drops.
+const SHRINK_FLOOR: usize = 16;
+
+/// "in BaseApp > on_mount", which keeps its innermost names when it shrinks.
+fn block_piece(place: &str, paint: Paint) -> Piece {
+    let style = paint.span("", paint.theme.heading).style;
+    Piece::shrinking(
+        style,
+        ["  in ", place, " "],
+        " > ",
+        [RANK_BLOCK, RANK_BLOCK],
     )
+}
+
+/// A file's path, which keeps its file name and nearest folders when it shrinks.
+fn path_piece(style: Style, parts: [&str; 3]) -> Piece {
+    Piece::shrinking(style, parts, "/", [RANK_PATH_SHRINK, RANK_PATH])
+}
+
+/// "match 41 of 50 in file 2 of 11", then "41/50 in file 2/11", then "41/50".
+fn place_piece(span: Span<'static>, short: Option<String>, shortest: Option<String>) -> Piece {
+    let mut forms = Vec::new();
+    forms.extend(short.map(|text| (RANK_PLACE_SHORT, text)));
+    forms.extend(shortest.map(|text| (RANK_PLACE_SHORTEST, text)));
+    Piece::with_forms(span, forms, RANK_FIND)
+}
+
+/// One title row `width` wide: the left pieces in order, then the right ones against
+/// the right edge, after the pieces gave way as far as the row needs.
+fn fit_title(width: usize, left: Vec<Piece>, right: Vec<Piece>) -> Line<'static> {
+    let split = left.len();
+    let mut pieces: Vec<Option<Piece>> = left.into_iter().chain(right).map(Some).collect();
+    loop {
+        let used: usize = pieces.iter().flatten().map(Piece::width).sum();
+        if used <= width {
+            break;
+        }
+        // The lowest-ranked next step goes first; of equal ranks, the later piece's.
+        let next = pieces
+            .iter()
+            .enumerate()
+            .filter_map(|(index, piece)| Some((piece.as_ref()?.steps.first()?.0, index)))
+            .min_by_key(|(rank, index)| (*rank, usize::MAX - index));
+        let Some((_, index)) = next else {
+            break;
+        };
+        let Some(piece) = pieces[index].as_mut() else {
+            break;
+        };
+        let room = piece.width().saturating_sub(used - width);
+        let style = piece.span.style;
+        match piece.steps.remove(0).1 {
+            GiveWay::Form(text) => piece.span = Span::styled(text, style),
+            GiveWay::Shrink(shrink) => {
+                if let Some(text) = shrink.to(room) {
+                    piece.span = Span::styled(text, style);
+                }
+            }
+            GiveWay::Drop => pieces[index] = None,
+        }
+    }
+    let used: usize = pieces.iter().flatten().map(Piece::width).sum();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (index, piece) in pieces.into_iter().enumerate() {
+        if index == split {
+            spans.push(Span::raw(" ".repeat(width.saturating_sub(used))));
+        }
+        spans.extend(piece.map(|piece| piece.span));
+    }
+    Line::from(spans)
 }
 
 /// The find a repo match's file view marks, and the index of the match's line.
@@ -1579,14 +1755,16 @@ fn repo_note(view: &DetailView) -> String {
     }
 }
 
-fn find_note(view: &DetailView, paint: Paint) -> Line<'static> {
+fn find_note(view: &DetailView, paint: Paint) -> Vec<Piece> {
     let Some(query) = &view.find else {
-        return Line::default();
+        return Vec::new();
     };
-    let here = match view.current_find_hit() {
+    let hit = view.current_find_hit();
+    let here = match &hit {
         Some(hit) => format!("match {} of {}", hit.ordinal, hit.total),
         None => "no match".to_string(),
     };
+    let fraction = hit.map(|hit| format!(" {}/{}", hit.ordinal, hit.total));
     let repo = view
         .find_repo
         .as_ref()
@@ -1605,17 +1783,33 @@ fn find_note(view: &DetailView, paint: Paint) -> Line<'static> {
         (None, None, _) => format!("{here} in this file, looking in the others..."),
         (None, _, _) => format!("{here} in this file, other files not searched"),
     };
+    let short = match (view.find_file_place(), &fraction, view.tab) {
+        (Some((Some(at), files)), Some(fraction), Tab::Files) => {
+            Some(format!("{fraction} in file {at}/{files}"))
+        }
+        _ => None,
+    };
     let repo = match (view.tab, view.find_file_place()) {
         (_, Some((None, 0))) => String::new(),
         (Tab::Files, _) => repo_note(view),
         _ => String::new(),
     };
-    let place = format!("{place}{repo}");
-    Line::from(vec![
-        paint.bold(format!(" /{query} "), paint.theme.warning),
-        paint.span(format!(" {place}  n/N next/previous "), paint.theme.muted),
-    ])
-    .right_aligned()
+    let muted = paint.theme.muted;
+    let mut pieces = vec![
+        Piece::new(
+            paint.bold(format!(" /{query} "), paint.theme.warning),
+            RANK_FIND,
+        ),
+        place_piece(paint.span(format!(" {place}"), muted), short, fraction),
+    ];
+    if !repo.is_empty() {
+        pieces.push(Piece::new(paint.span(repo, muted), RANK_COUNT));
+    }
+    pieces.push(Piece::new(
+        paint.span("  n/N next/previous ", muted),
+        RANK_HINT,
+    ));
+    pieces
 }
 
 /// Marks every place the find text appears in a line, ignoring case. The line of the
@@ -2341,12 +2535,6 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
     let theme = paint.theme;
     let area = frame.area();
     let width = area.width.saturating_sub(4).min(100);
-    let box_area = Rect {
-        x: area.x + (area.width - width) / 2,
-        y: area.y + 2,
-        width,
-        height: 4,
-    };
     let (title, hint) = match &prompt.kind {
         PromptKind::Definition { names } => (
             " Definition of ".to_string(),
@@ -2393,19 +2581,31 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
             ),
         ),
     };
-    let hint = match &prompt.error {
-        Some(error) => paint.span(error.clone(), theme.danger),
-        None => paint.span(hint, theme.muted),
+    let (hint, color) = match &prompt.error {
+        Some(error) => (error.clone(), theme.danger),
+        None => (hint, theme.muted),
     };
-    let text = Text::from(vec![
-        Line::from(vec![
-            paint.span("> ", theme.accent),
-            Span::from(prompt.text.clone()),
-            paint.span("▏", theme.accent),
-            paint.span(prompt.suggestion().unwrap_or_default(), theme.muted),
-        ]),
-        Line::from(hint),
-    ]);
+    // The hint wraps under the input, and the box grows to hold it.
+    let hint_rows = split_to_width(&hint, usize::from(width.saturating_sub(2)));
+    let height = u16::try_from(hint_rows.len() + 3).unwrap_or(u16::MAX);
+    let box_area = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + 2,
+        width,
+        height: height.min(area.height.saturating_sub(2)),
+    };
+    let mut lines = vec![Line::from(vec![
+        paint.span("> ", theme.accent),
+        Span::from(prompt.text.clone()),
+        paint.span("▏", theme.accent),
+        paint.span(prompt.suggestion().unwrap_or_default(), theme.muted),
+    ])];
+    lines.extend(
+        hint_rows
+            .into_iter()
+            .map(|row| Line::from(paint.span(row, color))),
+    );
+    let text = Text::from(lines);
     let block = Block::new()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -3136,6 +3336,74 @@ mod tests {
         assert_eq!(marked_style(5), Some(Some(theme.selection)), "another line");
         let plain = finding.mark(0, &Line::from(" 1 nothing"), paint);
         assert_eq!(plain, Line::from(" 1 nothing"));
+    }
+
+    #[test]
+    fn a_narrow_title_drops_hints_then_shrinks_the_block_then_the_path() {
+        let text = |line: &Line| -> String {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        };
+        let row = |width| {
+            let left = vec![
+                Piece::new(Span::raw(" word "), RANK_VIEW),
+                Piece::new(Span::raw("m switches "), RANK_HINT),
+                path_piece(Style::new(), [" ", "src/app/main.rs", " "]),
+            ];
+            let right = vec![
+                Piece::new(Span::raw(" /needle "), RANK_FIND),
+                place_piece(
+                    Span::raw(" match 1 of 2"),
+                    Some(" 1/2 in file 1/3".to_string()),
+                    Some(" 1/2".to_string()),
+                ),
+                Piece::new(Span::raw(", 9 in the repo"), RANK_COUNT),
+                Piece::shrinking(
+                    Style::new(),
+                    ["  in ", "App > run_loop", " "],
+                    " > ",
+                    [RANK_BLOCK, RANK_BLOCK],
+                ),
+            ];
+            text(&fit_title(width, left, right))
+        };
+        let wide = row(120);
+        assert_eq!(wide.chars().count(), 120, "fills the row");
+        assert!(
+            wide.starts_with(" word m switches  src/app/main.rs "),
+            "{wide}"
+        );
+        // As the row narrows: the hint drops, then the repo count; the block loses whole
+        // names from its start, then cuts its last one, then drops; the place takes its
+        // short forms; the place, then the query drop; the path goes last.
+        let expected = [
+            (
+                80,
+                " word  src/app/main.rs  /needle  match 1 of 2, 9 in the repo  in App > run_loop ",
+            ),
+            (
+                65,
+                " word  src/app/main.rs  /needle  match 1 of 2  in App > run_loop ",
+            ),
+            (
+                63,
+                " word  src/app/main.rs  /needle  match 1 of 2  in … > run_loop ",
+            ),
+            (
+                62,
+                " word  src/app/main.rs  /needle  match 1 of 2  in …> run_loop ",
+            ),
+            (46, " word  src/app/main.rs   /needle  match 1 of 2"),
+            (40, " word  src/app/main.rs      /needle  1/2"),
+            (34, " word  src/app/main.rs    /needle "),
+            (30, " word  src/app/main.rs        "),
+            (20, " word               "),
+        ];
+        for (width, row_text) in expected {
+            assert_eq!(row(width), row_text, "at {width}");
+        }
     }
 
     #[test]
