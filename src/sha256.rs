@@ -25,16 +25,17 @@ pub fn hex(input: &[u8]) -> String {
     }
     message.extend_from_slice(&((input.len() as u64) * 8).to_be_bytes());
     let mut state = START;
-    for block in message.chunks_exact(64) {
+    // The padding makes the length a whole number of 64-byte blocks.
+    for block in message.as_chunks::<64>().0 {
         compress(&mut state, block);
     }
     state.iter().map(|word| format!("{word:08x}")).collect()
 }
 
-fn compress(state: &mut [u32; 8], block: &[u8]) {
+fn compress(state: &mut [u32; 8], block: &[u8; 64]) {
     let mut schedule = [0u32; 64];
-    for (index, bytes) in block.chunks_exact(4).enumerate() {
-        schedule[index] = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    for (index, bytes) in block.as_chunks::<4>().0.iter().enumerate() {
+        schedule[index] = u32::from_be_bytes(*bytes);
     }
     for index in 16..64 {
         let older = schedule[index - 15];
