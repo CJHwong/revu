@@ -734,8 +734,10 @@ fn render_detail(
     paint: Paint,
 ) {
     let theme = paint.theme;
-    let header = match &view.detail {
-        Some(Ok(detail)) => detail_header(detail, frame.area().width as usize, paint),
+    let width = frame.area().width as usize;
+    let header = match (&view.detail, &view.summary) {
+        (Some(Ok(detail)), _) => detail_header(detail, width, paint),
+        (_, Some(summary)) => summary_header(summary, width, paint),
         _ => detail_title(&view.pr, paint),
     };
     let [top, tabs, body, bottom] = Layout::vertical([
@@ -1562,6 +1564,33 @@ fn detail_title(pr: &PrRef, paint: Paint) -> Vec<Line<'static>> {
         Line::from(paint.bold(format!("{}#{}", pr.repo, pr.number), paint.theme.foreground)),
         Line::from(paint.span(pr.url(), paint.theme.muted)),
     ]
+}
+
+/// The header from the inbox row, drawn at once while the detail loads: the same lines
+/// as `detail_header` without what only the detail knows (the branches, the size).
+fn summary_header(pr: &PrSummary, width: usize, paint: Paint) -> Vec<Line<'static>> {
+    let theme = paint.theme;
+    let mut lines = vec![Line::from(vec![
+        paint.span(format!(" {} ", pr.repo), theme.muted),
+        paint.span(format!("#{}", pr.number), theme.muted),
+    ])];
+    let title = [paint.bold(format!(" {}", pr.title), theme.foreground)];
+    lines.extend(markdown::wrap(&title, width, 1));
+    let (state, state_color) = match pr.is_draft {
+        true => (" Draft ", PrState::Draft),
+        false => (" Open ", PrState::Open),
+    };
+    let pill = Style::new()
+        .fg(ON_STATE)
+        .bg(theme.github_state(state_color))
+        .add_modifier(Modifier::BOLD);
+    lines.push(Line::from(vec![
+        Span::raw(" "),
+        Span::styled(state, pill),
+        paint.bold(format!(" {}", pr.author), theme.foreground),
+    ]));
+    lines.push(Line::default());
+    lines
 }
 
 /// GitHub's order: the repo and number, the title, then a state pill with the branches
@@ -2540,6 +2569,24 @@ mod tests {
                 .collect()
         };
         lines.iter().map(text).collect()
+    }
+
+    #[test]
+    fn a_loading_pr_shows_its_inbox_row_as_the_header() {
+        let theme = theme::by_name("dracula").unwrap();
+        let paint = Paint {
+            theme: &theme,
+            now: Utc::now(),
+        };
+        let summary = crate::model::tests::sample_detail().summary;
+        let lines = texts(&summary_header(&summary, 80, paint));
+        assert_eq!(
+            lines[0].trim(),
+            format!("{} #{}", summary.repo, summary.number)
+        );
+        assert_eq!(lines[1].trim(), summary.title);
+        assert!(lines[2].contains(&summary.author), "{lines:?}");
+        assert!(lines[2].contains("Open") || lines[2].contains("Draft"));
     }
 
     #[test]

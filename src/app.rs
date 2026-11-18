@@ -265,6 +265,9 @@ pub struct OverviewLayout {
 
 pub struct DetailView {
     pub pr: PrRef,
+    /// The inbox row the PR was opened from, which draws the header until the detail
+    /// arrives. None for a PR opened by link.
+    pub summary: Option<PrSummary>,
     /// `None` while the request runs.
     pub detail: Option<Result<PrDetail, String>>,
     /// Checks, commits and the conversation, which arrive separately.
@@ -361,6 +364,7 @@ impl DetailView {
         };
         Self {
             pr,
+            summary: None,
             detail: None,
             activity: None,
             tab: Tab::Overview,
@@ -2724,17 +2728,18 @@ impl App {
             self.prompt = Some(prompt);
             return None;
         };
-        Some(self.open_pr(pr))
+        Some(self.open_pr(pr, None))
     }
 
-    fn open_pr(&mut self, pr: PrRef) -> Action {
+    fn open_pr(&mut self, pr: PrRef, summary: Option<PrSummary>) -> Action {
         self.error = None;
-        let view = DetailView::new(
+        let mut view = DetailView::new(
             pr.clone(),
             &self.prefs,
             &self.renderer_names,
             &self.missing_renderers,
         );
+        view.summary = summary;
         self.screen = Screen::Detail(Box::new(view));
         Action::FetchDetail(pr)
     }
@@ -2924,9 +2929,11 @@ impl App {
     fn reload(view: &mut DetailView, prefs: &ViewPrefs, renderer_names: &[String]) -> Action {
         let tab = view.tab;
         let renderer = view.renderer;
+        let summary = view.summary.take();
         *view = DetailView::new(view.pr.clone(), prefs, renderer_names, &HashSet::new());
         view.tab = tab;
         view.renderer = renderer;
+        view.summary = summary;
         Action::FetchDetail(view.pr.clone())
     }
 
@@ -2963,8 +2970,8 @@ impl App {
             self.toggle_selected_group();
             return None;
         }
-        let pr = self.selected_pr()?.reference();
-        Some(self.open_pr(pr))
+        let summary = self.selected_pr()?.clone();
+        Some(self.open_pr(summary.reference(), Some(summary)))
     }
 
     /// On a PR row, folds its group and moves the selection to the group header.
@@ -3076,6 +3083,19 @@ mod tests {
         let mut app = App::new();
         app.groups = groups;
         app
+    }
+
+    #[test]
+    fn a_pr_opened_from_the_inbox_keeps_its_row_for_the_header() {
+        let mut app = app_with(vec![group("A", &[7], false)]);
+        app.list_state.select(Some(1));
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            view(&app).summary.as_ref().map(|summary| summary.number),
+            Some(7)
+        );
+        app.handle_key(key(KeyCode::Char('r')));
+        assert!(view(&app).summary.is_some(), "a reload keeps it");
     }
 
     #[test]
