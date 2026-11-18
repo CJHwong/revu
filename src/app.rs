@@ -1492,6 +1492,15 @@ pub struct LineMode {
 }
 
 impl LineMode {
+    /// Moves the cursor by `delta` rows, within the diff.
+    pub fn move_cursor(&mut self, delta: isize) {
+        let last = match &self.rows {
+            Some(Ok(rows)) => rows.len().saturating_sub(1),
+            _ => 0,
+        };
+        self.cursor = self.cursor.saturating_add_signed(delta).min(last);
+    }
+
     /// The rows the cursor and the range cover, first to last.
     pub fn marked(&self) -> (usize, usize) {
         let anchor = self.anchor.unwrap_or(self.cursor);
@@ -2244,6 +2253,9 @@ impl App {
             for _ in 0..3 {
                 self.error = view.overlay_key(key).err();
             }
+        } else if let Some(mode) = view.line_mode.as_mut().filter(|_| column >= view.diff_left) {
+            // The mode keeps its rows on the cursor, so the wheel moves the cursor.
+            mode.move_cursor(delta * 3);
         } else if diff_pane && column >= view.diff_left {
             view.wheel_diff(delta > 0);
         } else if view.tab == Tab::Overview {
@@ -2566,15 +2578,11 @@ impl App {
             return None;
         };
         let mode = view.line_mode.as_mut()?;
-        let last = match &mode.rows {
-            Some(Ok(rows)) => rows.len().saturating_sub(1),
-            _ => 0,
-        };
         match key {
-            KeyCode::Char('j') | KeyCode::Down => mode.cursor = (mode.cursor + 1).min(last),
-            KeyCode::Char('k') | KeyCode::Up => mode.cursor = mode.cursor.saturating_sub(1),
+            KeyCode::Char('j') | KeyCode::Down => mode.move_cursor(1),
+            KeyCode::Char('k') | KeyCode::Up => mode.move_cursor(-1),
             KeyCode::Char('g') => mode.cursor = 0,
-            KeyCode::Char('G') => mode.cursor = last,
+            KeyCode::Char('G') => mode.move_cursor(isize::MAX),
             KeyCode::Char('V') => {
                 mode.anchor = match mode.anchor {
                     Some(_) => None,
@@ -3997,6 +4005,30 @@ mod tests {
         );
         assert_eq!(app.saved.as_deref(), Some("copied a.rs:1-2 (3 lines)"));
         assert!(view(&app).line_mode.is_some(), "comment mode stays open");
+    }
+
+    #[test]
+    fn the_wheel_moves_the_cursor_in_comment_mode() {
+        let (mut app, _) = files_tab(vec![file("a.rs", ViewedState::Unviewed)]);
+        let diff = "@@ -1,6 +1,6 @@\n a\n b\n c\n d\n e\n f\n";
+        view_mut(&mut app).line_mode = Some(LineMode {
+            path: "a.rs".to_string(),
+            rows: Some(Ok(crate::line_diff::parse(diff))),
+            cursor: 0,
+            anchor: None,
+            scroll: 0,
+        });
+        let column = view(&app).diff_left + 5;
+        app.handle_scroll(column, 1);
+        assert_eq!(view(&app).line_mode.as_ref().unwrap().cursor, 3);
+        app.handle_scroll(column, 1);
+        assert_eq!(
+            view(&app).line_mode.as_ref().unwrap().cursor,
+            6,
+            "stops at the last row"
+        );
+        app.handle_scroll(column, -1);
+        assert_eq!(view(&app).line_mode.as_ref().unwrap().cursor, 3);
     }
 
     #[test]
