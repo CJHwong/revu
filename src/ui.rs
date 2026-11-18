@@ -485,6 +485,7 @@ fn detail_hints(view: &DetailView) -> Hints {
             ("V", "range"),
             ("enter", "comment"),
             ("y", "copy"),
+            ("o", "browser"),
             ("R", "review"),
             ("esc", "back to the diff"),
         ];
@@ -636,6 +637,10 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
             ("], [", "next or previous unviewed file"),
             ("t, z", "tree or flat list, hide or show the list"),
             ("y", "copy the file's or folder's path"),
+            (
+                "o",
+                "open GitHub's diff at the file, or at the line in comment mode",
+            ),
             (
                 "c",
                 "comment mode: j/k pick a line, V a range, enter writes a comment into your pending review, y copies the lines with their path as a Markdown diff",

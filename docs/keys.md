@@ -35,7 +35,7 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 | `r` | Fetch the pull request again |
 | `R` | Review: `Tab` picks Comment, Approve or Request changes. `ctrl+s` asks to confirm and `y` sends. Your pending line comments go with it. Request changes needs a comment; Comment needs a comment or line comments. Only Comment applies on your own PR, as GitHub requires, and on a merged or closed one. |
 | `X` | Discard your pending review and every line comment in it, after a `y`. |
-| `o` | Open in the browser |
+| `o` | Open in the browser. On Files changed, GitHub's diff opens at the selected file, and in comment mode at the cursor's line. |
 | `d` | Run the `open_diff` command |
 
 ## Overview

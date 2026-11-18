@@ -1057,9 +1057,37 @@ impl DetailView {
                 .checks
                 .get(selected(&self.checks))
                 .and_then(|check| check.url.clone()),
-            Tab::Files => Some(format!("{}/files", self.pr.url())),
+            Tab::Files => Some(self.files_link()),
         });
         item_url.unwrap_or_else(|| self.pr.url())
+    }
+
+    /// The PR's Files changed page, at the selected file, and at the cursor's line in
+    /// comment mode. GitHub names each file's anchor by the SHA-256 of its path, and a
+    /// line by L (old side) or R (new side) and its number.
+    fn files_link(&self) -> String {
+        let page = format!("{}/files", self.pr.url());
+        let file = self
+            .loaded_files()
+            .zip(self.selected_file())
+            .and_then(|(files, index)| files.get(index));
+        let Some(file) = file else {
+            return page;
+        };
+        let anchor = format!("{page}#diff-{}", crate::sha256::hex(file.path.as_bytes()));
+        let line = self
+            .line_mode
+            .as_ref()
+            .filter(|mode| mode.path == file.path)
+            .and_then(|mode| match &mode.rows {
+                Some(Ok(rows)) => rows.get(mode.cursor)?.target(),
+                _ => None,
+            });
+        match line {
+            Some((Side::Left, number)) => format!("{anchor}L{number}"),
+            Some((Side::Right, number)) => format!("{anchor}R{number}"),
+            None => anchor,
+        }
     }
 
     fn list_len(&self) -> usize {
@@ -2554,6 +2582,7 @@ impl App {
                 }
             }
             KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('q') => view.line_mode = None,
+            KeyCode::Char('o') => return Some(Action::OpenBrowser(view.link())),
             KeyCode::Char('y') => {
                 let Some(Ok(rows)) = &mode.rows else {
                     return None;
@@ -3908,6 +3937,42 @@ mod tests {
         let action = app.handle_key(key(KeyCode::Char('y')));
         assert!(
             matches!(action, Some(Action::Copy(ref text)) if text == "src/"),
+            "{action:?}"
+        );
+    }
+
+    #[test]
+    fn o_opens_the_selected_file_or_line_in_githubs_diff() {
+        let anchor = format!(
+            "{}/files#diff-{}",
+            PrRef {
+                repo: "acme/app".to_string(),
+                number: 7
+            }
+            .url(),
+            crate::sha256::hex(b"a.rs")
+        );
+        let (mut app, _) = files_tab(vec![file("a.rs", ViewedState::Unviewed)]);
+        view_mut(&mut app).tree_view = false;
+        view_mut(&mut app).file_state.select(Some(0));
+        let action = app.handle_key(key(KeyCode::Char('o')));
+        assert!(
+            matches!(action, Some(Action::OpenBrowser(ref url)) if *url == anchor),
+            "{action:?}"
+        );
+        view_mut(&mut app).line_mode = Some(LineMode {
+            path: "a.rs".to_string(),
+            rows: Some(Ok(crate::line_diff::parse(
+                "@@ -1,2 +1,2 @@\n keep\n-old\n+new\n",
+            ))),
+            cursor: 2,
+            anchor: None,
+            scroll: 0,
+        });
+        let action = app.handle_key(key(KeyCode::Char('o')));
+        let removed = format!("{anchor}L2");
+        assert!(
+            matches!(action, Some(Action::OpenBrowser(ref url)) if *url == removed),
             "{action:?}"
         );
     }

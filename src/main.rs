@@ -10,6 +10,7 @@ mod markdown;
 mod model;
 mod overview;
 mod repo;
+mod sha256;
 mod theme;
 mod ui;
 
