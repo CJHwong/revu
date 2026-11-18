@@ -47,7 +47,7 @@ enum Message {
         pr: PrRef,
         result: Result<Vec<github::RepoLabel>, String>,
     },
-    /// One file's plain diff, for comment mode.
+    /// One file's plain diff, for select lines.
     LineDiff {
         pr: PrRef,
         path: String,

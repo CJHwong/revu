@@ -48,7 +48,7 @@ Press `4` for Files changed. The diffs come from your local clone of the reposit
 
 ## 6. Comment on a line
 
-On Files changed, press `c` for comment mode. It shows the selected file's diff with line numbers.
+On Files changed, press `S` to select lines. It shows the selected file's diff with line numbers.
 
 1. Move to a line with `j` and `k`. Press `V` to mark a range.
 2. Press `Enter`, write the comment, and press `ctrl+s` to save it.

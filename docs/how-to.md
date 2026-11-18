@@ -56,7 +56,7 @@ Note: the list replaces the default one, so copy the defaults in too if you want
 
 ## Review a pull request
 
-1. On Files changed, press `c` on a file. Move with `j`/`k`, press `V` for a range, and `Enter` to write a comment. `ctrl+s` saves it to your pending review.
+1. On Files changed, press `S` on a file to select lines. Move with `j`/`k`, press `V` for a range, and `Enter` to write a comment. `ctrl+s` saves it to your pending review.
 2. Press `R`, pick Comment, Approve or Request changes with `Tab`, write a summary, and press `ctrl+s`, then `y`.
 
 To throw away the pending review and its line comments instead, press `X`, then `y`.
@@ -73,7 +73,7 @@ Press `s` on any pull request tab. It searches every file in the repository at t
 
 ## Copy text
 
-- On Files changed, `y` copies the selected file's path. In comment mode (`c`), `y` copies the line or the `V` range as a Markdown diff snippet with its path and line numbers. See [Keys](keys.md#copy-lines).
+- On Files changed, `y` copies the selected file's path. In select lines (`S`), `y` copies the line or the `V` range as a Markdown diff snippet with its path and line numbers. See [Keys](keys.md#copy-lines).
 - In a review or comment box, `ctrl+c` copies the selection, or all the text when nothing is selected. Inside tmux, add `set -g set-clipboard on` to `~/.tmux.conf`.
 - Anywhere else, hold your terminal's bypass modifier while you select with the mouse: Shift in most terminals, Option or Fn in some. revu captures the mouse, so a plain drag does not select.
 

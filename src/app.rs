@@ -93,7 +93,7 @@ pub enum Action {
         pr: PrRef,
         pending_review: String,
     },
-    /// Read one file's plain diff for comment mode.
+    /// Read one file's plain diff for select lines.
     LineDiff(DiffJob),
     /// Load the repo's labels for the label menu.
     FetchLabels {
@@ -333,7 +333,7 @@ pub struct DetailView {
     /// The PR's changed words for the find prompt to complete; None until git returns.
     pub find_words: Option<Vec<String>>,
     find_words_requested: bool,
-    /// Comment mode on Files changed: a line cursor over the file's plain diff.
+    /// Select lines on Files changed: a line cursor over the file's plain diff.
     pub line_mode: Option<LineMode>,
     /// The repo's labels, loaded the first time the label menu opens on this PR.
     pub repo_labels: Option<Vec<RepoLabel>>,
@@ -500,7 +500,7 @@ impl DetailView {
     }
 
     /// The clone folder and the PR's head commit, once the clone is ready.
-    /// c on Files changed: comment mode for the selected file.
+    /// S on Files changed: select lines in the selected file.
     fn start_line_mode(&mut self) -> Result<Action, String> {
         let RepoState::Ready(repo) = &self.repo else {
             return Err(self.clone_not_ready("the local clone is not ready yet"));
@@ -1063,7 +1063,7 @@ impl DetailView {
     }
 
     /// The PR's Files changed page, at the selected file, and at the cursor's line in
-    /// comment mode. GitHub names each file's anchor by the SHA-256 of its path, and a
+    /// select lines. GitHub names each file's anchor by the SHA-256 of its path, and a
     /// line by L (old side) or R (new side) and its number.
     fn files_link(&self) -> String {
         let page = format!("{}/files", self.pr.url());
@@ -1478,7 +1478,7 @@ fn comment_only_reason(detail: &PrDetail) -> Option<&'static str> {
     }
 }
 
-/// Comment mode's state: the file's numbered rows, the cursor, and a range's other end.
+/// Select lines' state: the file's numbered rows, the cursor, and a range's other end.
 #[derive(Debug)]
 pub struct LineMode {
     pub path: String,
@@ -2571,7 +2571,7 @@ impl App {
         }
     }
 
-    /// Comment mode: j/k move, V starts or ends a range, enter writes the comment, and
+    /// Select lines: j/k move, V starts or ends a range, enter writes the comment, and
     /// esc or c goes back to the diff.
     fn line_mode_key(&mut self, key: KeyCode) -> Option<Action> {
         let Screen::Detail(view) = &mut self.screen else {
@@ -2589,7 +2589,7 @@ impl App {
                     None => Some(mode.cursor),
                 }
             }
-            KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('q') => view.line_mode = None,
+            KeyCode::Esc | KeyCode::Char('S') | KeyCode::Char('q') => view.line_mode = None,
             KeyCode::Char('o') => return Some(Action::OpenBrowser(view.link())),
             KeyCode::Char('y') => {
                 let Some(Ok(rows)) = &mode.rows else {
@@ -2616,12 +2616,12 @@ impl App {
         None
     }
 
-    /// Enter in comment mode: a box for the line, or the range V marked.
+    /// Enter in select lines: a box for the line, or the range V marked.
     fn open_line_comment(&mut self) -> Result<(), String> {
         let Screen::Detail(view) = &self.screen else {
             return Ok(());
         };
-        let mode = view.line_mode.as_ref().ok_or("not in comment mode")?;
+        let mode = view.line_mode.as_ref().ok_or("not selecting lines")?;
         let target = mode.target()?;
         let (Some(Ok(detail)), Some(Ok(activity))) = (&view.detail, &view.activity) else {
             return Err("wait for the PR to load before commenting".to_string());
@@ -2851,7 +2851,7 @@ impl App {
             return self.line_mode_key(key);
         }
         match key {
-            KeyCode::Char('c') if view.tab == Tab::Files => {
+            KeyCode::Char('S') if view.tab == Tab::Files => {
                 let result = view.start_line_mode();
                 return self.report(result.map(Some));
             }
@@ -4004,11 +4004,30 @@ mod tests {
             "{action:?}"
         );
         assert_eq!(app.saved.as_deref(), Some("copied a.rs:1-2 (3 lines)"));
-        assert!(view(&app).line_mode.is_some(), "comment mode stays open");
+        assert!(view(&app).line_mode.is_some(), "select lines stays open");
     }
 
     #[test]
-    fn the_wheel_moves_the_cursor_in_comment_mode() {
+    fn capital_s_opens_and_closes_select_lines_and_c_does_not() {
+        let (mut app, pr) = files_tab(vec![file("a.rs", ViewedState::Unviewed)]);
+        let clone = LocalRepo {
+            dir: PathBuf::from("/clone"),
+            renames: HashMap::new(),
+        };
+        app.set_repo(&pr, Ok(clone));
+        view_mut(&mut app).tree_view = false;
+        view_mut(&mut app).diff_width = 80;
+        view_mut(&mut app).file_state.select(Some(0));
+        app.handle_key(key(KeyCode::Char('c')));
+        assert!(view(&app).line_mode.is_none(), "c no longer opens it");
+        app.handle_key(key(KeyCode::Char('S')));
+        assert!(view(&app).line_mode.is_some(), "{:?}", app.error);
+        app.handle_key(key(KeyCode::Char('S')));
+        assert!(view(&app).line_mode.is_none(), "S closes it again");
+    }
+
+    #[test]
+    fn the_wheel_moves_the_cursor_in_select_lines() {
         let (mut app, _) = files_tab(vec![file("a.rs", ViewedState::Unviewed)]);
         let diff = "@@ -1,6 +1,6 @@\n a\n b\n c\n d\n e\n f\n";
         view_mut(&mut app).line_mode = Some(LineMode {

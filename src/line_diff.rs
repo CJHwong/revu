@@ -1,6 +1,6 @@
 //! One file's diff as rows that know their line numbers, so a row on screen maps to the
 //! side and line a GitHub line comment takes. Renderers such as delta and difftastic
-//! draw lines their own way, so comment mode reads the plain diff instead.
+//! draw lines their own way, so select lines reads the plain diff instead.
 
 use crate::model::Side;
 

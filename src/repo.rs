@@ -448,7 +448,7 @@ pub fn files_with_text(
 /// The words of the PR's changed lines, the most used first, for the find prompt to
 /// complete. Words shorter than four characters are left out; they type faster than
 /// they complete.
-/// One file's plain diff, which comment mode turns into numbered rows.
+/// One file's plain diff, which select lines turns into numbered rows.
 pub fn file_diff(dir: &Path, base: &str, head: &str, paths: &[String]) -> Result<String> {
     let range = format!("{base}...{head}");
     let mut args = vec!["diff", "--no-color", "--no-ext-diff", range.as_str(), "--"];

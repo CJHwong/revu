@@ -11,7 +11,7 @@ revu reads by default. It writes only when you press a key that asks it to:
 | Key | What it writes |
 |---|---|
 | `R` | A review: Comment, Approve or Request changes, with your pending line comments |
-| `c` | A line comment in your pending review, which only you see until you submit it |
+| `S`, then `Enter` | A line comment in your pending review, which only you see until you submit it |
 | `X` | Deletes your pending review and its line comments |
 | `e` | Adds or removes labels |
 | `v` | The Viewed checkbox on a file |

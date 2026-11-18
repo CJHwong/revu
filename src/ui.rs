@@ -181,7 +181,9 @@ fn composer_header(composer: &Composer, paint: Paint) -> (String, Vec<Line<'stat
             let note = format!("  {}", comment_only.unwrap_or("tab switches"));
             choice.push(paint.span(note, theme.muted));
             let drafts = match drafts {
-                0 => " no line comments; c in Files changed adds them".to_string(),
+                0 => {
+                    " no line comments; S in Files changed selects lines to comment on".to_string()
+                }
                 1 => " 1 line comment from your pending review goes with it".to_string(),
                 count => format!(" {count} line comments from your pending review go with it"),
             };
@@ -521,18 +523,18 @@ fn detail_hints(view: &DetailView) -> Hints {
             ("h", "back"),
         ],
         Tab::Files => &[
-            ("j/k", "file"),
-            ("enter", "full file"),
             ("v", "viewed"),
-            ("]", "next unviewed"),
+            ("]", "next"),
+            ("S", "select lines"),
+            ("y", "copy path"),
+            ("enter", "full file"),
             ("/", "find"),
-            ("s", "search repo"),
-            ("c", "comment"),
+            ("s", "search"),
             ("R", "review"),
-            ("m", "renderer"),
+            ("m", "view"),
+            ("o", "browser"),
             ("t", "tree"),
             ("z", "list"),
-            ("h", "back"),
         ],
     }
 }
@@ -639,11 +641,11 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
             ("y", "copy the file's or folder's path"),
             (
                 "o",
-                "open GitHub's diff at the file, or at the line in comment mode",
+                "open GitHub's diff at the file, or at the line in select lines",
             ),
             (
-                "c",
-                "comment mode: j/k pick a line, V a range, enter writes a comment into your pending review, y copies the lines with their path as a Markdown diff",
+                "S",
+                "select lines: j/k or the wheel pick a line, V a range; enter comments in your pending review, y copies them as a Markdown diff, o opens them on GitHub",
             ),
         ],
     ),
@@ -1289,7 +1291,7 @@ fn render_gh_problem(
     );
 }
 
-/// Comment mode: the file's plain diff with old and new line numbers, the cursor and
+/// Select lines: the file's plain diff with old and new line numbers, the cursor and
 /// the range V marked, and a dot on lines your pending review already comments on.
 fn render_line_mode(frame: &mut Frame, view: &mut DetailView, area: Rect, paint: Paint) {
     let theme = paint.theme;
@@ -1314,7 +1316,7 @@ fn render_line_mode(frame: &mut Frame, view: &mut DetailView, area: Rect, paint:
     let block = Block::new()
         .borders(Borders::LEFT)
         .border_style(Style::new().fg(theme.accent))
-        .title(paint.bold(" comment mode ", theme.accent))
+        .title(paint.bold(" select lines ", theme.accent))
         .title(paint.bold(
             format!(
                 " {} ",
