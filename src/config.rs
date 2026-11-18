@@ -215,6 +215,36 @@ pub fn load_prefs(path: &Path) -> Result<ViewPrefs> {
     serde_yaml::from_str(&text).with_context(|| format!("parse {}", path.display()))
 }
 
+/// The file's toggles with only the ones this revu changed, from `before` to `after`,
+/// laid over them. Another revu may have saved other toggles since this one loaded the
+/// file, and writing all of ours would undo them.
+pub fn changed_prefs(on_disk: &ViewPrefs, before: &ViewPrefs, after: &ViewPrefs) -> ViewPrefs {
+    fn pick<T: PartialEq + Clone>(disk: &T, before: &T, after: &T) -> T {
+        if after == before { disk } else { after }.clone()
+    }
+    ViewPrefs {
+        newest_first: pick(
+            &on_disk.newest_first,
+            &before.newest_first,
+            &after.newest_first,
+        ),
+        no_bots: pick(&on_disk.no_bots, &before.no_bots, &after.no_bots),
+        diff_wrap: pick(&on_disk.diff_wrap, &before.diff_wrap, &after.diff_wrap),
+        renderer: pick(&on_disk.renderer, &before.renderer, &after.renderer),
+        tree_view: pick(&on_disk.tree_view, &before.tree_view, &after.tree_view),
+        hide_viewed: pick(
+            &on_disk.hide_viewed,
+            &before.hide_viewed,
+            &after.hide_viewed,
+        ),
+        file_list_hidden: pick(
+            &on_disk.file_list_hidden,
+            &before.file_list_hidden,
+            &after.file_list_hidden,
+        ),
+    }
+}
+
 pub fn save_prefs(path: &Path, prefs: &ViewPrefs) -> Result<()> {
     let text = format!(
         "# Written by revu when you change a view toggle.\n{}",
@@ -414,6 +444,29 @@ mod tests {
             "open_diff: x\ngroups: []\nworkspace_dir: [\"~/C\"]\n# keep me\ntheme: dracula\n"
         );
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_save_keeps_toggles_another_revu_changed_since_this_one_loaded() {
+        let loaded = ViewPrefs::default();
+        // Another revu switched the renderer after this one started.
+        let on_disk = ViewPrefs {
+            renderer: Some("delta".to_string()),
+            ..loaded.clone()
+        };
+        // This one only hid the bots.
+        let changed = ViewPrefs {
+            no_bots: true,
+            ..loaded.clone()
+        };
+        assert_eq!(
+            changed_prefs(&on_disk, &loaded, &changed),
+            ViewPrefs {
+                no_bots: true,
+                renderer: Some("delta".to_string()),
+                ..loaded
+            }
+        );
     }
 
     #[test]

@@ -224,13 +224,18 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App, session: &mut Session) -> 
     }
 }
 
-/// Saves the open PR's view toggles when they changed, so the next start keeps them.
+/// Saves the view toggles changed in the open PR, so the next start keeps them. Only
+/// the changed ones: another revu may have saved the others since this one started.
 fn save_prefs(app: &mut App, session: &Session) {
+    let before = app.prefs.clone();
     if !app.sync_prefs() {
         return;
     }
     let path = config::prefs_path(&session.config_path);
-    if let Err(error) = config::save_prefs(&path, &app.prefs) {
+    let saved = config::load_prefs(&path)
+        .map(|on_disk| config::changed_prefs(&on_disk, &before, &app.prefs))
+        .and_then(|prefs| config::save_prefs(&path, &prefs));
+    if let Err(error) = saved {
         app.error = Some(format!("view toggles not saved: {error:#}"));
     }
 }
