@@ -344,6 +344,69 @@ impl Verdict {
     }
 }
 
+/// How GitHub merges a PR into its base, in the order GitHub lists them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+impl MergeMethod {
+    pub const ALL: [MergeMethod; 3] =
+        [MergeMethod::Merge, MergeMethod::Squash, MergeMethod::Rebase];
+
+    pub fn graphql(self) -> &'static str {
+        match self {
+            MergeMethod::Merge => "MERGE",
+            MergeMethod::Squash => "SQUASH",
+            MergeMethod::Rebase => "REBASE",
+        }
+    }
+
+    fn from_graphql(name: &str) -> Option<MergeMethod> {
+        MergeMethod::ALL
+            .into_iter()
+            .find(|method| method.graphql() == name)
+    }
+
+    /// GitHub's name for the method in its merge menu.
+    pub fn title(self) -> &'static str {
+        match self {
+            MergeMethod::Merge => "Create a merge commit",
+            MergeMethod::Squash => "Squash and merge",
+            MergeMethod::Rebase => "Rebase and merge",
+        }
+    }
+}
+
+/// A merge write to GitHub.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeRequest {
+    /// Merge now. Past branch protection too, when you are an admin.
+    Now(MergeMethod),
+    /// Let GitHub merge once the requirements pass.
+    Auto(MergeMethod),
+    DisableAuto,
+}
+
+/// What the repo and GitHub allow you to do to merge this PR.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MergeOptions {
+    /// The methods the repo allows, in GitHub's order.
+    pub methods: Vec<MergeMethod>,
+    /// The method GitHub checks first for you: your last one, or the repo's.
+    pub default_method: Option<MergeMethod>,
+    /// You can push to the repo, which GitHub requires to merge.
+    pub can_write: bool,
+    pub can_enable_auto_merge: bool,
+    pub can_disable_auto_merge: bool,
+    /// You can merge past branch protection, as an admin.
+    pub can_bypass: bool,
+    /// The method auto-merge will use, when it is on.
+    pub auto_merge: Option<MergeMethod>,
+}
+
 #[derive(Debug, Clone)]
 pub struct PrDetail {
     /// GraphQL node id, which the viewed-file mutations take.
@@ -370,6 +433,7 @@ pub struct PrDetail {
     pub lifecycle: Lifecycle,
     /// You opened this PR, so GitHub refuses your Approve and Request changes.
     pub viewer_is_author: bool,
+    pub merge: MergeOptions,
 }
 
 /// Where the PR is in its life, as GitHub's state pill shows it.
@@ -568,6 +632,30 @@ struct RawDetail {
     merged_at: Option<DateTime<Utc>>,
     merged_by: Option<Login>,
     closed_at: Option<DateTime<Utc>>,
+    base_repository: Option<RawMergeRepo>,
+    #[serde(default)]
+    viewer_can_merge_as_admin: bool,
+    #[serde(default)]
+    viewer_can_enable_auto_merge: bool,
+    #[serde(default)]
+    viewer_can_disable_auto_merge: bool,
+    auto_merge_request: Option<RawAutoMerge>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawMergeRepo {
+    viewer_permission: Option<String>,
+    merge_commit_allowed: bool,
+    squash_merge_allowed: bool,
+    rebase_merge_allowed: bool,
+    viewer_default_merge_method: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawAutoMerge {
+    merge_method: String,
 }
 
 #[derive(Deserialize)]
@@ -846,6 +934,7 @@ pub fn parse_group(search: &Value, config: &GroupConfig) -> Result<Group> {
 pub fn parse_detail(pull_request: &Value) -> Result<PrDetail> {
     let raw: RawDetail =
         serde_json::from_value(pull_request.clone()).context("parse pull request")?;
+    let merge = merge_options(&raw);
     let reviewers = reviewers_from(
         &raw.review_requests,
         &raw.latest_opinionated_reviews,
@@ -873,6 +962,7 @@ pub fn parse_detail(pull_request: &Value) -> Result<PrDetail> {
         _ => Lifecycle::Open,
     };
     Ok(PrDetail {
+        merge,
         viewer_is_author: raw.viewer_did_author,
         lifecycle,
         merge_state: raw.merge_state_status.unwrap_or_default(),
@@ -905,6 +995,38 @@ pub fn parse_detail(pull_request: &Value) -> Result<PrDetail> {
             .collect(),
         reviewers,
     })
+}
+
+fn merge_options(raw: &RawDetail) -> MergeOptions {
+    let Some(repo) = &raw.base_repository else {
+        return MergeOptions::default();
+    };
+    let allowed = [
+        repo.merge_commit_allowed,
+        repo.squash_merge_allowed,
+        repo.rebase_merge_allowed,
+    ];
+    let methods = MergeMethod::ALL
+        .into_iter()
+        .zip(allowed)
+        .filter_map(|(method, allowed)| allowed.then_some(method))
+        .collect();
+    let permission = repo.viewer_permission.as_deref();
+    MergeOptions {
+        methods,
+        default_method: repo
+            .viewer_default_merge_method
+            .as_deref()
+            .and_then(MergeMethod::from_graphql),
+        can_write: matches!(permission, Some("WRITE" | "MAINTAIN" | "ADMIN")),
+        can_enable_auto_merge: raw.viewer_can_enable_auto_merge,
+        can_disable_auto_merge: raw.viewer_can_disable_auto_merge,
+        can_bypass: raw.viewer_can_merge_as_admin,
+        auto_merge: raw
+            .auto_merge_request
+            .as_ref()
+            .and_then(|request| MergeMethod::from_graphql(&request.merge_method)),
+    }
 }
 
 /// The `last:` count in the activity query's `timelineItems`.
@@ -1622,6 +1744,41 @@ pub mod tests {
             { "id": "T2", "comments": { "nodes": [{ "diffHunk":
                 "@@ -8,5 +8,6 @@ intro\n eight\n nine\n-old ten\n+new ten\n+new eleven\n twelve" }] } },
         ]}})
+    }
+
+    #[test]
+    fn merge_options_read_the_repo_settings_and_your_rights() {
+        let mut detail = detail_fixture();
+        assert_eq!(
+            parse_detail(&detail).unwrap().merge,
+            MergeOptions::default(),
+            "no repo settings, nothing offered"
+        );
+        detail["baseRepository"] = json!({
+            "viewerPermission": "MAINTAIN",
+            "mergeCommitAllowed": false,
+            "squashMergeAllowed": true,
+            "rebaseMergeAllowed": true,
+            "viewerDefaultMergeMethod": "REBASE",
+        });
+        detail["viewerCanMergeAsAdmin"] = json!(true);
+        detail["viewerCanDisableAutoMerge"] = json!(true);
+        detail["autoMergeRequest"] = json!({ "mergeMethod": "SQUASH" });
+        let merge = parse_detail(&detail).unwrap().merge;
+        assert_eq!(
+            merge,
+            MergeOptions {
+                methods: vec![MergeMethod::Squash, MergeMethod::Rebase],
+                default_method: Some(MergeMethod::Rebase),
+                can_write: true,
+                can_enable_auto_merge: false,
+                can_disable_auto_merge: true,
+                can_bypass: true,
+                auto_merge: Some(MergeMethod::Squash),
+            }
+        );
+        detail["baseRepository"]["viewerPermission"] = json!("READ");
+        assert!(!parse_detail(&detail).unwrap().merge.can_write);
     }
 
     fn detail_fixture() -> Value {

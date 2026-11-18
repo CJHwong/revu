@@ -495,6 +495,14 @@ fn perform(
         } => start_write(session, pr, move || {
             github::set_labels(&pull_request_id, &add, &remove)
         }),
+        Action::Merge {
+            pr,
+            pull_request_id,
+            head_oid,
+            request,
+        } => start_write(session, pr, move || {
+            github::merge(&pull_request_id, &head_oid, request)
+        }),
         Action::DiscardReview { pr, pending_review } => {
             start_write(session, pr, move || github::discard_review(&pending_review))
         }

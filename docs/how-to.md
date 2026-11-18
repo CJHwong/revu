@@ -63,6 +63,13 @@ To throw away the pending review and its line comments instead, press `X`, then 
 
 On your own pull request, and on one that is merged or closed, the review takes only Comment.
 
+## Merge a pull request
+
+1. Press `M` on any tab of the pull request.
+2. Pick Create a merge commit, Squash and merge or Rebase and merge with `j`/`k`, and press `Enter`, then `y`.
+
+If GitHub blocks the merge, for a missing approval or a check, the same steps turn on auto-merge, so GitHub merges it once the requirements pass. An admin can tick Bypass requirements first to merge at once. Press `M` again to turn auto-merge off.
+
 ## Change labels
 
 On the Overview, press `e`. Type to filter, `Space` ticks or unticks, and `Enter` applies the change to GitHub.

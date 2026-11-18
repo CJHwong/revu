@@ -16,8 +16,8 @@ use crate::repo::{GrepHit, LocalRepo};
 
 use crate::config::{GroupConfig, ViewPrefs};
 use crate::model::{
-    ChangedFile, Group, HunkLine, Lifecycle, PrActivity, PrDetail, PrRef, PrSummary, Side, Verdict,
-    ViewedState, parse_pr_ref,
+    ChangedFile, Group, HunkLine, Lifecycle, MergeMethod, MergeRequest, PrActivity, PrDetail,
+    PrRef, PrSummary, Side, Verdict, ViewedState, parse_pr_ref,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +87,13 @@ pub enum Action {
         pending_review: Option<String>,
         target: LineTarget,
         body: String,
+    },
+    /// Merge the PR, or turn auto-merge on or off.
+    Merge {
+        pr: PrRef,
+        pull_request_id: String,
+        head_oid: String,
+        request: MergeRequest,
     },
     /// Delete the pending review and its line comments.
     DiscardReview {
@@ -1356,6 +1363,15 @@ pub enum PromptKind {
         pr: PrRef,
         pending_review: String,
     },
+    /// Asks before a merge write, which cannot be undone.
+    ConfirmMerge {
+        pr: PrRef,
+        pull_request_id: String,
+        head_oid: String,
+        request: MergeRequest,
+        base: String,
+        bypass: bool,
+    },
     /// Asks before cloning the PR's repo into this folder.
     ConfirmClone {
         pr: PrRef,
@@ -1373,6 +1389,14 @@ impl Action {
                 "comment added to your pending review; R submits it",
             ),
             Action::SetLabels { .. } => ("saving labels to GitHub...", "labels saved"),
+            Action::Merge { request, .. } => match request {
+                MergeRequest::Now(_) => ("merging on GitHub...", "merged"),
+                MergeRequest::Auto(_) => (
+                    "turning auto-merge on...",
+                    "auto-merge on; GitHub merges it once the requirements pass",
+                ),
+                MergeRequest::DisableAuto => ("turning auto-merge off...", "auto-merge off"),
+            },
             Action::DiscardReview { .. } => (
                 "discarding your pending review...",
                 "pending review discarded",
@@ -1476,6 +1500,141 @@ fn comment_only_reason(detail: &PrDetail) -> Option<&'static str> {
         _ if detail.viewer_is_author => Some("GitHub takes only Comment on your own PR"),
         _ => None,
     }
+}
+
+/// A row of the merge menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeItem {
+    Method(MergeMethod),
+    /// Ticks merging now past branch protection, for an admin.
+    Bypass,
+    DisableAuto,
+}
+
+/// The merge menu: GitHub's merge button and its dropdown.
+#[derive(Debug)]
+pub struct MergeMenu {
+    pub pr: PrRef,
+    pub pull_request_id: String,
+    pub head_oid: String,
+    pub base: String,
+    pub commit_count: u64,
+    pub items: Vec<MergeItem>,
+    pub default_method: Option<MergeMethod>,
+    /// The PR can merge now; otherwise a method turns auto-merge on.
+    pub ready: bool,
+    pub can_auto_merge: bool,
+    /// Bypass requirements is ticked.
+    pub bypass: bool,
+    pub selected: usize,
+    /// Why Enter did nothing, such as a blocked merge with no way past it.
+    pub note: Option<&'static str>,
+}
+
+impl MergeMenu {
+    /// The menu for the PR, or why GitHub would not merge it from here.
+    pub fn new(pr: &PrRef, detail: &PrDetail) -> Result<MergeMenu, String> {
+        let items = merge_items(detail)?;
+        let merge = &detail.merge;
+        let selected = items
+            .iter()
+            .position(|item| {
+                merge
+                    .default_method
+                    .is_some_and(|method| item == &MergeItem::Method(method))
+            })
+            .unwrap_or(0);
+        Ok(MergeMenu {
+            pr: pr.clone(),
+            pull_request_id: detail.id.clone(),
+            head_oid: detail.head_oid.clone(),
+            base: detail.base.clone(),
+            commit_count: detail.commit_count,
+            items,
+            default_method: merge.default_method,
+            ready: merges_now(detail),
+            can_auto_merge: merge.can_enable_auto_merge,
+            bypass: false,
+            selected,
+            note: None,
+        })
+    }
+
+    /// What Enter on the selected row asks to send, if anything.
+    fn request(&self) -> Result<(MergeRequest, bool), &'static str> {
+        let method = match self.items[self.selected] {
+            MergeItem::Method(method) => method,
+            MergeItem::DisableAuto => return Ok((MergeRequest::DisableAuto, false)),
+            MergeItem::Bypass => return Err("enter ticks bypass"),
+        };
+        if self.bypass {
+            return Ok((MergeRequest::Now(method), true));
+        }
+        if self.ready {
+            return Ok((MergeRequest::Now(method), false));
+        }
+        if self.can_auto_merge {
+            return Ok((MergeRequest::Auto(method), false));
+        }
+        Err("GitHub blocks the merge; tick Bypass requirements to merge anyway")
+    }
+}
+
+/// Whether GitHub would merge the PR now, as its green merge button says.
+fn merges_now(detail: &PrDetail) -> bool {
+    matches!(
+        detail.merge_state.as_str(),
+        "CLEAN" | "HAS_HOOKS" | "UNSTABLE"
+    )
+}
+
+/// The merge menu's rows, as GitHub's merge box offers them, or why there are none.
+fn merge_items(detail: &PrDetail) -> Result<Vec<MergeItem>, String> {
+    let merge = &detail.merge;
+    match detail.lifecycle {
+        Lifecycle::Merged { .. } => return Err("the PR is merged already".to_string()),
+        Lifecycle::Closed { .. } => return Err("the PR is closed".to_string()),
+        Lifecycle::Draft => {
+            return Err("the PR is a draft; mark it ready for review first".to_string());
+        }
+        Lifecycle::Open => {}
+    }
+    if merge.auto_merge.is_some() {
+        if merge.can_disable_auto_merge {
+            return Ok(vec![MergeItem::DisableAuto]);
+        }
+        return Err("auto-merge is on; GitHub merges it once the requirements pass".to_string());
+    }
+    if !merge.can_write && !merge.can_bypass {
+        return Err("you cannot merge in this repo".to_string());
+    }
+    // GitHub checks again after every push to either branch, and its merge button
+    // waits until it knows.
+    if matches!(detail.merge_state.as_str(), "UNKNOWN" | "") {
+        return Err(
+            "GitHub is still checking whether it can merge; r fetches it again".to_string(),
+        );
+    }
+    if detail.merge_state == "DIRTY" {
+        return Err("the branch has conflicts; resolve them before it can merge".to_string());
+    }
+    if merge.methods.is_empty() {
+        return Err("GitHub reports no merge method for this repo".to_string());
+    }
+    let ready = merges_now(detail);
+    if !ready && !merge.can_enable_auto_merge && !merge.can_bypass {
+        return Err("GitHub blocks the merge, and auto-merge is off for this repo".to_string());
+    }
+    let mut items: Vec<MergeItem> = merge
+        .methods
+        .iter()
+        .copied()
+        .map(MergeItem::Method)
+        .collect();
+    if !ready && merge.can_bypass {
+        items.push(MergeItem::Bypass);
+    }
+    Ok(items)
 }
 
 /// Select lines' state: the file's numbered rows, the cursor, and a range's other end.
@@ -1741,6 +1900,8 @@ pub struct App {
     pub composer: Option<Composer>,
     /// The label checklist, while it is open.
     pub label_menu: Option<LabelMenu>,
+    /// The merge menu, while it is open.
+    pub merge_menu: Option<MergeMenu>,
     /// Renderers whose command is not installed; m skips them.
     pub missing_renderers: HashSet<usize>,
     /// A warning for the diff footer, such as a renderer that is not installed.
@@ -1800,6 +1961,7 @@ impl App {
             theme_menu: None,
             composer: None,
             label_menu: None,
+            merge_menu: None,
             missing_renderers: HashSet::new(),
             notice: None,
             notice_seen: false,
@@ -2319,6 +2481,10 @@ impl App {
         if self.label_menu.is_some() {
             return self.label_menu_key(key.code);
         }
+        if self.merge_menu.is_some() {
+            self.merge_menu_key(key.code);
+            return None;
+        }
         if self.prompt.is_some() {
             return self.prompt_key(key.code);
         }
@@ -2507,6 +2673,22 @@ impl App {
                 .trim()
                 .eq_ignore_ascii_case("y")
                 .then_some(Action::DiscardReview { pr, pending_review }),
+            PromptKind::ConfirmMerge {
+                pr,
+                pull_request_id,
+                head_oid,
+                request,
+                ..
+            } => prompt
+                .text
+                .trim()
+                .eq_ignore_ascii_case("y")
+                .then_some(Action::Merge {
+                    pr,
+                    pull_request_id,
+                    head_oid,
+                    request,
+                }),
         }
     }
 
@@ -2735,6 +2917,52 @@ impl App {
         Ok(())
     }
 
+    /// M: opens the merge menu, or says why the PR cannot merge from here.
+    fn open_merge_menu(&mut self) -> Result<(), String> {
+        let Screen::Detail(view) = &self.screen else {
+            return Ok(());
+        };
+        let Some(Ok(detail)) = &view.detail else {
+            return Err("the pull request is still loading".to_string());
+        };
+        self.merge_menu = Some(MergeMenu::new(&view.pr, detail)?);
+        Ok(())
+    }
+
+    fn merge_menu_key(&mut self, key: KeyCode) {
+        let Some(menu) = self.merge_menu.as_mut() else {
+            return;
+        };
+        let count = menu.items.len();
+        match key {
+            KeyCode::Char('j') | KeyCode::Down => menu.selected = (menu.selected + 1) % count,
+            KeyCode::Char('k') | KeyCode::Up => menu.selected = (menu.selected + count - 1) % count,
+            KeyCode::Esc | KeyCode::Char('q') => self.merge_menu = None,
+            KeyCode::Enter | KeyCode::Char(' ')
+                if menu.items[menu.selected] == MergeItem::Bypass =>
+            {
+                menu.bypass = !menu.bypass;
+                menu.note = None;
+            }
+            KeyCode::Enter => match menu.request() {
+                Ok((request, bypass)) => {
+                    let kind = PromptKind::ConfirmMerge {
+                        pr: menu.pr.clone(),
+                        pull_request_id: menu.pull_request_id.clone(),
+                        head_oid: menu.head_oid.clone(),
+                        request,
+                        base: menu.base.clone(),
+                        bypass,
+                    };
+                    self.merge_menu = None;
+                    self.ask(kind, "");
+                }
+                Err(note) => menu.note = Some(note),
+            },
+            _ => {}
+        }
+    }
+
     /// X: asks before deleting the pending review.
     fn ask_discard(&mut self) -> Result<(), String> {
         let Screen::Detail(view) = &self.screen else {
@@ -2865,6 +3093,10 @@ impl App {
             }
             KeyCode::Char('X') => {
                 let result = self.ask_discard();
+                self.error = result.err();
+            }
+            KeyCode::Char('M') => {
+                let result = self.open_merge_menu();
                 self.error = result.err();
             }
             KeyCode::Char('e') if view.tab == Tab::Overview => return self.open_label_menu(),
@@ -4174,6 +4406,156 @@ mod tests {
     }
 
     /// An open PR with its detail loaded and the Files tab showing.
+    fn mergeable(state: &str) -> PrDetail {
+        let mut detail = crate::model::tests::sample_detail();
+        detail.merge_state = state.to_string();
+        detail.merge = crate::model::MergeOptions {
+            methods: vec![MergeMethod::Squash, MergeMethod::Rebase],
+            default_method: Some(MergeMethod::Rebase),
+            can_write: true,
+            ..Default::default()
+        };
+        detail
+    }
+
+    #[test]
+    fn the_merge_menu_offers_what_github_would() {
+        let items = |detail: &PrDetail| merge_items(detail);
+        let methods = vec![
+            MergeItem::Method(MergeMethod::Squash),
+            MergeItem::Method(MergeMethod::Rebase),
+        ];
+        assert_eq!(items(&mergeable("CLEAN")), Ok(methods.clone()));
+        assert_eq!(items(&mergeable("UNSTABLE")), Ok(methods.clone()));
+        let blocked = mergeable("BLOCKED");
+        assert!(items(&blocked).unwrap_err().contains("auto-merge is off"));
+        let mut auto = mergeable("BLOCKED");
+        auto.merge.can_enable_auto_merge = true;
+        assert_eq!(items(&auto), Ok(methods.clone()));
+        let mut admin = mergeable("BEHIND");
+        admin.merge.can_bypass = true;
+        let mut with_bypass = methods.clone();
+        with_bypass.push(MergeItem::Bypass);
+        assert_eq!(items(&admin), Ok(with_bypass));
+        let mut on = mergeable("BLOCKED");
+        on.merge.auto_merge = Some(MergeMethod::Squash);
+        assert!(items(&on).unwrap_err().contains("auto-merge is on"));
+        on.merge.can_disable_auto_merge = true;
+        assert_eq!(items(&on), Ok(vec![MergeItem::DisableAuto]));
+        let mut reader = mergeable("CLEAN");
+        reader.merge.can_write = false;
+        assert!(items(&reader).unwrap_err().contains("cannot merge"));
+        assert!(
+            items(&mergeable("DIRTY"))
+                .unwrap_err()
+                .contains("conflicts")
+        );
+        for checking in ["UNKNOWN", ""] {
+            let error = items(&mergeable(checking)).unwrap_err();
+            assert!(error.contains("still checking"), "{checking}: {error}");
+        }
+        let mut merged = mergeable("CLEAN");
+        merged.lifecycle = Lifecycle::Merged { by: None, at: None };
+        assert!(items(&merged).unwrap_err().contains("merged already"));
+        let mut draft = mergeable("CLEAN");
+        draft.lifecycle = Lifecycle::Draft;
+        assert!(items(&draft).unwrap_err().contains("draft"));
+    }
+
+    /// Opens the PR on the given detail, presses M, moves j times, Enter, then y Enter.
+    fn merge_through_menu(detail: PrDetail, keys: &[KeyCode]) -> (App, Option<Action>) {
+        let (mut app, pr) = files_tab(Vec::new());
+        app.set_detail(&pr, Ok(detail));
+        app.handle_key(key(KeyCode::Char('M')));
+        for code in keys {
+            app.handle_key(key(*code));
+        }
+        if app.prompt.is_none() {
+            return (app, None);
+        }
+        type_text(&mut app, "y");
+        let action = app.handle_key(key(KeyCode::Enter));
+        (app, action)
+    }
+
+    fn sent_request(action: Option<Action>) -> Option<MergeRequest> {
+        match action {
+            Some(Action::Merge {
+                request, head_oid, ..
+            }) => {
+                assert_eq!(head_oid, "head999", "the head you saw guards the merge");
+                Some(request)
+            }
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn m_merges_with_the_picked_method_after_a_y() {
+        let (app, action) = merge_through_menu(mergeable("CLEAN"), &[KeyCode::Enter]);
+        assert_eq!(
+            sent_request(action),
+            Some(MergeRequest::Now(MergeMethod::Rebase)),
+            "the cursor starts on GitHub's default method"
+        );
+        assert!(app.merge_menu.is_none() && app.prompt.is_none());
+        let (_, action) =
+            merge_through_menu(mergeable("CLEAN"), &[KeyCode::Char('k'), KeyCode::Enter]);
+        assert_eq!(
+            sent_request(action),
+            Some(MergeRequest::Now(MergeMethod::Squash))
+        );
+        let (app, _) = merge_through_menu(mergeable("CLEAN"), &[KeyCode::Esc]);
+        assert!(
+            app.merge_menu.is_none() && app.prompt.is_none(),
+            "esc sends nothing"
+        );
+    }
+
+    #[test]
+    fn a_blocked_merge_turns_on_auto_merge_or_bypasses_when_ticked() {
+        let mut auto = mergeable("BLOCKED");
+        auto.merge.can_enable_auto_merge = true;
+        let (_, action) = merge_through_menu(auto, &[KeyCode::Enter]);
+        assert_eq!(
+            sent_request(action),
+            Some(MergeRequest::Auto(MergeMethod::Rebase))
+        );
+
+        let mut admin = mergeable("BLOCKED");
+        admin.merge.can_bypass = true;
+        let (app, action) = merge_through_menu(admin.clone(), &[KeyCode::Enter]);
+        assert!(action.is_none(), "blocked, and bypass not ticked");
+        assert!(app.merge_menu.as_ref().unwrap().note.is_some());
+        let tick_then_merge = [
+            KeyCode::Char('j'),
+            KeyCode::Enter,
+            KeyCode::Char('k'),
+            KeyCode::Enter,
+        ];
+        let (app, action) = merge_through_menu(admin, &tick_then_merge);
+        assert_eq!(
+            sent_request(action),
+            Some(MergeRequest::Now(MergeMethod::Rebase))
+        );
+        assert!(app.merge_menu.is_none());
+
+        let mut on = mergeable("BLOCKED");
+        on.merge.auto_merge = Some(MergeMethod::Squash);
+        on.merge.can_disable_auto_merge = true;
+        let (_, action) = merge_through_menu(on, &[KeyCode::Enter]);
+        assert_eq!(sent_request(action), Some(MergeRequest::DisableAuto));
+    }
+
+    #[test]
+    fn m_on_a_pr_that_cannot_merge_says_why() {
+        let mut merged = mergeable("CLEAN");
+        merged.lifecycle = Lifecycle::Merged { by: None, at: None };
+        let (app, action) = merge_through_menu(merged, &[]);
+        assert!(action.is_none() && app.merge_menu.is_none());
+        assert_eq!(app.error.as_deref(), Some("the PR is merged already"));
+    }
+
     fn files_tab(files: Vec<ChangedFile>) -> (App, PrRef) {
         let mut app = app_with(vec![group("A", &[7], false)]);
         app.list_state.select(Some(1));

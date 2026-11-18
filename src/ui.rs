@@ -9,8 +9,9 @@ use ratatui::widgets::{
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::{
-    App, Click, ClickTarget, ComposeKind, Composer, DetailView, DiffOutput, LabelMenu, Overlay,
-    OverviewLayout, Prompt, PromptKind, RepoState, Row, SETTINGS, SaveNote, Screen, Tab,
+    App, Click, ClickTarget, ComposeKind, Composer, DetailView, DiffOutput, LabelMenu, MergeItem,
+    MergeMenu, Overlay, OverviewLayout, Prompt, PromptKind, RepoState, Row, SETTINGS, SaveNote,
+    Screen, Tab,
 };
 use crate::editor::Editor;
 use crate::file_tree::FileRow;
@@ -18,8 +19,8 @@ use crate::github::GhProblem;
 use crate::line_diff::{DiffRow, RowKind};
 use crate::model::{
     ChangedFile, CheckLine, CheckState, CheckSummary, CommitLine, Group, Label, Lifecycle,
-    PrActivity, PrDetail, PrRef, PrSummary, RateLimit, ReviewState, Reviewer, Side, SinceCounts,
-    Verdict, ViewedState,
+    MergeMethod, MergeRequest, PrActivity, PrDetail, PrRef, PrSummary, RateLimit, ReviewState,
+    Reviewer, Side, SinceCounts, Verdict, ViewedState,
 };
 use crate::repo::{GrepHit, MAX_GREP_HITS};
 use crate::theme::{ON_STATE, PrState, Theme};
@@ -81,6 +82,9 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: &Theme, now: DateTime<Utc
     }
     if let Some(menu) = &app.label_menu {
         render_label_menu(frame, menu, paint);
+    }
+    if let Some(menu) = &app.merge_menu {
+        render_merge_menu(frame, menu, paint);
     }
     if let Some(selected) = app.theme_menu {
         render_theme_menu(frame, selected, app.theme_name, paint);
@@ -611,6 +615,10 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
                 "review: Comment, Approve or Request changes, with your line comments",
             ),
             ("X", "discard your pending review and its line comments"),
+            (
+                "M",
+                "merge: pick merge commit, squash or rebase; auto-merge when blocked, or turn it off",
+            ),
         ],
     ),
     (
@@ -2251,6 +2259,12 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
             "y and enter deletes it and every line comment in it on GitHub; esc keeps it"
                 .to_string(),
         ),
+        PromptKind::ConfirmMerge {
+            request,
+            base,
+            bypass,
+            ..
+        } => merge_question(*request, base, *bypass),
         PromptKind::ConfirmClone { pr, dir } => (
             format!(" Clone {}? ", pr.repo),
             format!(
@@ -2577,6 +2591,164 @@ fn render_settings(frame: &mut Frame, app: &App, selected: usize, paint: Paint) 
         .style(Style::new().bg(theme.background).fg(theme.foreground));
     frame.render_widget(Clear, box_area);
     frame.render_widget(Paragraph::new(lines).block(block), box_area);
+}
+
+/// The confirm box's title and hint for a merge write.
+fn merge_question(request: MergeRequest, base: &str, bypass: bool) -> (String, String) {
+    let merge = |method: MergeMethod| match method {
+        MergeMethod::Merge => format!("merge into {base} with a merge commit"),
+        MergeMethod::Squash => format!("squash and merge into {base}"),
+        MergeMethod::Rebase => format!("rebase and merge into {base}"),
+    };
+    match request {
+        MergeRequest::Now(method) if bypass => (
+            " Bypass requirements and merge? ".to_string(),
+            format!(
+                "y and enter: {} now, past the branch's requirements. esc cancels",
+                merge(method)
+            ),
+        ),
+        MergeRequest::Now(method) => (
+            format!(" {}? ", capitalize(&merge(method))),
+            "y and enter merges it on GitHub; esc cancels".to_string(),
+        ),
+        MergeRequest::Auto(method) => (
+            " Enable auto-merge? ".to_string(),
+            format!(
+                "y and enter: GitHub will {} once the requirements pass. esc cancels",
+                merge(method)
+            ),
+        ),
+        MergeRequest::DisableAuto => (
+            " Disable auto-merge? ".to_string(),
+            "y and enter turns it off; the PR stays open. esc keeps it on".to_string(),
+        ),
+    }
+}
+
+fn capitalize(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
+}
+
+/// GitHub's line under a merge method, with the PR's commit count.
+fn merge_method_note(method: MergeMethod, commits: u64) -> String {
+    let these = match commits {
+        1 => "The 1 commit".to_string(),
+        count => format!("The {count} commits"),
+    };
+    match method {
+        MergeMethod::Merge => {
+            "All commits from this branch will be added to the base branch via a merge commit."
+                .to_string()
+        }
+        MergeMethod::Squash if commits == 1 => {
+            format!("{these} from this branch will be added to the base branch.")
+        }
+        MergeMethod::Squash => {
+            format!("{these} from this branch will be combined into one commit in the base branch.")
+        }
+        MergeMethod::Rebase => {
+            format!("{these} from this branch will be rebased and added to the base branch.")
+        }
+    }
+}
+
+/// The merge menu's lines: each row's title and GitHub's note under it.
+fn merge_menu_lines(menu: &MergeMenu, paint: Paint) -> Vec<Line<'static>> {
+    let theme = paint.theme;
+    let mut lines = Vec::new();
+    for (index, item) in menu.items.iter().enumerate() {
+        let (mark, title, note, color) = match *item {
+            MergeItem::Method(method) => {
+                let mark = if menu.default_method == Some(method) {
+                    "✓"
+                } else {
+                    " "
+                };
+                let note = merge_method_note(method, menu.commit_count);
+                (mark, method.title(), note, theme.foreground)
+            }
+            MergeItem::Bypass => {
+                lines.push(Line::from(""));
+                let mark = if menu.bypass { "✓" } else { " " };
+                let note =
+                    "Merge now with the selected method, without waiting for the requirements.";
+                (mark, "Bypass requirements", note.to_string(), theme.danger)
+            }
+            MergeItem::DisableAuto => {
+                let note = "GitHub stops waiting to merge it. The PR stays open.";
+                (
+                    " ",
+                    "Disable auto-merge",
+                    note.to_string(),
+                    theme.foreground,
+                )
+            }
+        };
+        let row = vec![
+            Line::from(vec![
+                paint.span(format!(" {mark} "), theme.success),
+                paint.bold(title.to_string(), color),
+            ]),
+            Line::from(paint.span(format!("   {note}"), theme.muted)),
+        ];
+        let selected = index == menu.selected;
+        lines.extend(row.into_iter().map(|line| match selected {
+            true => line.style(Style::new().bg(theme.selection)),
+            false => line,
+        }));
+    }
+    if let Some(note) = menu.note {
+        lines.push(Line::from(""));
+        lines.push(Line::from(paint.span(format!(" {note}"), theme.warning)));
+    }
+    lines
+}
+
+/// The merge menu: GitHub's merge button and its dropdown.
+fn render_merge_menu(frame: &mut Frame, menu: &MergeMenu, paint: Paint) {
+    let theme = paint.theme;
+    let lines = merge_menu_lines(menu, paint);
+    let title = match (menu.items.first(), menu.ready, menu.bypass) {
+        (Some(MergeItem::DisableAuto), ..) => " Auto-merge is on ".to_string(),
+        (_, _, true) => " Bypass requirements and merge ".to_string(),
+        (_, true, _) => format!(" Merge into {} ", menu.base),
+        (_, false, _) if menu.can_auto_merge => " Enable auto-merge ".to_string(),
+        _ => " Merging is blocked ".to_string(),
+    };
+    let area = frame.area();
+    // As wide as the longest line, so the notes wrap only on a narrow terminal.
+    let longest = lines.iter().map(Line::width).max().unwrap_or(0) + 1;
+    let width = (longest as u16 + 2).min(area.width);
+    let inner = usize::from(width.saturating_sub(2)).max(1);
+    let rows: usize = lines
+        .iter()
+        .map(|line| line.width().div_ceil(inner).max(1))
+        .sum();
+    let height = (rows as u16 + 2).min(area.height);
+    let box_area = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    };
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme.heading))
+        .title(paint.bold(title, theme.heading))
+        .title_bottom(paint.span(" j/k move, enter picks, esc ", theme.muted))
+        .style(Style::new().bg(theme.background).fg(theme.foreground));
+    frame.render_widget(Clear, box_area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(ratatui::widgets::Wrap { trim: false }),
+        box_area,
+    );
 }
 
 fn render_theme_menu(frame: &mut Frame, selected: usize, current: &str, paint: Paint) {

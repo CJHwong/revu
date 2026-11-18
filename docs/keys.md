@@ -35,6 +35,7 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 | `r` | Fetch the pull request again |
 | `R` | Review: `Tab` picks Comment, Approve or Request changes. `ctrl+s` asks to confirm and `y` sends. Your pending line comments go with it. Request changes needs a comment; Comment needs a comment or line comments. Only Comment applies on your own PR, as GitHub requires, and on a merged or closed one. |
 | `X` | Discard your pending review and every line comment in it, after a `y`. |
+| `M` | Merge: the methods the repo allows, as on GitHub, starting on your usual one. `Enter` picks one and `y` sends it. When GitHub blocks the merge, a method turns on auto-merge instead, where the repo allows it; an admin can tick Bypass requirements to merge at once. When auto-merge is on, `M` turns it off. While GitHub is still checking the PR, `r` fetches it again. |
 | `o` | Open in the browser. On Files changed, GitHub's diff opens at the selected file, and in select lines at the cursor's line. |
 | `d` | Run the `open_diff` command |
 

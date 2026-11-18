@@ -203,6 +203,15 @@ fn merge_box(context: &Context, width: usize) -> Vec<TextRow> {
     if let Some(note) = note {
         content.push(TextRow::plain(Line::from(context.span(note, theme.muted))));
     }
+    if let Some(method) = context.detail.merge.auto_merge {
+        let note = format!(
+            "Auto-merge is on: {} once the requirements pass",
+            method.title().to_lowercase()
+        );
+        content.push(TextRow::plain(Line::from(
+            context.span(note, theme.success),
+        )));
+    }
     content.extend(tally_rows(
         context,
         "Checks",

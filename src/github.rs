@@ -9,8 +9,8 @@ use std::sync::Mutex;
 
 use crate::config::GroupConfig;
 use crate::model::{
-    self, ChangedFile, Group, HunkLine, PrActivity, PrDetail, RateLimit, Side, TIMELINE_LIMIT,
-    Verdict,
+    self, ChangedFile, Group, HunkLine, MergeRequest, PrActivity, PrDetail, RateLimit, Side,
+    TIMELINE_LIMIT, Verdict,
 };
 
 /// The GraphQL budgets the responses reported, one per reset time. GitHub reports two
@@ -92,6 +92,10 @@ pub fn detail_document() -> String {
          latestReviews(first: 30) {{ nodes {{ author {{ login }} state onBehalfOf(first: 5) {{ nodes {{ name }} }} }} }} \
          mergeStateStatus milestone {{ title }} state mergedAt closedAt mergedBy {{ login }} \
          closingIssuesReferences(first: 10) {{ nodes {{ number title url }} }} \
+         viewerCanMergeAsAdmin viewerCanEnableAutoMerge viewerCanDisableAutoMerge \
+         autoMergeRequest {{ mergeMethod }} \
+         baseRepository {{ viewerPermission mergeCommitAllowed squashMergeAllowed \
+           rebaseMergeAllowed viewerDefaultMergeMethod }} \
          }} }} }}"
     )
 }
@@ -390,6 +394,33 @@ pub fn discard_review(pending_review: &str) -> Result<()> {
     let document = "mutation($review: ID!) { deletePullRequestReview(input: { \
                     pullRequestReviewId: $review }) { pullRequestReview { id } } }";
     run_graphql(&graphql_args(document, &[("review", pending_review)], &[]))?;
+    Ok(())
+}
+
+/// Merges the PR, or turns auto-merge on or off. `head_oid` is the head you saw: GitHub
+/// refuses the merge when someone pushed after it, so revu never merges unseen commits.
+pub fn merge(pull_request_id: &str, head_oid: &str, request: MergeRequest) -> Result<()> {
+    let (mutation, method) = match request {
+        MergeRequest::Now(method) => ("mergePullRequest", method),
+        MergeRequest::Auto(method) => ("enablePullRequestAutoMerge", method),
+        MergeRequest::DisableAuto => {
+            let document = "mutation($pr: ID!) { disablePullRequestAutoMerge(input: { \
+                            pullRequestId: $pr }) { clientMutationId } }";
+            run_graphql(&graphql_args(document, &[("pr", pull_request_id)], &[]))?;
+            return Ok(());
+        }
+    };
+    let document = format!(
+        "mutation($pr: ID!, $head: GitObjectID!, $method: PullRequestMergeMethod!) {{ \
+         {mutation}(input: {{ pullRequestId: $pr, expectedHeadOid: $head, \
+         mergeMethod: $method }}) {{ clientMutationId }} }}"
+    );
+    let strings = [
+        ("pr", pull_request_id),
+        ("head", head_oid),
+        ("method", method.graphql()),
+    ];
+    run_graphql(&graphql_args(&document, &strings, &[]))?;
     Ok(())
 }
 

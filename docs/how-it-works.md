@@ -13,8 +13,11 @@ revu reads by default. It writes only when you press a key that asks it to:
 | `R` | A review: Comment, Approve or Request changes, with your pending line comments |
 | `S`, then `Enter` | A line comment in your pending review, which only you see until you submit it |
 | `X` | Deletes your pending review and its line comments |
+| `M` | Merges the pull request, or turns auto-merge on or off |
 | `e` | Adds or removes labels |
 | `v` | The Viewed checkbox on a file |
+
+A merge names the head commit revu showed you. If someone pushed after that, GitHub refuses the merge with "Head branch was modified"; press `r` and look again.
 
 GitHub keeps one pending review per person per pull request, so line comments you start in the browser and in revu land in the same review.
 
