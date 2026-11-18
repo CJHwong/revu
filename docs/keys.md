@@ -51,7 +51,7 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 
 ## Files changed
 
-A file with review threads shows their count, such as `●3`, and the diff pane's title counts them, the outdated ones apart: `4 threads (3 outdated), S to read`. In select lines, each thread sits under its line, folded to its first comment; `t` on the line opens every comment. Resolved threads are muted, and outdated ones, no longer on a line of the diff, are listed at the top. The title also names the function or class the hunk at the top changes, such as `in BaseApp > on_mount`, and select lines names the one around the cursor. This works for Python, Rust, JavaScript, TypeScript and Go. The diff pane shows it when the view's hunks match git's, as in the word view and delta.
+A file with review threads shows their count, such as `●3`, and the diff pane's title counts them, the outdated ones apart: `4 threads (3 outdated), S to read`. In select lines, each thread sits under its line, folded to its first comment. `t` opens every thread in the file, and `]` / `[` move the cursor from one thread's line to the next. Resolved threads are muted, and outdated ones, no longer on a line of the diff, are listed at the top. The title also names the function or class the hunk at the top changes, such as `in BaseApp > on_mount`, and select lines names the one around the cursor. This works for Python, Rust, JavaScript, TypeScript and Go. The diff pane shows it when the view's hunks match git's, as in the word view and delta.
 
 ## Go to definition
 
@@ -66,7 +66,7 @@ In select lines, `D` lists the names on the cursor's line, calls first, in a pro
 | `v` | Toggle Viewed. It syncs to GitHub's Viewed checkbox at once. On a folder, it marks every file under it viewed, or unmarks them all when every one is viewed already. |
 | `V` | Hide viewed files |
 | `]` / `[` | Next or previous unviewed file |
-| `S` | Select lines in the selected file: its plain diff with line numbers. `j`/`k` or the wheel move, `V` marks a range (on one side only, as GitHub requires), `Enter` writes a comment, `y` copies the line or range, `D` goes to the definition of a name on the line, `t` opens or closes the review threads under it, `o` opens it on GitHub or in your editor, `w` wraps long lines or cuts them, as in the diff, `S` or `esc` goes back. The comment joins your pending review on GitHub, which only you see until `R` submits it; a dot marks lines it already covers. |
+| `S` | Select lines in the selected file: its plain diff with line numbers. `j`/`k` or the wheel move, `J`/`K` and `Space`/`b` scroll without moving the cursor, to read a long thread, `V` marks a range (on one side only, as GitHub requires), `Enter` writes a comment, `y` copies the line or range, `D` goes to the definition of a name on the line, `t` opens or closes every review thread in the file, `]` / `[` go to the next or previous line with a thread, `o` opens it on GitHub or in your editor, `w` wraps long lines or cuts them, as in the diff, `S` or `esc` goes back. The comment joins your pending review on GitHub, which only you see until `R` submits it; a dot marks lines it already covers. |
 
 ## Files changed and Commits
 

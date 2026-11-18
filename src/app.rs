@@ -431,8 +431,11 @@ pub struct DetailView {
     find_words_requested: bool,
     /// Select lines on Files changed: a line cursor over the file's plain diff.
     pub line_mode: Option<LineMode>,
-    /// The diff lines whose review threads t opened in select lines, by side and line.
-    pub open_threads: HashSet<(crate::model::Side, u64)>,
+    /// t opened every review thread in select lines.
+    pub threads_open: bool,
+    /// The select-lines cursor the scroll last brought into view. While it stays there,
+    /// J, K, space and b scroll freely, so a thread taller than the pane can be read.
+    pub line_followed: Option<usize>,
     /// Each parsed file's definitions, by commit and path; None for a language revu
     /// does not parse.
     pub outlines: HashMap<(String, String), Option<crate::syntax::Outline>>,
@@ -524,7 +527,8 @@ impl DetailView {
             outlines: HashMap::new(),
             hunk_firsts: HashMap::new(),
             structure_asked: HashSet::new(),
-            open_threads: HashSet::new(),
+            threads_open: false,
+            line_followed: None,
             def_walk: None,
             repo_labels: None,
         }
@@ -648,7 +652,8 @@ impl DetailView {
             return Err("comments go on the files in Files changed".to_string());
         };
         let job = diff_job(&self.pr, repo, detail, key);
-        self.open_threads.clear();
+        self.threads_open = false;
+        self.line_followed = None;
         self.line_mode = Some(LineMode {
             path,
             rows: None,
@@ -880,21 +885,36 @@ impl DetailView {
         Some(files.iter().map(|(_, count)| count).sum())
     }
 
-    /// t in select lines: opens or closes the review threads on the cursor's line.
+    /// t in select lines: opens or closes every review thread in the file.
     fn toggle_threads(&mut self) -> Result<(), String> {
+        let mode = self.line_mode.as_ref().ok_or("select lines first")?;
+        let Some(Ok(activity)) = &self.activity else {
+            return Err("the review threads are still loading".to_string());
+        };
+        if activity.threads_on(&mode.path).next().is_none() {
+            return Err("this file has no review threads".to_string());
+        }
+        self.threads_open = !self.threads_open;
+        self.line_followed = None;
+        Ok(())
+    }
+
+    /// ] and [ in select lines: the cursor goes to the next or previous line that holds a
+    /// review thread.
+    fn jump_to_thread(&mut self, forward: bool) -> Result<(), String> {
         let mode = self.line_mode.as_ref().ok_or("select lines first")?;
         let Some(Ok(rows)) = &mode.rows else {
             return Err("the diff is still loading".to_string());
         };
-        let row = rows.get(mode.cursor).ok_or("no line here")?;
-        let target = row
-            .target()
-            .filter(|_| !self.threads_on_row(&mode.path, row).is_empty());
-        let Some(target) = target else {
-            return Err("no review threads on this line".to_string());
+        let holds = |index: &usize| !self.threads_on_row(&mode.path, &rows[*index]).is_empty();
+        let found = match forward {
+            true => (mode.cursor + 1..rows.len()).find(holds),
+            false => (0..mode.cursor).rev().find(holds),
         };
-        if !self.open_threads.remove(&target) {
-            self.open_threads.insert(target);
+        let direction = if forward { "below" } else { "above" };
+        let index = found.ok_or(format!("no review thread {direction}"))?;
+        if let Some(mode) = &mut self.line_mode {
+            mode.cursor = index;
         }
         Ok(())
     }
@@ -2129,7 +2149,7 @@ pub struct LineMode {
     pub cursor: usize,
     /// V marked this row; the range runs from here to the cursor.
     pub anchor: Option<usize>,
-    /// The first row drawn.
+    /// The first screen row drawn, counting wrapped code and thread rows.
     pub scroll: usize,
 }
 
@@ -3388,6 +3408,14 @@ impl App {
             }
             KeyCode::Char('t') => {
                 let result = view.toggle_threads();
+                self.error = result.err();
+            }
+            KeyCode::Char('J') => mode.scroll = mode.scroll.saturating_add(3),
+            KeyCode::Char('K') => mode.scroll = mode.scroll.saturating_sub(3),
+            KeyCode::Char(' ') | KeyCode::PageDown => mode.scroll = mode.scroll.saturating_add(20),
+            KeyCode::Char('b') | KeyCode::PageUp => mode.scroll = mode.scroll.saturating_sub(20),
+            KeyCode::Char(']') | KeyCode::Char('[') => {
+                let result = view.jump_to_thread(key == KeyCode::Char(']'));
                 self.error = result.err();
             }
             _ => {}
@@ -5484,7 +5512,7 @@ mod tests {
     }
 
     #[test]
-    fn t_opens_and_closes_the_threads_on_the_cursors_line() {
+    fn t_opens_every_thread_and_brackets_walk_the_thread_lines() {
         let (mut app, pr) = files_tab(vec![file("b.md", ViewedState::Unviewed)]);
         app.set_activity(&pr, Ok(crate::model::tests::sample_activity()));
         view_mut(&mut app).line_mode = Some(LineMode {
@@ -5496,17 +5524,25 @@ mod tests {
             anchor: None,
             scroll: 0,
         });
-        let right_12 = (crate::model::Side::Right, 12);
-        app.handle_key(key(KeyCode::Char('t')));
-        assert!(
-            view(&app).open_threads.contains(&right_12),
-            "line 12 holds a thread"
-        );
-        app.handle_key(key(KeyCode::Char('t')));
-        assert!(view(&app).open_threads.is_empty(), "t again closes it");
+        let cursor = |app: &App| view(app).line_mode.as_ref().unwrap().cursor;
         view_mut(&mut app).line_mode.as_mut().unwrap().cursor = 1;
         app.handle_key(key(KeyCode::Char('t')));
-        assert_eq!(app.error.as_deref(), Some("no review threads on this line"));
+        assert!(view(&app).threads_open, "t works on any line");
+        app.handle_key(key(KeyCode::Char('t')));
+        assert!(!view(&app).threads_open, "t again closes them");
+        app.handle_key(key(KeyCode::Char(']')));
+        assert_eq!(cursor(&app), 3, "line 12 holds the thread");
+        app.handle_key(key(KeyCode::Char(']')));
+        assert_eq!(app.error.as_deref(), Some("no review thread below"));
+        assert_eq!(cursor(&app), 3);
+        app.handle_key(key(KeyCode::Char('[')));
+        assert_eq!(app.error.as_deref(), Some("no review thread above"));
+        view_mut(&mut app).line_mode.as_mut().unwrap().path = "c.md".to_string();
+        app.handle_key(key(KeyCode::Char('t')));
+        assert_eq!(
+            app.error.as_deref(),
+            Some("this file has no review threads")
+        );
     }
 
     #[test]

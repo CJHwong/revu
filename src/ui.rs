@@ -508,6 +508,7 @@ fn detail_hints(view: &DetailView) -> Hints {
             ("V", "range"),
             ("enter", "comment"),
             ("t", "threads"),
+            ("]/[", "next thread"),
             ("y", "copy"),
             ("D", "definition"),
             ("o", "open"),
@@ -682,7 +683,7 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "S",
-                "select lines: j/k or the wheel pick a line, V a range; enter comments in your pending review, y copies them as a Markdown diff, D goes to the definition of a name on the line, t opens or closes the review threads under it, o opens them on GitHub",
+                "select lines: j/k or the wheel pick a line, J/K and space/b scroll, V a range; enter comments in your pending review, y copies them as a Markdown diff, D goes to the definition of a name on the line, t opens or closes every review thread, ] and [ go to the next and previous thread, o opens them on GitHub",
             ),
         ],
     ),
@@ -1398,13 +1399,43 @@ fn render_line_mode(frame: &mut Frame, view: &mut DetailView, area: Rect, paint:
             code + above + row_threads.get(index).map_or(0, Vec::len)
         })
         .collect();
-    mode.scroll = keep_in_view(&heights, mode.scroll, mode.cursor, height);
+    // Where each row's block starts, in screen rows, and where the code of the cursor's
+    // row starts inside its block.
+    let starts: Vec<usize> = heights
+        .iter()
+        .scan(0, |at, height| {
+            let start = *at;
+            *at += height;
+            Some(start)
+        })
+        .collect();
+    let total: usize = heights.iter().sum();
+    if view.line_followed != Some(mode.cursor) {
+        let block = starts[mode.cursor];
+        let code = block
+            + if mode.cursor == 0 {
+                top_threads.len()
+            } else {
+                0
+            };
+        let shown = Followed {
+            block,
+            code,
+            end: block + heights[mode.cursor],
+        };
+        mode.scroll = shown.scroll(mode.scroll, height);
+        view.line_followed = Some(mode.cursor);
+    }
+    mode.scroll = mode.scroll.min(total.saturating_sub(height));
+    let first_row = starts
+        .partition_point(|start| *start <= mode.scroll)
+        .saturating_sub(1);
+    let skip = mode.scroll - starts[first_row];
     let (first, last) = mode.marked();
     let lines: Vec<Line> = rows
         .iter()
         .enumerate()
-        .skip(mode.scroll)
-        .take(height)
+        .skip(first_row)
         .flat_map(|(index, row)| {
             let commented = row.target().is_some_and(|(side, line)| {
                 drafts.iter().any(|&(draft_side, start, end)| {
@@ -1432,6 +1463,7 @@ fn render_line_mode(frame: &mut Frame, view: &mut DetailView, area: Rect, paint:
             let below = row_threads.get(index).cloned().unwrap_or_default();
             above.into_iter().chain(lines).chain(below)
         })
+        .skip(skip)
         .take(height)
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
@@ -1453,9 +1485,7 @@ fn line_mode_threads(
     let under: Vec<Vec<Line<'static>>> = rows
         .iter()
         .map(|row| {
-            let open = row
-                .target()
-                .is_some_and(|target| view.open_threads.contains(&target));
+            let open = view.threads_open;
             let threads = view.threads_on_row(&mode.path, row);
             let lines = threads
                 .iter()
@@ -1478,7 +1508,7 @@ fn line_mode_threads(
         for thread in outdated {
             top.extend(thread_lines(
                 thread,
-                false,
+                view.threads_open,
                 Some(&thread.lines),
                 width,
                 paint,
@@ -1546,9 +1576,14 @@ fn thread_lines(
     let mut lines = Vec::new();
     for (index, comment) in thread.comments.iter().enumerate() {
         let corner = if index == 0 { "╭ " } else { "├ " };
+        let place = match (index, place) {
+            (0, Some(place)) => format!("{place}, "),
+            _ => String::new(),
+        };
         lines.push(Line::from(vec![
             indent(),
             paint.span(corner, color),
+            paint.span(place, theme.muted),
             paint.bold(comment.author.login.clone(), color),
             paint.span(
                 format!("  {}", relative_time(comment.at, paint.now)),
@@ -1659,14 +1694,27 @@ fn split_to_width(text: &str, width: usize) -> Vec<String> {
     pieces
 }
 
-/// The first row to draw, so that every screen row of the cursor's line shows.
-/// `heights` holds each row's screen rows.
-fn keep_in_view(heights: &[usize], scroll: usize, cursor: usize, height: usize) -> usize {
-    let mut scroll = scroll.min(cursor);
-    while scroll < cursor && heights[scroll..=cursor].iter().sum::<usize>() > height {
-        scroll += 1;
+/// The cursor's row in select lines, in screen rows: its block, threads included, and
+/// where its code starts.
+struct Followed {
+    block: usize,
+    code: usize,
+    end: usize,
+}
+
+impl Followed {
+    /// The scroll that shows the whole block with the least move from `scroll`. A block
+    /// taller than the pane starts at its code, so the cursor's line shows.
+    fn scroll(&self, scroll: usize, height: usize) -> usize {
+        let start = match self.end - self.block > height {
+            true => self.code,
+            false => self.block,
+        };
+        if start < scroll {
+            return start;
+        }
+        scroll.max(self.end.saturating_sub(height)).min(start)
     }
-    scroll
 }
 
 /// " /query  2 of 5 lines ", at the right of the diff pane's title, so the find text and
@@ -3554,18 +3602,28 @@ mod tests {
     }
 
     #[test]
-    fn the_view_keeps_every_row_of_the_cursor_line() {
-        assert_eq!(keep_in_view(&[1, 3, 1, 1], 0, 1, 3), 1);
-        assert_eq!(keep_in_view(&[1, 3, 1, 1], 0, 3, 3), 2);
+    fn the_view_shows_the_cursors_line_and_its_threads() {
+        let row = |block, code, end| Followed { block, code, end };
+        assert_eq!(row(4, 4, 6).scroll(0, 10), 0, "already in view: no move");
         assert_eq!(
-            keep_in_view(&[1, 1, 1], 2, 0, 3),
-            0,
-            "the cursor above the view"
+            row(12, 12, 15).scroll(0, 10),
+            5,
+            "below: its last row at the bottom"
         );
         assert_eq!(
-            keep_in_view(&[5], 0, 0, 3),
-            0,
-            "a line taller than the pane"
+            row(2, 2, 3).scroll(8, 10),
+            2,
+            "above: its first row at the top"
+        );
+        assert_eq!(
+            row(0, 30, 31).scroll(0, 10),
+            21,
+            "outdated threads taller than the pane: the cursor's code shows at the bottom"
+        );
+        assert_eq!(
+            row(5, 5, 40).scroll(0, 10),
+            5,
+            "a thread taller than the pane: its code at the top, J reads on"
         );
     }
 
@@ -3746,6 +3804,14 @@ mod tests {
             place[0].contains("╭ lines 827-830, lead: Rename this.  ✓ resolved"),
             "{place:?}"
         );
+        let open = text(thread_lines(
+            outdated,
+            true,
+            Some("lines 827-830"),
+            80,
+            paint,
+        ));
+        assert!(open[0].contains("╭ lines 827-830, lead  "), "{open:?}");
     }
 
     #[test]
