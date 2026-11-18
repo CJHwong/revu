@@ -11,6 +11,7 @@ mod model;
 mod overview;
 mod repo;
 mod sha256;
+mod syntax_theme;
 mod theme;
 mod ui;
 
@@ -186,6 +187,7 @@ fn main() -> Result<()> {
         Err(error) => app.set_inbox_error(format!("view toggles not loaded: {error:#}")),
     }
     app.theme_name = theme::name_of(&session.config.theme).unwrap_or(app.theme_name);
+    use_syntax_theme(&mut app, &session.config.theme);
     start_inbox_fetch(&session, &mut app);
 
     let mut terminal = ratatui::init();
@@ -704,12 +706,24 @@ fn set_theme(app: &mut App, session: &mut Session, name: &'static str) {
         }
     };
     if theme != session.config.theme {
+        use_syntax_theme(app, &theme);
         session.config.theme = theme;
         app.forget_colors();
     }
     app.theme_name = name;
     if let Err(error) = config::save_theme(&session.config_path, name) {
         app.error = Some(format!("theme applied but not saved: {error:#}"));
+    }
+}
+
+/// Gets the code colors ready for the theme. Without them `bat` uses its default theme,
+/// so the app still works; the footer says why.
+fn use_syntax_theme(app: &mut App, theme: &theme::Theme) {
+    if let Err(error) = syntax_theme::use_theme(theme.bat_theme) {
+        app.error = Some(format!(
+            "code colors for {} not ready, so bat uses its own: {error:#}",
+            theme.bat_theme
+        ));
     }
 }
 
@@ -866,6 +880,7 @@ fn refresh(app: &mut App, session: &mut Session) {
             app.renderer_names = renderer_names(&config);
             check_renderers(&config, app);
             if config.theme != session.config.theme {
+                use_syntax_theme(app, &config.theme);
                 app.forget_colors();
             }
             app.theme_name = theme::name_of(&config.theme).unwrap_or(app.theme_name);

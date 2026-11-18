@@ -320,8 +320,8 @@ const DARCULA: Theme = Theme {
 };
 
 /// The JetBrains IDEs' current dark theme, as Helix's jetbrains_dark has it: salmon
-/// keywords, green strings, sky-blue functions on near-black. Code takes Visual Studio
-/// Dark+, as bat has no JetBrains theme.
+/// keywords, green strings, sky-blue functions on near-black. bat has no JetBrains theme,
+/// so revu ships one; see syntax_theme.
 const JETBRAINS_DARK: Theme = Theme {
     background: Color::Rgb(0x1e, 0x1f, 0x22),
     foreground: Color::Rgb(0xbc, 0xbe, 0xc4),
@@ -333,7 +333,7 @@ const JETBRAINS_DARK: Theme = Theme {
     warning: Color::Rgb(0xc2, 0x9e, 0x4a),
     danger: Color::Rgb(0xd6, 0x4d, 0x5b),
     fold: Color::Rgb(0xc7, 0x7d, 0xbb),
-    bat_theme: "Visual Studio Dark+",
+    bat_theme: "JetBrains Dark",
     added_bg: Color::Rgb(0x26, 0x3b, 0x2c),
     removed_bg: Color::Rgb(0x48, 0x2a, 0x2e),
 };
@@ -463,7 +463,11 @@ mod tests {
             return;
         };
         let known = String::from_utf8_lossy(&output.stdout);
-        for (name, theme) in THEMES {
+        // revu ships these itself.
+        for (name, theme) in THEMES
+            .iter()
+            .filter(|(_, theme)| theme.bat_theme != "JetBrains Dark")
+        {
             assert!(
                 known.lines().any(|line| line.trim() == theme.bat_theme),
                 "{name}: bat has no theme \"{}\"",

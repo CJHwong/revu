@@ -31,7 +31,7 @@ Adds `updated:>=<date>` to every query. Remove the key, or set it to `null`, to 
 
 ### theme
 
-The color theme. Each one pairs with the `bat` theme of the same name, so code in diffs matches the rest of the screen. bat has no IntelliJ themes, so `darcula` and `jetbrains_dark` color code with Visual Studio Dark+ and `intellij_light` with GitHub.
+The color theme. Each one pairs with the `bat` theme of the same name, so code in diffs matches the rest of the screen. bat has no IntelliJ themes, so `darcula` colors code with Visual Studio Dark+ and `intellij_light` with GitHub. For `jetbrains_dark`, revu ships its own theme: it builds it into a `bat` cache under `~/.cache/revu/syntax` the first time, and gives `bat` and the diff renderers that cache, so your own `bat` themes stay as they are.
 
 - Dark: `dracula` (the default), `catppuccin_mocha`, `catppuccin_macchiato`, `catppuccin_frappe`, `darcula`, `jetbrains_dark`, `nord`, `gruvbox_dark`, `solarized_dark`, `one_half_dark`, `monokai`
 - Light: `catppuccin_latte`, `gruvbox_light`, `intellij_light`, `solarized_light`, `one_half_light`, `github`

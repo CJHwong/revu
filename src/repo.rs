@@ -305,7 +305,9 @@ pub fn highlight_file(
 
 /// Runs `bat` on `input` and returns its colored output.
 pub fn bat(input: String, args: &[&str]) -> Result<Vec<u8>> {
-    let mut child = Command::new("bat")
+    let mut bat = Command::new("bat");
+    crate::syntax_theme::apply(&mut bat);
+    let mut child = bat
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -393,6 +395,7 @@ const SIDE_BY_SIDE_MIN_WIDTH: u16 = 100;
 pub fn run_renderer(dir: &Path, command: &str, whole_file: bool, width: u16) -> Result<Vec<u8>> {
     let mut shell = Command::new("sh");
     shell.arg("-c").arg(command).current_dir(dir);
+    crate::syntax_theme::apply(&mut shell);
     if width < SIDE_BY_SIDE_MIN_WIDTH && std::env::var_os("DFT_DISPLAY").is_none() {
         shell.env("DFT_DISPLAY", "inline");
     }
