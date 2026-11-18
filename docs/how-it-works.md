@@ -33,7 +33,7 @@ revu never checks out a branch or touches your working tree, the index or `FETCH
 
 The merge box says whether the pull request can merge, and counts failing and pending checks, unresolved review threads and pending approvals. Skipped checks count neither as passed nor failed.
 
-A review thread shows the last four lines of the diff it is on, ending at the commented line, as GitHub's conversation tab does. A removed line shows its old line number.
+A review thread shows the last four lines of the diff it is on, ending at the commented line, as GitHub's conversation tab does. A removed line shows its old line number. The code comes in a second call after the comments show, since on a big pull request it can be larger than the whole conversation.
 
 The sidebar counts what others did since your last comment or review. If you have not commented, it counts everything since the pull request opened. It lists every reviewer with their state; a member who reviewed for a team sits under the team. Assignees, labels, the milestone and linked issues show only when set.
 

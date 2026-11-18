@@ -1,5 +1,7 @@
 //! Domain types for the inbox, and the conversion from GitHub's GraphQL shape.
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -222,13 +224,16 @@ pub struct Author {
 /// A review comment thread, shown under the review that started it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadLine {
+    /// GitHub's thread ID, which matches the thread to its hunk.
+    pub id: String,
     pub path: String,
     /// "line 548" or "lines 827-830".
     pub lines: String,
     pub resolved: bool,
     /// The thread's own comments, oldest first.
     pub comments: Vec<ThreadComment>,
-    /// The diff lines the thread is on, ending at the commented line.
+    /// The diff lines the thread is on, ending at the commented line. Empty until the
+    /// hunks arrive, and for good when GitHub sends none.
     pub code: Vec<HunkLine>,
 }
 
@@ -647,6 +652,8 @@ struct RawActor {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawThread {
+    #[serde(default)]
+    id: String,
     is_resolved: bool,
     path: String,
     line: Option<u64>,
@@ -655,16 +662,57 @@ struct RawThread {
     original_start_line: Option<u64>,
     #[serde(default)]
     diff_side: Option<String>,
-    /// The first comment's diff hunk; every reply carries the same one.
-    #[serde(default)]
-    hunk: Option<Nodes<RawHunk>>,
     comments: Nodes<RawThreadComment>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawHunks {
+    review_threads: Nodes<RawHunkThread>,
+}
+
+#[derive(Deserialize)]
+struct RawHunkThread {
+    id: String,
+    /// Only the first comment; every reply carries the same hunk.
+    comments: Nodes<RawHunk>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawHunk {
     diff_hunk: String,
+}
+
+/// `pull_request` is `data.repository.pullRequest` from the hunks query: each thread's
+/// code by thread ID. A thread without a hunk is left out.
+pub fn parse_hunks(pull_request: &Value) -> Result<HashMap<String, Vec<HunkLine>>> {
+    let raw: RawHunks =
+        serde_json::from_value(pull_request.clone()).context("parse review thread hunks")?;
+    Ok(raw
+        .review_threads
+        .nodes
+        .into_iter()
+        .filter_map(|thread| {
+            let hunk = thread.comments.nodes.into_iter().next()?.diff_hunk;
+            Some((thread.id, hunk_tail(&hunk, THREAD_CODE_LINES)))
+        })
+        .collect())
+}
+
+impl PrActivity {
+    /// Puts the hunks from `parse_hunks` under their threads.
+    pub fn set_code(&mut self, hunks: &HashMap<String, Vec<HunkLine>>) {
+        let threads = self
+            .timeline
+            .iter_mut()
+            .flat_map(|comment| &mut comment.threads);
+        for thread in threads {
+            if let Some(code) = hunks.get(&thread.id) {
+                thread.code = code.clone();
+            }
+        }
+    }
 }
 
 impl RawThread {
@@ -1349,17 +1397,13 @@ fn thread_line(thread: RawThread) -> ThreadLine {
             at: comment.created_at,
             body: comment.body,
         });
-    let hunk = thread
-        .hunk
-        .and_then(|hunk| hunk.nodes.into_iter().next())
-        .map(|hunk| hunk.diff_hunk)
-        .unwrap_or_default();
     ThreadLine {
+        id: thread.id,
         path: thread.path,
         lines,
         resolved: thread.is_resolved,
         comments: comments.collect(),
-        code: hunk_tail(&hunk, THREAD_CODE_LINES),
+        code: Vec::new(),
     }
 }
 
@@ -1435,21 +1479,29 @@ pub mod tests {
     }
 
     #[test]
-    fn a_thread_carries_the_tail_of_its_hunk() {
-        let activity = parse_activity(&activity_fixture()).unwrap();
-        let threads: Vec<_> = activity
-            .timeline
-            .iter()
-            .flat_map(|comment| &comment.threads)
-            .collect();
-        let open = threads.iter().find(|thread| thread.path == "b.md").unwrap();
-        assert_eq!(open.code.len(), 4);
-        assert_eq!(
-            open.code.last().map(|line| line.text.as_str()),
-            Some("twelve")
+    fn hunks_arrive_after_the_threads_and_fill_in_their_code() {
+        let mut activity = parse_activity(&activity_fixture()).unwrap();
+        let code = |activity: &PrActivity, path: &str| {
+            activity
+                .timeline
+                .iter()
+                .flat_map(|comment| &comment.threads)
+                .find(|thread| thread.path == path)
+                .map(|thread| thread.code.clone())
+                .unwrap()
+        };
+        assert!(
+            code(&activity, "b.md").is_empty(),
+            "the threads load without code"
         );
-        let resolved = threads.iter().find(|thread| thread.path == "a.md").unwrap();
-        assert!(resolved.code.is_empty(), "no hunk sent, no code shown");
+        activity.set_code(&parse_hunks(&hunks_fixture()).unwrap());
+        let open = code(&activity, "b.md");
+        assert_eq!(open.len(), 4);
+        assert_eq!(open.last().map(|line| line.text.as_str()), Some("twelve"));
+        assert!(
+            code(&activity, "a.md").is_empty(),
+            "no hunk sent, no code shown"
+        );
     }
     use super::*;
     use serde_json::json;
@@ -1550,7 +1602,18 @@ pub mod tests {
     }
 
     pub fn sample_activity() -> PrActivity {
-        parse_activity(&activity_fixture()).unwrap()
+        let mut activity = parse_activity(&activity_fixture()).unwrap();
+        activity.set_code(&parse_hunks(&hunks_fixture()).unwrap());
+        activity
+    }
+
+    /// The hunks query's answer for the threads in `activity_fixture`. T1 has no hunk.
+    fn hunks_fixture() -> Value {
+        json!({ "reviewThreads": { "nodes": [
+            { "id": "T1", "comments": { "nodes": [] } },
+            { "id": "T2", "comments": { "nodes": [{ "diffHunk":
+                "@@ -8,5 +8,6 @@ intro\n eight\n nine\n-old ten\n+new ten\n+new eleven\n twelve" }] } },
+        ]}})
     }
 
     fn detail_fixture() -> Value {
@@ -1585,7 +1648,7 @@ pub mod tests {
         pr
     }
 
-    fn activity_fixture() -> Value {
+    pub fn activity_fixture() -> Value {
         json!({
             "commits": { "nodes": [{ "commit": { "statusCheckRollup": {
                 "state": "PENDING",
@@ -1625,14 +1688,13 @@ pub mod tests {
                   "state": "COMMENTED", "submittedAt": null, "createdAt": "2026-11-14T11:00:00Z", "body": "" },
             ]},
             "reviewThreads": { "nodes": [
-                { "isResolved": true, "path": "a.md", "line": null, "originalLine": 830,
+                { "id": "T1", "isResolved": true, "path": "a.md", "line": null, "originalLine": 830,
                   "startLine": null, "originalStartLine": 827,
                   "comments": { "nodes": [{ "pullRequestReview": { "id": "R1" },
                       "author": { "__typename": "User", "login": "lead" },
                       "createdAt": "2026-11-14T10:00:00Z", "body": "Rename this." }] } },
-                { "isResolved": false, "path": "b.md", "line": 12, "originalLine": 12,
+                { "id": "T2", "isResolved": false, "path": "b.md", "line": 12, "originalLine": 12,
                   "startLine": null, "originalStartLine": null,
-                  "hunk": { "nodes": [{ "diffHunk": "@@ -8,5 +8,6 @@ intro\n eight\n nine\n-old ten\n+new ten\n+new eleven\n twelve" }] },
                   "comments": { "nodes": [
                       { "pullRequestReview": { "id": "R1" }, "author": { "__typename": "User", "login": "lead" },
                         "createdAt": "2026-11-14T10:00:00Z", "body": "Why **here**?" },

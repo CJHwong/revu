@@ -16,7 +16,7 @@ use crate::repo::{GrepHit, LocalRepo};
 
 use crate::config::{GroupConfig, ViewPrefs};
 use crate::model::{
-    ChangedFile, Group, Lifecycle, PrActivity, PrDetail, PrRef, PrSummary, Side, Verdict,
+    ChangedFile, Group, HunkLine, Lifecycle, PrActivity, PrDetail, PrRef, PrSummary, Side, Verdict,
     ViewedState, parse_pr_ref,
 };
 
@@ -2089,6 +2089,16 @@ impl App {
         }
     }
 
+    /// The code under each thread, which arrives after the comments.
+    pub fn set_hunks(&mut self, pr: &PrRef, hunks: HashMap<String, Vec<HunkLine>>) {
+        if let Some(view) = self.view_for(pr)
+            && let Some(Ok(activity)) = &mut view.activity
+        {
+            activity.set_code(&hunks);
+            view.overview = None;
+        }
+    }
+
     pub fn set_files_progress(&mut self, pr: &PrRef, loaded: usize, total: usize) {
         if let Some(view) = self.view_for(pr) {
             view.files_progress = Some((loaded, total));
@@ -3320,6 +3330,38 @@ mod tests {
         assert!(
             seen.iter().all(|row| *row),
             "every row showed at some point"
+        );
+    }
+
+    #[test]
+    fn hunks_fill_in_the_open_pr_and_redraw_its_overview() {
+        let (mut app, pr) = files_tab(Vec::new());
+        app.set_activity(
+            &pr,
+            Ok(crate::model::parse_activity(&crate::model::tests::activity_fixture()).unwrap()),
+        );
+        let code = |app: &App| match &view(app).activity {
+            Some(Ok(activity)) => activity
+                .timeline
+                .iter()
+                .flat_map(|comment| &comment.threads)
+                .map(|thread| thread.code.len())
+                .sum::<usize>(),
+            _ => 0,
+        };
+        assert_eq!(code(&app), 0);
+        let mut hunks = std::collections::HashMap::new();
+        let line = crate::model::HunkLine {
+            number: 12,
+            mark: '+',
+            text: "x".to_string(),
+        };
+        hunks.insert("T2".to_string(), vec![line]);
+        app.set_hunks(&pr, hunks);
+        assert_eq!(code(&app), 1);
+        assert!(
+            view(&app).overview.is_none(),
+            "the overview is laid out again"
         );
     }
 

@@ -3,12 +3,14 @@
 use anyhow::{Context, Result, bail};
 use chrono::NaiveDate;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Mutex;
 
 use crate::config::GroupConfig;
 use crate::model::{
-    self, ChangedFile, Group, PrActivity, PrDetail, RateLimit, Side, TIMELINE_LIMIT, Verdict,
+    self, ChangedFile, Group, HunkLine, PrActivity, PrDetail, RateLimit, Side, TIMELINE_LIMIT,
+    Verdict,
 };
 
 /// The GraphQL budgets the responses reported, one per reset time. GitHub reports two
@@ -113,8 +115,8 @@ pub fn activity_document() -> String {
          events: timelineItems(last: {TIMELINE_LIMIT}, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT, BASE_REF_CHANGED_EVENT, BASE_REF_FORCE_PUSHED_EVENT, REVIEW_REQUESTED_EVENT]) {{ nodes {{ __typename \
            ... on HeadRefForcePushedEvent {{ createdAt }} ... on BaseRefChangedEvent {{ createdAt }} \
            ... on BaseRefForcePushedEvent {{ createdAt }} ... on ReviewRequestedEvent {{ createdAt }} }} }} \
-         reviewThreads(first: 100) {{ nodes {{ isResolved path line originalLine startLine originalStartLine \
-           diffSide hunk: comments(first: 1) {{ nodes {{ diffHunk }} }} comments(first: 50) {{ nodes {{ pullRequestReview {{ id state }} viewerDidAuthor author {{ __typename login }} createdAt body }} }} }} }} \
+         reviewThreads(first: 100) {{ nodes {{ id isResolved path line originalLine startLine originalStartLine \
+           diffSide comments(first: 50) {{ nodes {{ pullRequestReview {{ id state }} viewerDidAuthor author {{ __typename login }} createdAt body }} }} }} }} \
          pendingReviews: reviews(first: 1, states: PENDING) {{ nodes {{ id }} }} \
          }} }} }}"
     )
@@ -157,6 +159,20 @@ pub fn fetch_detail(repo: &str, number: u64) -> Result<PrDetail> {
 
 pub fn fetch_activity(repo: &str, number: u64) -> Result<PrActivity> {
     model::parse_activity(&fetch_pull_request(&activity_document(), repo, number)?)
+}
+
+/// The diff hunk under each review thread. A hunk runs from its header down to the
+/// commented line, so on a big pull request the hunks can outweigh the whole
+/// conversation; they come in a call of their own, after the comments show.
+fn hunks_document() -> String {
+    format!(
+        "query({PR_VARIABLES}) {{ repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ \
+         reviewThreads(first: 100) {{ nodes {{ id comments(first: 1) {{ nodes {{ diffHunk }} }} }} }} }} }} }}"
+    )
+}
+
+pub fn fetch_hunks(repo: &str, number: u64) -> Result<HashMap<String, Vec<HunkLine>>> {
+    model::parse_hunks(&fetch_pull_request(&hunks_document(), repo, number)?)
 }
 
 const FILES_DOCUMENT: &str = "query($owner: String!, $name: String!, $number: Int!, $cursor: String) { \

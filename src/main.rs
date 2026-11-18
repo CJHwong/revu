@@ -67,6 +67,11 @@ enum Message {
         pr: PrRef,
         result: Result<Box<PrActivity>, String>,
     },
+    /// The code under each review thread, by thread ID, after the activity.
+    Hunks {
+        pr: PrRef,
+        hunks: std::collections::HashMap<String, Vec<model::HunkLine>>,
+    },
     Detail {
         pr: PrRef,
         result: Result<Box<PrDetail>, String>,
@@ -310,6 +315,7 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
             Message::Activity { pr, result } => {
                 app.set_activity(&pr, result.map(|activity| *activity))
             }
+            Message::Hunks { pr, hunks } => app.set_hunks(&pr, hunks),
             Message::Detail { pr, result } => app.set_detail(&pr, result.map(|detail| *detail)),
             Message::Files { pr, result } => app.set_files(&pr, result),
             Message::Written { pr, result } => app.set_written(&pr, result),
@@ -851,7 +857,18 @@ fn start_activity_fetch(session: &Session, pr: PrRef) {
         if let Err(error) = &result {
             report_gh_problem(&sender, error);
         }
-        let _ = sender.send(Message::Activity { pr, result });
+        let loaded = result.is_ok();
+        let _ = sender.send(Message::Activity {
+            pr: pr.clone(),
+            result,
+        });
+        if !loaded {
+            return;
+        }
+        // The code is extra: when it fails, the threads stay as they are, without it.
+        if let Ok(hunks) = github::fetch_hunks(&pr.repo, pr.number) {
+            let _ = sender.send(Message::Hunks { pr, hunks });
+        }
     });
 }
 
