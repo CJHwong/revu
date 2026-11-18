@@ -62,7 +62,13 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: &Theme, now: DateTime<Utc
         let diff_tab = matches!(view.tab, Tab::Files | Tab::Commits);
         let notice = app.notice.as_deref().filter(|_| diff_tab);
         app.notice_seen |= notice.is_some();
-        let status = status_span(app.error.as_deref(), app.saving, app.saved, notice, paint);
+        let status = status_span(
+            app.error.as_deref(),
+            app.saving,
+            app.saved.as_deref(),
+            notice,
+            paint,
+        );
         render_detail(frame, view, status, &app.renderer_names, paint);
     } else {
         render_inbox(frame, app, paint);
@@ -478,6 +484,7 @@ fn detail_hints(view: &DetailView) -> Hints {
             ("j/k", "line"),
             ("V", "range"),
             ("enter", "comment"),
+            ("y", "copy"),
             ("R", "review"),
             ("esc", "back to the diff"),
         ];
@@ -628,9 +635,10 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
             ),
             ("], [", "next or previous unviewed file"),
             ("t, z", "tree or flat list, hide or show the list"),
+            ("y", "copy the file's or folder's path"),
             (
                 "c",
-                "comment mode: j/k pick a line, V a range, enter writes a comment into your pending review",
+                "comment mode: j/k pick a line, V a range, enter writes a comment into your pending review, y copies the lines with their path as a Markdown diff",
             ),
         ],
     ),

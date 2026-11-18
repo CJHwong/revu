@@ -90,6 +90,53 @@ fn hunk_starts(line: &str) -> Option<(u64, u64)> {
     Some((start(old, '-')?, start(new, '+')?))
 }
 
+/// Where the rows sit: `path:40-46` by their new line numbers, or by the old ones with
+/// "(removed)" when every row was removed.
+pub fn place(path: &str, rows: &[DiffRow]) -> String {
+    let new: Vec<u64> = rows.iter().filter_map(|row| row.new).collect();
+    let (numbers, suffix) = match new.is_empty() {
+        true => (
+            rows.iter().filter_map(|row| row.old).collect(),
+            " (removed)",
+        ),
+        false => (new, ""),
+    };
+    match (numbers.first(), numbers.last()) {
+        (Some(first), Some(last)) if first != last => format!("{path}:{first}-{last}{suffix}"),
+        (Some(line), _) => format!("{path}:{line}{suffix}"),
+        _ => path.to_string(),
+    }
+}
+
+/// The rows as Markdown: their place, then a fenced diff block with the +/- marks.
+pub fn snippet(path: &str, rows: &[DiffRow]) -> String {
+    let lines: Vec<String> = rows
+        .iter()
+        .map(|row| match row.kind {
+            RowKind::Added => format!("+{}", row.text),
+            RowKind::Removed => format!("-{}", row.text),
+            RowKind::Context => format!(" {}", row.text),
+            RowKind::Hunk | RowKind::Note => row.text.clone(),
+        })
+        .collect();
+    // Longer than any run of backticks in the code, so the block cannot end early.
+    let longest = lines
+        .iter()
+        .map(|line| backtick_run(line))
+        .max()
+        .unwrap_or(0);
+    let fence = "`".repeat(longest.max(2) + 1);
+    let body = lines.join("\n");
+    format!("{}\n{fence}diff\n{body}\n{fence}\n", place(path, rows))
+}
+
+fn backtick_run(line: &str) -> usize {
+    line.split(|char| char != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +171,26 @@ end\n\
             ]
         );
         assert_eq!(rows[2].text, "old");
+    }
+
+    #[test]
+    fn a_snippet_names_its_lines_and_keeps_the_diff_marks() {
+        let rows = parse(DIFF);
+        assert_eq!(
+            snippet("a.rs", &rows[1..5]),
+            "a.rs:10-12\n```diff\n keep\n-old\n+new\n end\n```\n"
+        );
+        assert_eq!(
+            snippet("a.rs", &rows[2..3]),
+            "a.rs:11 (removed)\n```diff\n-old\n```\n",
+            "removed lines alone are named by their old numbers"
+        );
+        assert_eq!(place("a.rs", &rows[3..4]), "a.rs:11");
+        let fenced = parse("@@ -1 +1 @@\n+```rust\n");
+        assert!(
+            snippet("r.md", &fenced[1..]).starts_with("r.md:1\n````diff\n"),
+            "a fence in the code gets a longer fence"
+        );
     }
 
     #[test]

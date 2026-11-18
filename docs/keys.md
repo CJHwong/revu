@@ -55,10 +55,11 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 | `Enter` | Show the whole file with its changes marked, drawn by the current renderer, with syntax colors. On a folder, fold or open it. |
 | `t` | Switch the list between a folder tree and flat paths |
 | `z` | Hide or show the list, so the diff gets the full width |
+| `y` | Copy the selected file's path, or the folder's path with a trailing `/`. |
 | `v` | Toggle Viewed. It syncs to GitHub's Viewed checkbox at once. On a folder, it marks every file under it viewed, or unmarks them all when every one is viewed already. |
 | `V` | Hide viewed files |
 | `]` / `[` | Next or previous unviewed file |
-| `c` | Comment mode on the selected file: its plain diff with line numbers. `j`/`k` move, `V` marks a range (on one side only, as GitHub requires), `Enter` writes a comment, `esc` goes back. The comment joins your pending review on GitHub, which only you see until `R` submits it; a dot marks lines it already covers. |
+| `c` | Comment mode on the selected file: its plain diff with line numbers. `j`/`k` move, `V` marks a range (on one side only, as GitHub requires), `Enter` writes a comment, `y` copies the line or range, `esc` goes back. The comment joins your pending review on GitHub, which only you see until `R` submits it; a dot marks lines it already covers. |
 
 ## Files changed and Commits
 
@@ -74,6 +75,19 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 | Key | Action |
 |---|---|
 | `Enter` | Open the selected commit or check in the browser |
+
+## Copy lines
+
+In comment mode (`c`), `y` copies the line under the cursor, or the range `V` marked, as Markdown: the path and line numbers, then the lines in a `diff` block with their `+` and `-` marks. A copied range can span removed and added lines. The numbers are the new file's, or the old file's when every line was removed:
+
+````
+src/app.rs:40-42
+```diff
+   let name = repo.split_once('/');
+-  let named = workspace.join(name);
++  for workspace in workspaces {
+```
+````
 
 ## Find
 

@@ -1030,6 +1030,14 @@ impl DetailView {
         })
     }
 
+    /// The selected file's path, or the selected folder's with a trailing slash.
+    fn selected_row_path(&self) -> Option<String> {
+        match self.file_rows().get(self.file_state.selected()?)? {
+            FileRow::File { index, .. } => Some(self.loaded_files()?.get(*index)?.path.clone()),
+            FileRow::Dir { path, .. } => Some(format!("{path}/")),
+        }
+    }
+
     fn clamp_file_selection(&mut self) {
         let last = self.file_rows().len().saturating_sub(1);
         let current = self.file_state.selected().unwrap_or(0);
@@ -1711,7 +1719,7 @@ pub struct App {
     /// A write to GitHub is running; the footer says what it saves.
     pub saving: Option<SaveNote>,
     /// The last write succeeded; the footer says so until the next key.
-    pub saved: Option<&'static str>,
+    pub saved: Option<String>,
     /// A write succeeded, so this PR loads again to show it.
     pub reload_after_write: Option<PrRef>,
     /// The settings panel's selected row, while it is open.
@@ -2546,6 +2554,18 @@ impl App {
                 }
             }
             KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('q') => view.line_mode = None,
+            KeyCode::Char('y') => {
+                let Some(Ok(rows)) = &mode.rows else {
+                    return None;
+                };
+                let (first, last) = mode.marked();
+                let picked = rows.get(first..=last)?;
+                let lines = picked.iter().filter(|row| row.target().is_some()).count();
+                let unit = if lines == 1 { "line" } else { "lines" };
+                let place = crate::line_diff::place(&mode.path, picked);
+                self.saved = Some(format!("copied {place} ({lines} {unit})"));
+                return Some(Action::Copy(crate::line_diff::snippet(&mode.path, picked)));
+            }
             KeyCode::Enter => {
                 let result = self.open_line_comment();
                 self.error = result.err();
@@ -2699,7 +2719,7 @@ impl App {
         let note = self.saving.take();
         if result.is_ok() {
             self.reload_after_write = Some(pr.clone());
-            self.saved = note.map(|note| note.done);
+            self.saved = note.map(|note| note.done.to_string());
         }
         let Some(composer) = self.composer.as_mut().filter(|composer| &composer.pr == pr) else {
             self.error = result.err();
@@ -2869,6 +2889,11 @@ impl App {
             KeyCode::Char(' ') | KeyCode::PageDown if diff_pane => view.scroll_diff(20),
             KeyCode::Char('b') | KeyCode::PageUp if diff_pane => view.scroll_diff(-20),
             KeyCode::Char('v') if view.tab == Tab::Files => return view.toggle_viewed(),
+            KeyCode::Char('y') if view.tab == Tab::Files => {
+                let path = view.selected_row_path()?;
+                self.saved = Some(format!("copied {path}"));
+                return Some(Action::Copy(path));
+            }
             KeyCode::Char('V') if view.tab == Tab::Files => {
                 view.hide_viewed = !view.hide_viewed;
                 view.clamp_file_selection();
@@ -3869,6 +3894,47 @@ mod tests {
     }
 
     #[test]
+    fn y_copies_a_file_path_or_a_folder_path() {
+        let (mut app, _) = files_tab(vec![file("src/a.rs", ViewedState::Unviewed)]);
+        view_mut(&mut app).tree_view = false;
+        view_mut(&mut app).file_state.select(Some(0));
+        let action = app.handle_key(key(KeyCode::Char('y')));
+        assert!(
+            matches!(action, Some(Action::Copy(ref text)) if text == "src/a.rs"),
+            "{action:?}"
+        );
+        assert_eq!(app.saved.as_deref(), Some("copied src/a.rs"));
+        let (mut app, _) = on_src_folder(vec![file("src/a.rs", ViewedState::Unviewed)]);
+        let action = app.handle_key(key(KeyCode::Char('y')));
+        assert!(
+            matches!(action, Some(Action::Copy(ref text)) if text == "src/"),
+            "{action:?}"
+        );
+    }
+
+    #[test]
+    fn y_in_comment_mode_copies_the_line_or_the_range_as_a_snippet() {
+        let (mut app, _) = files_tab(vec![file("a.rs", ViewedState::Unviewed)]);
+        view_mut(&mut app).line_mode = Some(LineMode {
+            path: "a.rs".to_string(),
+            rows: Some(Ok(crate::line_diff::parse(
+                "@@ -1,2 +1,2 @@\n keep\n-old\n+new\n",
+            ))),
+            cursor: 3,
+            anchor: Some(1),
+            scroll: 0,
+        });
+        let action = app.handle_key(key(KeyCode::Char('y')));
+        let expected = "a.rs:1-2\n```diff\n keep\n-old\n+new\n```\n";
+        assert!(
+            matches!(action, Some(Action::Copy(ref text)) if text == expected),
+            "{action:?}"
+        );
+        assert_eq!(app.saved.as_deref(), Some("copied a.rs:1-2 (3 lines)"));
+        assert!(view(&app).line_mode.is_some(), "comment mode stays open");
+    }
+
+    #[test]
     fn comment_mode_targets_a_line_or_a_one_sided_range() {
         let diff = "@@ -1,2 +1,2 @@\n keep\n-old\n+new\n";
         let mut mode = LineMode {
@@ -3909,7 +3975,7 @@ mod tests {
         app.saving = action.save_note();
         app.set_written(&pr, Ok(()));
         assert_eq!(
-            (app.saving, app.saved),
+            (app.saving, app.saved.as_deref()),
             (None, Some("pending review discarded"))
         );
         app.handle_key(key(KeyCode::Char('j')));
