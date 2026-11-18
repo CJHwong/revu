@@ -56,4 +56,4 @@ When a call to GitHub fails, revu asks `gh auth status` why. A working setup nev
 - If the failure is already a network error, such as a timeout, revu shows that screen at once, without waiting for a second timeout.
 - A rate limit says when it resets, from the failed response itself.
 - Any other failure that empties every inbox group, such as a GitHub outage, shows GitHub's error in place of the groups.
-- Without git, diffs, find and `s` say git is missing and how to install it.
+- Without git, diffs and find say git is missing and how to install it.

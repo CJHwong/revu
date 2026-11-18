@@ -61,7 +61,8 @@ impl Pattern {
         self.matches_code(code)
     }
 
-    fn matches_code(&self, code: &str) -> bool {
+    /// Whether a line of code matches, such as a line of a file, with no marks before it.
+    pub fn matches_code(&self, code: &str) -> bool {
         let code = code.to_lowercase();
         let code = match (self.at_start, self.at_end) {
             (false, false) => return code.contains(&self.text),

@@ -76,7 +76,7 @@ On the Overview, press `e`. Type to filter, `Space` ticks or unticks, and `Enter
 
 ## Search code outside the diff
 
-Press `s` on any pull request tab. It searches every file in the repository at the pull request's head, ignoring case. `Enter` on a match opens the file at that line.
+On Files changed, press `/`, type the text, and press `Enter`. `n` goes through the matches in the changed files first. After the last one, it goes on through every other file in the repository at the pull request's head, opening each at its match. Past the last repo match, `n` comes back to the diff. `N` goes the other way. `Esc` closes a file and goes back to the diff.
 
 ## Copy text
 

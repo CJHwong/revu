@@ -31,7 +31,6 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 | `1`-`4`, `Tab` / `Shift+Tab` | Switch between Overview, Commits, Checks and Files changed. The tabs show GitHub's counts, not the digits. |
 | `Esc`, `h`, `q` | Back to the inbox |
 | `g` / `G`, `Space` / `b` | Top, bottom, page down, page up |
-| `s` | Search every file in the repo at the PR head, not only the changed ones. `Tab` completes a word or file name from the PR's changes, as in find. `Enter` opens the file at the match, with syntax colors from `bat` when it is installed. It needs the local clone, which the Files changed or Commits tab finds first. |
 | `r` | Fetch the pull request again |
 | `R` | Review: `Tab` picks Comment, Approve or Request changes. `ctrl+s` asks to confirm and `y` sends. Your pending line comments go with it. Request changes needs a comment; Comment needs a comment or line comments. Only Comment applies on your own PR, as GitHub requires, and on a merged or closed one. |
 | `X` | Discard your pending review and every line comment in it, after a `y`. |
@@ -100,7 +99,7 @@ src/app.rs:40-42
 - While you type, the prompt offers the most used word of the PR's changed lines that starts with your text, or a changed file's path, name or folder. `Tab` takes it.
 - Every match is marked, the current one stronger, and the pane title shows `/text  match 2 of 3 in file 5 of 63`.
 - On Files changed, `n` past a file's last match goes on to the next file that holds the text, opening its folder. On Commits, it searches the commit on screen.
-- `s` searches the whole repo instead.
+- On Files changed, `n` past the last file's last match goes on to the matches in every other file in the repo at the PR head. Each opens at its match, with syntax colors from `bat` when it is installed, and the title shows `repo match 3 of 155`. Past the last one, `n` comes back to the diff; `esc` goes back at once. The footer counts them: `match 1 of 2 in file 1 of 3, 155 in the repo`. git stops at 1000 matches, shown as `1000+`. Binary, untracked and ignored files are not searched.
 
 ## Text boxes
 
@@ -121,7 +120,7 @@ Copying uses OSC 52 and `pbcopy`. Inside tmux, OSC 52 needs `set -g set-clipboar
 
 ## Mouse
 
-A click works like the keys on what it hits: it opens a pull request in the inbox, switches a tab, selects a file, commit, check or search hit, folds a folder, and opens or closes a card, thread or folded block on the Overview.
+A click works like the keys on what it hits: it opens a pull request in the inbox, switches a tab, selects a file, commit or check, folds a folder, and opens or closes a card, thread or folded block on the Overview.
 
 The wheel scrolls the pane under the pointer: the diff or the list beside it. Over the Files changed list, it scrolls the list and leaves the selected file and its diff alone; `j` or `k` brings the list back to the selection. On the Overview, the wheel moves like `j` and `k`.
 

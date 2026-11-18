@@ -365,7 +365,7 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
                 }
             }
             Message::Diff { pr, key, result } => app.set_diff(&pr, key, result),
-            Message::Grep { pr, query, result } => app.set_grep(&pr, &query, result),
+            Message::Grep { pr, query, result } => app.set_find_repo(&pr, &query, result),
             Message::FindFiles { pr, query, result } => app.set_find_files(&pr, &query, result),
             // Without the words the prompt only loses its completion.
             Message::FindWords { pr, result } => {
@@ -389,19 +389,6 @@ fn perform(
         Action::FetchDetail(pr) => start_load(app, session, pr),
         Action::OpenBrowser(url) => open_browser(app, &url),
         Action::RunDiff(pr) => run_diff(terminal, app, session, &pr)?,
-        Action::Grep {
-            pr,
-            dir,
-            commit,
-            query,
-        } => {
-            let sender = session.sender.clone();
-            thread::spawn(move || {
-                let result =
-                    repo::grep(&dir, &commit, &query).map_err(|error| format!("{error:#}"));
-                let _ = sender.send(Message::Grep { pr, query, result });
-            });
-        }
         Action::FindWords {
             pr,
             dir,
@@ -423,10 +410,23 @@ fn perform(
             query,
         } => {
             let sender = session.sender.clone();
+            let (repo_pr, repo_dir, repo_head, repo_query) =
+                (pr.clone(), dir.clone(), head.clone(), query.clone());
             thread::spawn(move || {
                 let result = repo::files_with_text(&dir, &base, &head, &query)
                     .map_err(|error| format!("{error:#}"));
                 let _ = sender.send(Message::FindFiles { pr, query, result });
+            });
+            // The same text in every file at the PR head, for n past the diff's last match.
+            let sender = session.sender.clone();
+            thread::spawn(move || {
+                let result = repo::find_in_repo(&repo_dir, &repo_head, &repo_query)
+                    .map_err(|error| format!("{error:#}"));
+                let _ = sender.send(Message::Grep {
+                    pr: repo_pr,
+                    query: repo_query,
+                    result,
+                });
             });
         }
         Action::ShowFile {

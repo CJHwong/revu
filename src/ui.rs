@@ -22,7 +22,6 @@ use crate::model::{
     MergeMethod, MergeRequest, PrActivity, PrDetail, PrRef, PrSummary, RateLimit, ReviewState,
     Reviewer, Side, SinceCounts, Verdict, ViewedState,
 };
-use crate::repo::{GrepHit, MAX_GREP_HITS};
 use crate::theme::{ON_STATE, PrState, Theme};
 use crate::{markdown, overview};
 
@@ -474,10 +473,10 @@ const INBOX_HINTS: Hints = &[
 fn detail_hints(view: &DetailView) -> Hints {
     if let Some(overlay) = view.overlays.last() {
         return match overlay {
-            Overlay::Search { .. } => &[
-                ("j/k", "move"),
-                ("enter", "open at the line"),
-                ("esc", "back"),
+            Overlay::File { .. } if view.repo_hit.is_some() => &[
+                ("j/k", "scroll"),
+                ("n/N", "next/previous match"),
+                ("esc", "back to the diff"),
             ],
             Overlay::File { .. } => &[
                 ("j/k", "scroll"),
@@ -506,7 +505,6 @@ fn detail_hints(view: &DetailView) -> Hints {
             ("enter", "fold"),
             ("R", "review"),
             ("e", "labels"),
-            ("s", "search repo"),
             ("f", "filter"),
             ("F", "order"),
             ("n", "bots"),
@@ -517,7 +515,6 @@ fn detail_hints(view: &DetailView) -> Hints {
             ("j/k", "move"),
             ("enter", "open the run"),
             ("r", "reload"),
-            ("s", "search repo"),
             ("h", "back"),
         ],
         Tab::Commits => &[
@@ -526,7 +523,6 @@ fn detail_hints(view: &DetailView) -> Hints {
             ("/", "find"),
             ("m", "renderer"),
             ("w", "wrap"),
-            ("s", "search repo"),
             ("o", "browser"),
             ("h", "back"),
         ],
@@ -537,7 +533,6 @@ fn detail_hints(view: &DetailView) -> Hints {
             ("y", "copy path"),
             ("enter", "full file"),
             ("/", "find"),
-            ("s", "search"),
             ("R", "review"),
             ("m", "view"),
             ("o", "browser"),
@@ -608,7 +603,6 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
             ("1-4, tab, shift-tab", "switch tab"),
             ("esc, h, q", "back to the inbox"),
             ("g/G, space/b", "top, bottom, page down, page up"),
-            ("s", "search every file in the repo at the PR head"),
             ("o, d, r", "open in the browser, run open_diff, fetch again"),
             (
                 "R",
@@ -670,7 +664,10 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
                 "wrap long lines, or not; unwrapped, H/L scroll sideways",
             ),
             ("m", "switch the diff renderer"),
-            ("/, n/N", "find in the diff, next and previous match"),
+            (
+                "/, n/N",
+                "find in the diff, then in the rest of the repo; next and previous match",
+            ),
         ],
     ),
     (
@@ -798,8 +795,9 @@ fn render_detail(
     frame.render_widget(Paragraph::new(tab_lines), tabs);
     view.body_width = body.width;
     view.clicks.extend(tab_targets(detail, tabs, paint));
+    let place = repo_place(view, paint);
     if let Some(overlay) = view.overlays.last_mut() {
-        let targets = render_overlay(frame, overlay, body, paint);
+        let targets = render_overlay(frame, overlay, body, place, paint);
         view.clicks.extend(targets);
         return;
     }
@@ -863,37 +861,22 @@ fn render_overlay(
     frame: &mut Frame,
     overlay: &mut Overlay,
     area: Rect,
+    place: Option<Line<'static>>,
     paint: Paint,
 ) -> Vec<ClickTarget> {
     let theme = paint.theme;
-    let width = area.width as usize;
     match overlay {
-        Overlay::Search { query, hits, state } => {
-            let (title, items) = match hits {
-                None => (format!(" searching for \"{query}\"... "), Vec::new()),
-                Some(Err(error)) => (format!(" {error} "), Vec::new()),
-                Some(Ok(hits)) => (
-                    search_title(query, hits.len()),
-                    grep_items(hits, width, paint),
-                ),
-            };
-            let heights: Vec<usize> = items.iter().map(ListItem::height).collect();
-            let block = Block::new().title(paint.bold(title, theme.heading));
-            let inner = block.inner(area);
-            let list = List::new(items)
-                .highlight_style(Style::new().bg(theme.selection))
-                .block(block);
-            frame.render_stateful_widget(list, area, state);
-            return list_targets(inner, &heights, state.offset());
-        }
         Overlay::File {
             path,
             lines,
             scroll,
             ..
         } => {
-            let block =
+            let mut block =
                 Block::new().title(paint.bold(format!(" {path} at the PR head "), theme.heading));
+            if let Some(place) = place {
+                block = block.title(place);
+            }
             let inner = block.inner(area);
             frame.render_widget(block, area);
             let text = match lines {
@@ -913,35 +896,6 @@ fn render_overlay(
         }
     }
     Vec::new()
-}
-
-fn search_title(query: &str, count: usize) -> String {
-    let capped = if count == MAX_GREP_HITS {
-        "the first "
-    } else {
-        ""
-    };
-    format!(" {capped}{count} matches for \"{query}\" at the PR head ")
-}
-
-fn grep_items(hits: &[GrepHit], width: usize, paint: Paint) -> Vec<ListItem<'static>> {
-    hits.iter()
-        .map(|hit| grep_item(hit, width, paint))
-        .collect()
-}
-
-/// "src/app.rs:12  let x = 1;", the location in accent and the code as found.
-fn grep_item(hit: &GrepHit, width: usize, paint: Paint) -> ListItem<'static> {
-    let theme = paint.theme;
-    let location = format!(" {}:{}  ", hit.path, hit.line);
-    let code = truncate_to_width(
-        &hit.text.replace('\t', "    "),
-        width.saturating_sub(display_width(&location)),
-    );
-    ListItem::new(Line::from(vec![
-        paint.span(location, theme.accent),
-        paint.span(code, theme.foreground),
-    ]))
 }
 
 /// What the Commits or Checks tab shows before its data arrives, or when it failed.
@@ -1473,6 +1427,44 @@ fn keep_in_view(heights: &[usize], scroll: usize, cursor: usize, height: usize) 
 
 /// " /query  2 of 5 lines ", at the right of the diff pane's title, so the find text and
 /// the place among its matches stay in view. In another file it says n finds there.
+/// "/text  repo match 3 of 155  n/N next/previous", over the file a repo match opened.
+fn repo_place(view: &DetailView, paint: Paint) -> Option<Line<'static>> {
+    let (Some(query), Some(hit), Some(Ok(hits))) = (&view.find, view.repo_hit, &view.find_repo)
+    else {
+        return None;
+    };
+    let place = format!(
+        " repo match {} of {}  n/N next/previous ",
+        hit + 1,
+        repo_count(view, hits.len())
+    );
+    Some(
+        Line::from(vec![
+            paint.bold(format!(" /{query} "), paint.theme.warning),
+            paint.span(place, paint.theme.muted),
+        ])
+        .right_aligned(),
+    )
+}
+
+/// "155", or "980+" when git stopped at its limit.
+fn repo_count(view: &DetailView, count: usize) -> String {
+    match view.find_repo_capped {
+        true => format!("{count}+"),
+        false => count.to_string(),
+    }
+}
+
+/// What n reaches after the diff's matches: ", 155 more in the repo" once git returns.
+fn repo_note(view: &DetailView) -> String {
+    match &view.find_repo {
+        None => ", looking in the repo...".to_string(),
+        Some(Err(_)) => ", repo not searched".to_string(),
+        Some(Ok(hits)) if hits.is_empty() => String::new(),
+        Some(Ok(hits)) => format!(", {} in the repo", repo_count(view, hits.len())),
+    }
+}
+
 fn find_note(view: &DetailView, paint: Paint) -> Line<'static> {
     let Some(query) = &view.find else {
         return Line::default();
@@ -1494,6 +1486,11 @@ fn find_note(view: &DetailView, paint: Paint) -> Line<'static> {
         (None, None, _) => format!("{here} in this file, looking in the others..."),
         (None, _, _) => format!("{here} in this file, other files not searched"),
     };
+    let repo = match view.tab {
+        Tab::Files => repo_note(view),
+        _ => String::new(),
+    };
+    let place = format!("{place}{repo}");
     Line::from(vec![
         paint.bold(format!(" /{query} "), paint.theme.warning),
         paint.span(format!(" {place}  n/N next/previous "), paint.theme.muted),
@@ -2240,10 +2237,6 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
             "the folders that hold your clones, with commas between. new clones go in the first. enter saves, esc cancels"
                 .to_string(),
         ),
-        PromptKind::SearchRepo => (
-            " Search the repo at the PR head ".to_string(),
-            "tab completes a word or file name from the diff. finds text in every file, ignoring case".to_string(),
-        ),
         PromptKind::UpdatedWithin => (
             " Updated within, in days ".to_string(),
             "PRs updated in this many days, or empty for no limit. enter saves and reloads, esc keeps it"
@@ -2251,7 +2244,7 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
         ),
         PromptKind::FindInDiff => (
             " Find in the diff ".to_string(),
-            "tab completes a word from the diff. enter finds it in every changed file; n next, N previous"
+            "tab completes a word from the diff. enter finds it in every changed file, then n goes on through the rest of the repo; N goes back"
                 .to_string(),
         ),
         PromptKind::ConfirmDiscard { .. } => (

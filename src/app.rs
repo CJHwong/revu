@@ -12,7 +12,7 @@ use crate::file_tree::{self, FileRow};
 use crate::github::RepoLabel;
 use crate::line_diff::{DiffRow, RowKind};
 use crate::markdown::TextRow;
-use crate::repo::{GrepHit, LocalRepo};
+use crate::repo::{GrepHit, LocalRepo, MAX_GREP_HITS};
 
 use crate::config::{GroupConfig, ViewPrefs};
 use crate::model::{
@@ -34,12 +34,6 @@ pub enum Action {
     FetchDetail(PrRef),
     OpenBrowser(String),
     RunDiff(PrRef),
-    Grep {
-        pr: PrRef,
-        dir: PathBuf,
-        commit: String,
-        query: String,
-    },
     /// The words of the PR's changed lines, for the find prompt to complete.
     FindWords {
         pr: PrRef,
@@ -242,11 +236,6 @@ pub struct RepoJob {
 
 /// A view over the tab, read from the clone at the PR's head. Esc goes back one level.
 pub enum Overlay {
-    Search {
-        query: String,
-        hits: Option<Result<Vec<GrepHit>, String>>,
-        state: ListState,
-    },
     File {
         path: String,
         /// The file with the renderer's or bat's colors.
@@ -353,6 +342,13 @@ pub struct DetailView {
     /// On Files changed, the files that hold the find text and how many lines in each,
     /// in the list's order; None while git looks.
     pub find_files: Option<Result<Vec<(String, usize)>, String>>,
+    /// The find text's matches in every file at the PR head, which n reaches after the
+    /// diff's last match; None while git looks.
+    pub find_repo: Option<Result<Vec<GrepHit>, String>>,
+    /// git stopped at its limit, so the repo holds more matches than n reaches.
+    pub find_repo_capped: bool,
+    /// The repo match the file view shows, while n and N walk them.
+    pub repo_hit: Option<usize>,
     /// The PR's changed words for the find prompt to complete; None until git returns.
     pub find_words: Option<Vec<String>>,
     find_words_requested: bool,
@@ -430,6 +426,9 @@ impl DetailView {
             find: None,
             find_hit: None,
             find_files: None,
+            find_repo: None,
+            find_repo_capped: false,
+            repo_hit: None,
             find_pending: None,
             find_words: None,
             find_words_requested: false,
@@ -569,25 +568,6 @@ impl DetailView {
         Ok((repo.dir.clone(), detail.head_oid.clone()))
     }
 
-    fn search(&mut self, query: String) -> Result<Action, String> {
-        if query.trim().is_empty() {
-            return Err("type some text to search for".to_string());
-        }
-        let (dir, commit) = self.head_in_clone()?;
-        let state = ListState::default().with_selected(Some(0));
-        self.overlays.push(Overlay::Search {
-            query: query.clone(),
-            hits: None,
-            state,
-        });
-        Ok(Action::Grep {
-            pr: self.pr.clone(),
-            dir,
-            commit,
-            query,
-        })
-    }
-
     fn open_file(&mut self, path: String, line: usize) -> Result<Action, String> {
         let (dir, commit) = self.head_in_clone()?;
         // Show a few lines of context above the marked line.
@@ -638,34 +618,14 @@ impl DetailView {
         match (overlay, key) {
             (_, KeyCode::Esc | KeyCode::Char('q' | 'h') | KeyCode::Left) => {
                 self.overlays.pop();
+                self.repo_hit = None;
             }
-            (
-                Overlay::Search {
-                    hits: Some(Ok(hits)),
-                    state,
-                    ..
-                },
-                KeyCode::Enter,
-            ) => {
-                if let Some(hit) = state.selected().and_then(|index| hits.get(index)).cloned() {
-                    return self.open_file(hit.path, hit.line).map(Some);
-                }
+            // n and N go on through the repo's matches while one is on screen.
+            (Overlay::File { .. }, KeyCode::Char('n')) if self.repo_hit.is_some() => {
+                return self.find_next(true);
             }
-            (
-                Overlay::Search {
-                    hits: Some(Ok(hits)),
-                    state,
-                    ..
-                },
-                code,
-            ) => {
-                if let (Some(delta), Some(last)) = (step(code), hits.len().checked_sub(1)) {
-                    let next = state
-                        .selected()
-                        .unwrap_or(0)
-                        .saturating_add_signed(delta.into());
-                    state.select(Some(next.min(last)));
-                }
+            (Overlay::File { .. }, KeyCode::Char('N')) if self.repo_hit.is_some() => {
+                return self.find_next(false);
             }
             (
                 Overlay::File {
@@ -695,6 +655,8 @@ impl DetailView {
         self.find = Some(query.to_lowercase());
         self.find_hit = None;
         self.find_files = None;
+        self.find_repo = None;
+        self.leave_repo_hits();
         self.find_pending = None;
         let here = self.find_in_diff(true, false);
         if self.tab != Tab::Files {
@@ -732,11 +694,15 @@ impl DetailView {
     }
 
     /// n and N: the next or previous match. On Files changed, past this file's last match
-    /// (or with none here) it goes on to the next file that holds the text.
-    fn find_next(&mut self, forward: bool) -> Result<(), String> {
+    /// (or with none here) it goes on to the next file that holds the text. Past the last
+    /// file it goes on to the matches in the rest of the repo at the PR head, then back.
+    fn find_next(&mut self, forward: bool) -> Result<Option<Action>, String> {
+        if let Some(hit) = self.repo_hit {
+            return self.next_repo_hit(hit, forward);
+        }
         let in_file = self.tab == Tab::Files && matches!(self.find_files, Some(Ok(_)));
         if !in_file {
-            return self.find_in_diff(forward, true);
+            return self.find_in_diff(forward, true).map(|()| None);
         }
         let wraps = match self.current_find_hit() {
             Some(hit) if forward => hit.ordinal == hit.total,
@@ -744,9 +710,73 @@ impl DetailView {
             None => true,
         };
         if !wraps {
-            return self.find_in_diff(forward, true);
+            return self.find_in_diff(forward, true).map(|()| None);
         }
-        self.next_find_file(forward)
+        let hits = self.repo_hit_count();
+        if hits > 0 && self.at_last_find_file(forward) {
+            let first = if forward { 0 } else { hits - 1 };
+            return self.show_repo_hit(first).map(Some);
+        }
+        self.next_find_file(forward).map(|()| None)
+    }
+
+    /// The number of repo matches n can walk; none while git looks or after it failed.
+    fn repo_hit_count(&self) -> usize {
+        match &self.find_repo {
+            Some(Ok(hits)) => hits.len(),
+            _ => 0,
+        }
+    }
+
+    /// The selected file is the last (or, going back, the first) of the files that hold
+    /// the find text, or none of them does.
+    fn at_last_find_file(&self, forward: bool) -> bool {
+        let order = self.find_order();
+        let current = self.selected_file();
+        let edge = if forward { order.last() } else { order.first() };
+        order.is_empty() || (current.is_some() && edge == current.as_ref())
+    }
+
+    /// Moves along the repo's matches. Past either end it goes back to the diff: n to its
+    /// first matching file, N to its last.
+    fn next_repo_hit(&mut self, hit: usize, forward: bool) -> Result<Option<Action>, String> {
+        let next = if forward {
+            hit.checked_add(1)
+                .filter(|next| *next < self.repo_hit_count())
+        } else {
+            hit.checked_sub(1)
+        };
+        if let Some(next) = next {
+            return self.show_repo_hit(next).map(Some);
+        }
+        self.leave_repo_hits();
+        if self.find_order().is_empty() {
+            let query = self.find.clone().unwrap_or_default();
+            return Err(format!(
+                "\"{query}\" is in no changed file; n goes on through the repo"
+            ));
+        }
+        self.select_file_row(None);
+        self.next_find_file(forward).map(|()| None)
+    }
+
+    /// Opens the file of a repo match at the PR head, at its line.
+    fn show_repo_hit(&mut self, index: usize) -> Result<Action, String> {
+        let Some(Ok(hits)) = &self.find_repo else {
+            return Err("the repo search has not finished".to_string());
+        };
+        let hit = hits.get(index).ok_or("no such repo match")?.clone();
+        self.leave_repo_hits();
+        let action = self.open_file(hit.path, hit.line)?;
+        self.repo_hit = Some(index);
+        Ok(action)
+    }
+
+    /// Closes the file view of a repo match, if one is open.
+    fn leave_repo_hits(&mut self) {
+        if self.repo_hit.take().is_some() {
+            self.overlays.pop();
+        }
     }
 
     /// Selects the next (or previous) file that holds the find text, opening folders on the
@@ -1215,12 +1245,8 @@ impl DetailView {
                 self.cursor = (first + (row - target.area.y) as usize).min(last);
                 self.press_row();
             }
-            Click::Row(index) if !self.overlays.is_empty() => {
-                if let Some(Overlay::Search { state, .. }) = self.overlays.last_mut() {
-                    state.select(Some(index));
-                }
-                return self.overlay_key(KeyCode::Enter);
-            }
+            // A file view over the tab takes no row clicks.
+            Click::Row(_) if !self.overlays.is_empty() => return Ok(None),
             Click::Row(index) => {
                 let state = match self.tab {
                     Tab::Files => &mut self.file_state,
@@ -1408,7 +1434,6 @@ pub enum PromptKind {
     #[default]
     OpenLink,
     Workspace,
-    SearchRepo,
     FindInDiff,
     UpdatedWithin,
     /// Asks before deleting your pending review and its line comments.
@@ -2200,7 +2225,7 @@ impl App {
     /// Keeps the words, and hands them to the find prompt if it is open.
     pub fn set_find_words(&mut self, pr: &PrRef, words: Vec<String>) {
         if let Some(prompt) = &mut self.prompt
-            && matches!(prompt.kind, PromptKind::FindInDiff | PromptKind::SearchRepo)
+            && prompt.kind == PromptKind::FindInDiff
         {
             prompt.words = words.clone();
         }
@@ -2216,25 +2241,26 @@ impl App {
         }
     }
 
-    pub fn set_grep(&mut self, pr: &PrRef, query: &str, result: Result<Vec<GrepHit>, String>) {
+    /// The repo's matches for a find, unless a newer find replaced it. Matches in the
+    /// changed files are dropped: n already reaches them in the diff.
+    pub fn set_find_repo(&mut self, pr: &PrRef, query: &str, result: Result<Vec<GrepHit>, String>) {
         let Some(view) = self.view_for(pr) else {
             return;
         };
-        for overlay in &mut view.overlays {
-            match overlay {
-                Overlay::Search {
-                    query: shown,
-                    hits: hits @ None,
-                    state,
-                } if shown == query => {
-                    // Drawing the empty "searching" list cleared the selection.
-                    state.select(Some(0));
-                    *hits = Some(result);
-                    return;
-                }
-                _ => {}
-            }
+        if view.find.as_deref() != Some(query) {
+            return;
         }
+        let changed: HashSet<String> = view
+            .loaded_files()
+            .map(|files| files.iter().map(|file| file.path.clone()).collect())
+            .unwrap_or_default();
+        view.find_repo_capped = matches!(&result, Ok(hits) if hits.len() == MAX_GREP_HITS);
+        let result = result.map(|hits| {
+            hits.into_iter()
+                .filter(|hit| !changed.contains(&hit.path))
+                .collect()
+        });
+        view.find_repo = Some(result);
     }
 
     /// Fills the file views that are still waiting for this path.
@@ -2805,7 +2831,6 @@ impl App {
             PromptKind::OpenLink => self.submit_link(prompt),
             PromptKind::Workspace => Some(Action::SetWorkspace(prompt.text.trim().to_string())),
             PromptKind::ConfirmClone { pr, dir } => self.submit_clone(pr, dir, &prompt.text),
-            PromptKind::SearchRepo => self.in_view(|view| view.search(prompt.text).map(Some)),
             PromptKind::FindInDiff => self.in_view(|view| view.start_find(&prompt.text)),
             PromptKind::UpdatedWithin => self.submit_updated_within(&prompt.text),
             PromptKind::ConfirmDiscard { pr, pending_review } => prompt
@@ -3219,8 +3244,7 @@ impl App {
             _ => None,
         };
         if let Some(result) = find_result {
-            self.error = result.err();
-            return None;
+            return self.report(result);
         }
         if view.line_mode.is_some() {
             return self.line_mode_key(key);
@@ -3243,14 +3267,6 @@ impl App {
                 self.error = result.err();
             }
             KeyCode::Char('e') if view.tab == Tab::Overview => return self.open_label_menu(),
-            KeyCode::Char('s') => {
-                self.prompt = Some(Prompt {
-                    kind: PromptKind::SearchRepo,
-                    words: view.find_words.clone().unwrap_or_default(),
-                    ..Prompt::default()
-                });
-                return view.words_request();
-            }
             KeyCode::Char('/') if diff_pane => {
                 self.prompt = Some(Prompt {
                     kind: PromptKind::FindInDiff,
@@ -5145,86 +5161,6 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_search_runs_nothing() {
-        let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
-        ready_repo(&mut app, &pr);
-        app.handle_key(key(KeyCode::Char('s')));
-        type_text(&mut app, "  ");
-        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
-        assert!(view(&app).overlays.is_empty());
-        assert_eq!(app.error.as_deref(), Some("type some text to search for"));
-    }
-
-    #[test]
-    fn search_needs_the_clone() {
-        let (mut app, _) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
-        app.handle_key(key(KeyCode::Char('s')));
-        type_text(&mut app, "Foo");
-        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
-        assert!(app.error.as_deref().unwrap().contains("clone is not ready"));
-    }
-
-    #[test]
-    fn search_lists_hits_and_enter_opens_the_file_at_the_line() {
-        let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
-        ready_repo(&mut app, &pr);
-        app.handle_key(key(KeyCode::Char('s')));
-        type_text(&mut app, "Foo");
-        let Some(Action::Grep { commit, query, .. }) = app.handle_key(key(KeyCode::Enter)) else {
-            panic!("expected a grep");
-        };
-        assert_eq!((commit.as_str(), query.as_str()), ("head999", "Foo"));
-        let hit = |path: &str, line| GrepHit {
-            path: path.to_string(),
-            line,
-            text: "Foo".to_string(),
-        };
-        let Some(Overlay::Search { state, .. }) = view_mut(&mut app).overlays.last_mut() else {
-            panic!("expected search results");
-        };
-        // What ratatui does when it draws the list while it is still empty.
-        state.select(None);
-        app.set_grep(&pr, "Foo", Ok(vec![hit("x.py", 3), hit("y.py", 40)]));
-        let Some(Overlay::Search { state, .. }) = view(&app).overlays.last() else {
-            panic!("expected search results");
-        };
-        assert_eq!(state.selected(), Some(0), "enter must open the first hit");
-        app.handle_key(key(KeyCode::Char('j')));
-        let Some(Action::ShowFile { path, .. }) = app.handle_key(key(KeyCode::Enter)) else {
-            panic!("expected a file");
-        };
-        assert_eq!(path, "y.py");
-        let text = (1..=50)
-            .map(|number| format!("line {number}\n"))
-            .collect::<String>();
-        app.set_file(
-            &pr,
-            "y.py",
-            crate::highlight::to_text(text.as_bytes(), None),
-        );
-        let Some(Overlay::File {
-            scroll,
-            lines: Some(Ok(lines)),
-            ..
-        }) = view(&app).overlays.last()
-        else {
-            panic!("expected a loaded file");
-        };
-        assert_eq!(
-            (*scroll, lines.lines.len()),
-            (34, 50),
-            "the hit sits a few lines down"
-        );
-        app.handle_key(key(KeyCode::Esc));
-        assert!(matches!(
-            view(&app).overlays.last(),
-            Some(Overlay::Search { .. })
-        ));
-        app.handle_key(key(KeyCode::Esc));
-        assert!(view(&app).overlays.is_empty());
-    }
-
-    #[test]
     fn find_jumps_to_matching_lines_and_wraps() {
         let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
         ready_repo(&mut app, &pr);
@@ -5256,6 +5192,70 @@ mod tests {
         assert_eq!(place(&app), (0, 1, 1, 2), "wraps to the first match");
         app.handle_key(key(KeyCode::Char('N')));
         assert_eq!(place(&app), (3, 6, 2, 2), "wraps back to the last match");
+    }
+
+    #[test]
+    fn n_goes_on_from_the_diff_through_the_rest_of_the_repo_and_back() {
+        let (mut app, pr) = files_tab(vec![
+            file("a.md", ViewedState::Unviewed),
+            file("b.md", ViewedState::Unviewed),
+        ]);
+        ready_repo(&mut app, &pr);
+        let job = app.take_diff_request().unwrap();
+        app.set_diff(&pr, job.key, crate::highlight::to_text(b"needle\n", None));
+        app.handle_key(key(KeyCode::Char('/')));
+        type_text(&mut app, "Needle");
+        app.handle_key(key(KeyCode::Enter));
+        app.set_find_files(&pr, "needle", Ok(vec![("a.md".to_string(), 1)]));
+        let hit = |path: &str, line| GrepHit {
+            path: path.to_string(),
+            line,
+            text: "needle".to_string(),
+        };
+        let found = vec![hit("a.md", 1), hit("x.py", 3), hit("y.py", 40)];
+        app.set_find_repo(&pr, "needle", Ok(found));
+        let repo = view(&app).find_repo.clone().unwrap().unwrap();
+        assert_eq!(
+            repo.len(),
+            2,
+            "a.md is changed, so n reaches it in the diff"
+        );
+        let shown = |action: Option<Action>| match action {
+            Some(Action::ShowFile {
+                path, line, commit, ..
+            }) => (path, line, commit),
+            other => panic!("expected a file, got {other:?}"),
+        };
+        let first = shown(app.handle_key(key(KeyCode::Char('n'))));
+        assert_eq!(first, ("x.py".to_string(), 3, "head999".to_string()));
+        assert_eq!(view(&app).repo_hit, Some(0));
+        assert_eq!(shown(app.handle_key(key(KeyCode::Char('n')))).0, "y.py");
+        assert_eq!(view(&app).overlays.len(), 1, "one file view at a time");
+        assert!(app.handle_key(key(KeyCode::Char('n'))).is_none());
+        assert!(
+            view(&app).overlays.is_empty(),
+            "past the last: back to the diff"
+        );
+        assert_eq!(view(&app).selected_file(), Some(0));
+        assert_eq!(
+            view(&app).current_find_hit().map(|hit| hit.ordinal),
+            Some(1)
+        );
+        assert_eq!(shown(app.handle_key(key(KeyCode::Char('N')))).0, "y.py");
+        app.handle_key(key(KeyCode::Esc));
+        assert!(view(&app).overlays.is_empty());
+        assert_eq!(view(&app).repo_hit, None);
+    }
+
+    #[test]
+    fn a_new_find_ignores_the_repo_matches_of_the_old_one() {
+        let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        ready_repo(&mut app, &pr);
+        app.handle_key(key(KeyCode::Char('/')));
+        type_text(&mut app, "new");
+        app.handle_key(key(KeyCode::Enter));
+        app.set_find_repo(&pr, "old", Ok(Vec::new()));
+        assert!(view(&app).find_repo.is_none());
     }
 
     #[test]

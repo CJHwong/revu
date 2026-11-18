@@ -249,6 +249,17 @@ pub fn grep(dir: &Path, commit: &str, query: &str) -> Result<Vec<GrepHit>> {
     bail!("git grep failed ({status}): {}", stderr.trim())
 }
 
+/// The lines in every file at `commit` that a find matches, anchors included: git looks
+/// for the text, then the anchors drop the lines where it is not at the code's start or end.
+pub fn find_in_repo(dir: &Path, commit: &str, query: &str) -> Result<Vec<GrepHit>> {
+    let pattern = crate::find::Pattern::parse(query);
+    let hits = grep(dir, commit, &pattern.text)?;
+    Ok(hits
+        .into_iter()
+        .filter(|hit| pattern.matches_code(&hit.text))
+        .collect())
+}
+
 /// Parses one `git grep -n -z <commit>` record: `<commit>:<path>\0<line>\0<text>`.
 pub fn parse_grep_record(record: &[u8], prefix: &str) -> Option<GrepHit> {
     let record = String::from_utf8_lossy(record);
@@ -767,6 +778,19 @@ mod tests {
         };
         assert_eq!(hit, Some(expected));
         assert_eq!(parse_grep_record(b"other:src/a.rs\x001\x00x", "abc:"), None);
+    }
+
+    #[test]
+    fn find_in_repo_keeps_the_anchors_of_a_find() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let head = String::from_utf8(git(dir, &["rev-parse", "HEAD"]).unwrap().stdout).unwrap();
+        let hits = find_in_repo(dir, head.trim(), "^[package]$").unwrap();
+        let paths: Vec<&str> = hits.iter().map(|hit| hit.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["Cargo.toml"],
+            "only the line that is just [package]"
+        );
     }
 
     #[test]
