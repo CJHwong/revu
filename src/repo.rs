@@ -419,13 +419,14 @@ pub fn run_renderer(dir: &Path, command: &str, whole_file: bool, width: u16) -> 
     )
 }
 
-/// The program the shell could not find, from "sh: delta: command not found" or git's
-/// "difft --width=94: difft: command not found".
+/// The program the shell could not find, from bash's "sh: delta: command not found",
+/// dash's "sh: 1: delta: not found", or git's "difft --width=94: difft: command not found".
 fn missing_program(stderr: &str) -> Option<&str> {
-    let line = stderr
-        .lines()
-        .find(|line| line.contains("command not found"))?;
-    let before = line.split(": command not found").next()?;
+    let before = stderr.lines().find_map(|line| {
+        line.split_once(": command not found")
+            .map(|(before, _)| before)
+            .or_else(|| line.strip_suffix(": not found"))
+    })?;
     before.rsplit([':', ' ']).find(|word| !word.is_empty())
 }
 
@@ -728,6 +729,13 @@ mod tests {
             missing_program("x --width=94: difft: command not found\nfatal: external diff died"),
             Some("difft")
         );
+        // dash, the sh of Debian and Ubuntu, words it differently.
+        assert_eq!(missing_program("sh: 1: delta: not found"), Some("delta"));
+        assert_eq!(
+            missing_program("x --width=94: 1: difft: not found\nfatal: external diff died"),
+            Some("difft")
+        );
+        assert_eq!(missing_program("error: path not found in the tree"), None);
         let narrow = run_renderer(&dir, "printf \"$DFT_DISPLAY\"", false, 60).unwrap();
         if std::env::var_os("DFT_DISPLAY").is_none() {
             assert_eq!(narrow, b"inline");
