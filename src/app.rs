@@ -938,12 +938,37 @@ impl DetailView {
             true => (mode.cursor + 1..rows.len()).find(holds),
             false => (0..mode.cursor).rev().find(holds),
         };
+        let outdated = !forward && found.is_none() && self.has_outdated_threads();
         let direction = if forward { "below" } else { "above" };
-        let index = found.ok_or(format!("no review thread {direction}"))?;
+        let index = match outdated {
+            true => 0,
+            false => found.ok_or(format!("no review thread {direction}"))?,
+        };
         if let Some(mode) = &mut self.line_mode {
             mode.cursor = index;
+            // The outdated threads sit above the first row: the top of the pane shows
+            // them, even when they are taller than the pane.
+            if outdated {
+                mode.scroll = 0;
+                self.line_followed = Some(0);
+            }
         }
         Ok(())
+    }
+
+    /// Whether select lines lists threads above the diff, as their lines are gone from it.
+    fn has_outdated_threads(&self) -> bool {
+        let (Some(mode), Some(Ok(activity))) = (&self.line_mode, &self.activity) else {
+            return false;
+        };
+        let Some(Ok(rows)) = &mode.rows else {
+            return false;
+        };
+        activity.threads_on(&mode.path).any(|thread| {
+            !thread
+                .at
+                .is_some_and(|at| rows.iter().any(|row| row_holds(row, at)))
+        })
     }
 
     /// The review threads on a row of a file's diff.
@@ -5571,6 +5596,24 @@ mod tests {
             app.error.as_deref(),
             Some("this file has no review threads")
         );
+    }
+
+    #[test]
+    fn bracket_up_past_the_first_thread_line_goes_to_the_outdated_threads() {
+        let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        app.set_activity(&pr, Ok(crate::model::tests::sample_activity()));
+        view_mut(&mut app).line_mode = Some(LineMode {
+            path: "a.md".to_string(),
+            rows: Some(Ok(crate::line_diff::parse("@@ -1,3 +1,3 @@\n x\n y\n z\n"))),
+            cursor: 3,
+            anchor: None,
+            scroll: 40,
+        });
+        app.handle_key(key(KeyCode::Char('[')));
+        assert_eq!(app.error, None);
+        let mode = view(&app).line_mode.as_ref().unwrap();
+        assert_eq!((mode.cursor, mode.scroll), (0, 0), "the top shows them");
+        assert_eq!(view(&app).line_followed, Some(0), "and stays there");
     }
 
     #[test]

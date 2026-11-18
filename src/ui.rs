@@ -1622,7 +1622,12 @@ fn thread_lines(
         );
         for row in body {
             let mut spans = vec![indent(), paint.span("│ ", color)];
-            spans.extend(row.line.spans);
+            spans.extend(
+                row.line
+                    .spans
+                    .into_iter()
+                    .map(|span| off_selection(span, theme)),
+            );
             lines.push(Line::from(spans));
         }
     }
@@ -1632,6 +1637,15 @@ fn thread_lines(
         paint.span(resolved, theme.muted),
     ]));
     lines
+}
+
+/// Inline code keeps its color but not the selection background, which in select lines
+/// means a marked range.
+fn off_selection(mut span: Span<'static>, theme: &Theme) -> Span<'static> {
+    if span.style.bg == Some(theme.selection) {
+        span.style.bg = None;
+    }
+    span
 }
 
 /// A comment's first line as the Overview shows it, without its Markdown marks.
@@ -3835,6 +3849,18 @@ mod tests {
             paint,
         ));
         assert!(open[0].contains("╭ lines 827-830, lead  "), "{open:?}");
+        let code = ThreadLine {
+            comments: vec![crate::model::ThreadComment {
+                body: "Call `run` here.".to_string(),
+                ..thread.comments[0].clone()
+            }],
+            ..thread.clone()
+        };
+        let marked = thread_lines(&code, true, None, 80, paint)
+            .iter()
+            .flat_map(|line| line.spans.clone())
+            .any(|span| span.style.bg == Some(theme.selection));
+        assert!(!marked, "inline code does not look like a marked range");
     }
 
     #[test]

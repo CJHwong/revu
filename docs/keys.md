@@ -51,7 +51,7 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 
 ## Files changed
 
-A file with review threads shows their count, such as `●3`, and the diff pane's title counts them, the outdated ones apart: `4 threads (3 outdated), S to read`. In select lines, each thread sits under its line, folded to its first comment. `t` opens or closes every thread in the file, a click opens or closes one, and `]` / `[` move the cursor from one thread's line to the next. Resolved threads are muted, and outdated ones, no longer on a line of the diff, are listed at the top. The title also names the function or class the hunk at the top changes, such as `in BaseApp > on_mount`, and select lines names the one around the cursor. This works for Python, Rust, JavaScript, TypeScript and Go. The diff pane shows it when the view's hunks match git's, as in the word view and delta.
+A file with review threads shows their count, such as `●3`, and the diff pane's title counts them, the outdated ones apart: `4 threads (3 outdated), S to read`. In select lines, each thread sits under its line, folded to its first comment. `t` opens or closes every thread in the file, a click opens or closes one, and `]` / `[` move the cursor from one thread's line to the next; `[` above the first one goes to the outdated threads at the top. Resolved threads are muted, and outdated ones, no longer on a line of the diff, are listed at the top. The title also names the function or class the hunk at the top changes, such as `in BaseApp > on_mount`, and select lines names the one around the cursor. This works for Python, Rust, JavaScript, TypeScript and Go. The diff pane shows it when the view's hunks match git's, as in the word view and delta.
 
 ## Go to definition
 
