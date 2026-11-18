@@ -42,7 +42,7 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 
 | Key | Action |
 |---|---|
-| `j` / `k` | Next or previous comment, review thread or folded block. Inside one taller than the screen, a third of a screen. The cursor never stops on an empty line. |
+| `j` / `k` | Next or previous comment, review thread or folded block when its top is on screen. Otherwise a third of a screen, so a long comment is read through, not skipped. The cursor never stops on an empty line. |
 | `Enter` | Open or close the card, review thread or `<details>` block under the cursor. On the merge box, `Enter` on the Checks row opens the Checks tab, and on the Comments row shows only unresolved threads. |
 | `]` / `[` | Next or previous card or folded block |
 | `f` / `F` / `n` | Filter the comments (All, Unresolved, Mine), flip oldest or newest first, hide bots. Mine shows only your own words, with the threads you replied in open. |
@@ -106,6 +106,6 @@ Copying uses OSC 52 and `pbcopy`. Inside tmux, OSC 52 needs `set -g set-clipboar
 
 A click works like the keys on what it hits: it opens a pull request in the inbox, switches a tab, selects a file, commit, check or search hit, folds a folder, and opens or closes a card, thread or folded block on the Overview.
 
-The wheel scrolls the pane under the pointer: the diff or the list beside it. Over the Files changed list, it scrolls the list and leaves the selected file and its diff alone; `j` or `k` brings the list back to the selection. On the Overview, one tick goes to the next card, or a third of a screen inside a card taller than the screen.
+The wheel scrolls the pane under the pointer: the diff or the list beside it. Over the Files changed list, it scrolls the list and leaves the selected file and its diff alone; `j` or `k` brings the list back to the selection. On the Overview, the wheel moves like `j` and `k`.
 
 revu captures the mouse for this, so selecting text needs the terminal's bypass modifier: Shift in most terminals, Option or Fn in some.

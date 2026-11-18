@@ -1121,15 +1121,23 @@ impl DetailView {
         scroll.min(total.saturating_sub(self.page))
     }
 
-    /// One wheel tick on the Overview: to the next card or fold, or, when that is more
-    /// than a screen away, a third of a screen, so a long card can still be read.
+    /// One wheel tick or j/k on the Overview: to the next card or fold when its top is on
+    /// screen, since everything before it has then been seen; otherwise a third of a
+    /// screen, so a long card is read through, not jumped over.
     fn wheel_overview(&mut self, forward: bool) {
         let chunk = (self.page / 3).max(1);
-        let distance = self
-            .anchor_target(forward)
-            .map(|target| target.abs_diff(self.cursor));
-        match distance {
-            Some(distance) if distance <= self.page => self.jump_anchor(forward),
+        let on_screen = |row: usize| (self.scroll..self.scroll + self.page).contains(&row);
+        let before = self.scroll;
+        match self.anchor_target(forward) {
+            Some(target) if on_screen(target) => {
+                self.jump_anchor(forward);
+                // The page only follows the key's direction, never back over read text.
+                self.scroll = if forward {
+                    self.scroll.max(before)
+                } else {
+                    self.scroll.min(before)
+                };
+            }
             _ if forward => self.move_in_tab(chunk as isize),
             _ => self.move_in_tab(-(chunk as isize)),
         }
@@ -3252,8 +3260,66 @@ mod tests {
         app.handle_scroll(1, -1);
         assert_eq!(
             view_cursor(&app),
-            5,
-            "the card top is within a screen, so one tick reaches it"
+            25,
+            "the card top is off screen, so going back reads by thirds too"
+        );
+    }
+
+    fn overview_with_anchors(app: &mut App, total: usize, anchors: &[usize]) {
+        use crate::markdown::TextRow;
+        let Screen::Detail(view) = &mut app.screen else {
+            unreachable!()
+        };
+        let mut rows: Vec<TextRow> = (0..total)
+            .map(|_| TextRow::plain(ratatui::text::Line::from("text")))
+            .collect();
+        for anchor in anchors {
+            rows[*anchor] = TextRow::anchor(ratatui::text::Line::from("card"));
+        }
+        view.tab = Tab::Overview;
+        view.overview = Some(OverviewLayout { width: 60, rows });
+        view.page = 30;
+    }
+
+    #[test]
+    fn j_never_skips_the_rest_of_a_comment_with_the_cursor_low_on_screen() {
+        let (mut app, _) = files_tab(Vec::new());
+        overview_with_anchors(&mut app, 200, &[0, 50, 150]);
+        let Screen::Detail(detail) = &mut app.screen else {
+            unreachable!()
+        };
+        // As after a click near the bottom: the next card is 25 rows down, off screen.
+        (detail.cursor, detail.scroll) = (25, 0);
+        app.handle_key(key(KeyCode::Char('j')));
+        assert!(
+            view(&app).scroll <= 29,
+            "rows 30 to 49 must show before the next card; the page starts at {}",
+            view(&app).scroll
+        );
+    }
+
+    #[test]
+    fn j_through_the_overview_shows_every_row_and_keeps_some_in_common() {
+        let (mut app, _) = files_tab(Vec::new());
+        overview_with_anchors(&mut app, 300, &[0, 4, 20, 45, 52, 90, 125, 128, 200, 260]);
+        let mut seen = vec![false; 300];
+        let mut scroll = 0;
+        for _ in 0..80 {
+            app.handle_key(key(KeyCode::Char('j')));
+            let next = view(&app).scroll;
+            assert!(next >= scroll, "j never moves the page back");
+            assert!(
+                next < scroll + 30,
+                "screens at {scroll} and {next} share no row"
+            );
+            scroll = next;
+            seen[scroll..scroll + 30]
+                .iter_mut()
+                .for_each(|row| *row = true);
+        }
+        assert!(
+            seen.iter().all(|row| *row),
+            "every row showed at some point"
         );
     }
 
