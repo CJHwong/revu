@@ -26,7 +26,7 @@ pub struct Theme {
 
 /// The built-in themes in menu order: the terminal's own colors, then dark and light
 /// themes, each A to Z.
-const THEMES: [(&str, Theme); 17] = [
+const THEMES: [(&str, Theme); 18] = [
     ("terminal", TERMINAL),
     ("catppuccin_frappe", CATPPUCCIN_FRAPPE),
     ("catppuccin_macchiato", CATPPUCCIN_MACCHIATO),
@@ -34,6 +34,7 @@ const THEMES: [(&str, Theme); 17] = [
     ("darcula", DARCULA),
     ("dracula", DRACULA),
     ("gruvbox_dark", GRUVBOX_DARK),
+    ("jetbrains_dark", JETBRAINS_DARK),
     ("monokai", MONOKAI),
     ("nord", NORD),
     ("one_half_dark", ONE_HALF_DARK),
@@ -316,6 +317,25 @@ const DARCULA: Theme = Theme {
     bat_theme: "Visual Studio Dark+",
     added_bg: Color::Rgb(0x29, 0x44, 0x36),
     removed_bg: Color::Rgb(0x55, 0x34, 0x34),
+};
+
+/// The JetBrains IDEs' current dark theme, as Helix's jetbrains_dark has it: salmon
+/// keywords, green strings, sky-blue functions on near-black. Code takes Visual Studio
+/// Dark+, as bat has no JetBrains theme.
+const JETBRAINS_DARK: Theme = Theme {
+    background: Color::Rgb(0x1e, 0x1f, 0x22),
+    foreground: Color::Rgb(0xbc, 0xbe, 0xc4),
+    muted: Color::Rgb(0x86, 0x8a, 0x91),
+    selection: Color::Rgb(0x2e, 0x43, 0x6e),
+    heading: Color::Rgb(0xcf, 0x8e, 0x6d),
+    accent: Color::Rgb(0x56, 0xa8, 0xf5),
+    success: Color::Rgb(0x6a, 0xab, 0x73),
+    warning: Color::Rgb(0xc2, 0x9e, 0x4a),
+    danger: Color::Rgb(0xd6, 0x4d, 0x5b),
+    fold: Color::Rgb(0xc7, 0x7d, 0xbb),
+    bat_theme: "Visual Studio Dark+",
+    added_bg: Color::Rgb(0x26, 0x3b, 0x2c),
+    removed_bg: Color::Rgb(0x48, 0x2a, 0x2e),
 };
 
 /// IntelliJ Light: navy keywords, green strings, purple fields on white. bat has no
