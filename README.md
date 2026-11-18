@@ -19,7 +19,7 @@ brew install CJHwong/tap/revu                        # Homebrew
 cargo install --git https://github.com/CJHwong/revu  # from source, with Rust
 ```
 
-The first run writes `~/.config/revu/config.yaml`. Set `workspace_dir` in it to the folder that holds your clones, so the diffs can load.
+The first run writes `~/.config/revu/config.yaml`. Set `workspace_dir` in it to the folder, or a list of folders, that holds your clones, so the diffs can load.
 
 ## Documentation
 

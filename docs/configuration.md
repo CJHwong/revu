@@ -39,7 +39,17 @@ Pull request states (open, draft, merged, closed) keep GitHub's colors in every 
 
 ### workspace_dir
 
-The folder that holds your clones. The Files changed tab asks for it once and saves it here. See [How it works](how-it-works.md#local-clones) for how revu finds a clone.
+The folder that holds your clones, or a list of folders. The Files changed tab asks for one the first time and saves it here.
+
+```yaml
+workspace_dir: ~/Workspace
+# or
+workspace_dir:
+  - ~/Workspace
+  - ~/Workspace/side_projects
+```
+
+revu searches the folders in order, and a new clone goes into the first. Settings (`,`) edits the list with commas between the folders, and saves it on one line. See [How it works](how-it-works.md#local-clones) for how revu finds a clone.
 
 ### diff_renderers
 

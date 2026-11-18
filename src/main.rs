@@ -153,7 +153,7 @@ fn main() -> Result<()> {
     let mut app = App::new();
     app.renderer_names = renderer_names(&session.config);
     check_renderers(&session.config, &mut app);
-    app.workspace_dir = session.config.workspace_dir.clone();
+    app.workspace_dirs = session.config.workspace_dirs.clone();
     app.updated_within_days = session.config.updated_within_days;
     match config::load_prefs(&config::prefs_path(&session.config_path)) {
         Ok(prefs) => app.prefs = prefs,
@@ -576,15 +576,20 @@ fn dispatch_requests(app: &mut App, session: &mut Session) {
 
 /// Finds the clone in the workspace, asking for the workspace or for a clone first when needed.
 fn prepare_repo(app: &mut App, session: &mut Session, job: RepoJob) {
-    let Some(workspace) = &session.config.workspace_dir else {
+    if session.config.workspace_dirs.is_empty() {
         app.set_repo_state(RepoState::Busy(
             "waiting for the workspace folder".to_string(),
         ));
         app.ask(PromptKind::Workspace, "~/Workspace");
         return;
-    };
-    let workspace = repo::expand_home(workspace);
-    match repo::find_clone(&workspace, &job.pr.repo) {
+    }
+    let workspaces: Vec<_> = session
+        .config
+        .workspace_dirs
+        .iter()
+        .map(|folder| repo::expand_home(folder))
+        .collect();
+    match repo::find_clone(&workspaces, &job.pr.repo) {
         Ok(CloneLookup::Found(dir)) => {
             app.set_repo_state(RepoState::Busy(format!(
                 "fetching the PR into {}",
@@ -615,7 +620,6 @@ fn prepare_repo(app: &mut App, session: &mut Session, job: RepoJob) {
     }
 }
 
-/// Saves the workspace folder, then lets the open PR look for its clone again.
 /// Applies the theme at once, redraws the diffs in its colors, and saves it.
 fn set_theme(app: &mut App, session: &mut Session, name: &'static str) {
     let theme = match theme::by_name(name) {
@@ -635,24 +639,34 @@ fn set_theme(app: &mut App, session: &mut Session, name: &'static str) {
     }
 }
 
+/// Saves the workspace folders, typed with commas between them, then lets the open PR
+/// look for its clone again.
 fn set_workspace(app: &mut App, session: &mut Session, text: String) {
-    let dir = repo::expand_home(&text);
-    if text.is_empty() || !dir.is_dir() {
+    let folders = config::split_folders(&text);
+    let not_a_folder = folders
+        .iter()
+        .map(|folder| repo::expand_home(folder))
+        .find(|dir| !dir.is_dir());
+    if let Some(dir) = not_a_folder {
         let error = format!("{} is not a folder", dir.display());
         app.set_prompt_error(PromptKind::Workspace, &text, error);
+        return;
+    }
+    if folders.is_empty() {
+        app.set_prompt_error(PromptKind::Workspace, &text, "type a folder".to_string());
         return;
     }
     let saved = config::save_setting(
         &session.config_path,
         "workspace_dir",
-        &config::quoted(&text),
+        &config::workspace_value(&folders),
     );
     if let Err(error) = saved {
         app.set_prompt_error(PromptKind::Workspace, &text, format!("{error:#}"));
         return;
     }
-    session.config.workspace_dir = Some(text.clone());
-    app.workspace_dir = Some(text);
+    session.config.workspace_dirs = folders.clone();
+    app.workspace_dirs = folders;
     // An open PR looks for its clone again, in the new folder.
     app.set_repo_state(RepoState::Unknown);
 }
@@ -775,7 +789,7 @@ fn refresh(app: &mut App, session: &mut Session) {
                 app.forget_colors();
             }
             app.theme_name = theme::name_of(&config.theme).unwrap_or(app.theme_name);
-            app.workspace_dir = config.workspace_dir.clone();
+            app.workspace_dirs = config.workspace_dirs.clone();
             app.updated_within_days = config.updated_within_days;
             session.config = config;
         }

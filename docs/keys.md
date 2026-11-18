@@ -8,7 +8,7 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 |---|---|
 | `Ctrl+L` (or `Cmd+L`), or paste | Open a pull request by link or `owner/repo#123`. `Cmd+L` works only in terminals that pass Cmd to applications through the kitty keyboard protocol and do not use `Cmd+L` themselves. `Ctrl+L` works everywhere. |
 | `?` | Show every key. `j`/`k` and `Space`/`b` scroll it; any other key closes it. |
-| `,` | Settings: the theme, the workspace folder, and how many days back the inbox looks. `Enter` edits the selected one and saves it to its line in the config at once; comments and other lines stay as they are. A new number of days reloads the inbox. |
+| `,` | Settings: the theme, the workspace folders, and how many days back the inbox looks. `Enter` edits the selected one and saves it to its line in the config at once; comments and other lines stay as they are. A new number of days reloads the inbox. |
 | `,`, then Theme | Pick a color theme. `Enter` applies it at once, diffs included, and saves it as the `theme:` line in the config. See [Configuration](configuration.md#theme) for the list. |
 
 ## Inbox

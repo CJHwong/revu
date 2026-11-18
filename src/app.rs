@@ -1590,7 +1590,7 @@ impl Setting {
     pub fn label(self) -> &'static str {
         match self {
             Setting::Theme => "Theme",
-            Setting::Workspace => "Workspace folder",
+            Setting::Workspace => "Workspace folders",
             Setting::UpdatedWithin => "Updated within",
         }
     }
@@ -1666,7 +1666,7 @@ pub struct App {
     /// The settings panel's selected row, while it is open.
     pub settings_menu: Option<usize>,
     /// The config values the settings panel shows.
-    pub workspace_dir: Option<String>,
+    pub workspace_dirs: Vec<String>,
     pub updated_within_days: Option<u32>,
     /// The theme in use, so the menu opens on it.
     pub theme_name: &'static str,
@@ -1714,7 +1714,7 @@ impl App {
             saved: None,
             reload_after_write: None,
             settings_menu: None,
-            workspace_dir: None,
+            workspace_dirs: Vec::new(),
             updated_within_days: None,
             theme_name: crate::theme::THEME_NAMES[0],
             group_loading: Vec::new(),
@@ -2276,7 +2276,7 @@ impl App {
                     .or(Some(0));
             }
             Setting::Workspace => {
-                let current = self.workspace_dir.clone().unwrap_or_default();
+                let current = self.workspace_dirs.join(", ");
                 self.ask(PromptKind::Workspace, &current);
             }
             Setting::UpdatedWithin => {
@@ -2290,10 +2290,8 @@ impl App {
     pub fn setting_value(&self, setting: Setting) -> String {
         match setting {
             Setting::Theme => self.theme_name.to_string(),
-            Setting::Workspace => self
-                .workspace_dir
-                .clone()
-                .unwrap_or_else(|| "not set".to_string()),
+            Setting::Workspace if self.workspace_dirs.is_empty() => "not set".to_string(),
+            Setting::Workspace => self.workspace_dirs.join(", "),
             Setting::UpdatedWithin => match self.updated_within_days {
                 Some(days) => format!("{days} days"),
                 None => "no limit".to_string(),
@@ -2358,7 +2356,7 @@ impl App {
             }
             // On first run, no folder means no diff; from the settings it changes nothing.
             KeyCode::Esc
-                if prompt.kind == PromptKind::Workspace && self.workspace_dir.is_none() =>
+                if prompt.kind == PromptKind::Workspace && self.workspace_dirs.is_empty() =>
             {
                 self.prompt = None;
                 let message = "no workspace folder, so no diff here. r asks again.";
@@ -3370,15 +3368,16 @@ mod tests {
     #[test]
     fn settings_edit_the_workspace_and_check_the_days() {
         let mut app = App::new();
-        app.workspace_dir = Some("~/Work".to_string());
+        app.workspace_dirs = vec!["~/Work".to_string(), "~/Side".to_string()];
         app.handle_key(key(KeyCode::Char(',')));
         app.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(app.setting_value(Setting::Workspace), "~/Work, ~/Side");
         app.handle_key(key(KeyCode::Enter));
         assert!(app.settings_menu.is_none());
         let prompt = app.prompt.as_ref().unwrap();
         assert_eq!(
             (&prompt.kind, prompt.text.as_str()),
-            (&PromptKind::Workspace, "~/Work")
+            (&PromptKind::Workspace, "~/Work, ~/Side")
         );
         app.handle_key(key(KeyCode::Esc));
         assert!(app.prompt.is_none(), "esc keeps the folder");

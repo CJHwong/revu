@@ -20,9 +20,10 @@ theme: dracula
 # Runs when you press d. {repo}, {number} and {url} are replaced.
 open_diff: "gh pr diff {number} -R {repo} | delta"
 
-# The folder that holds your clones, such as ~/Workspace. The Files changed tab asks
-# for it the first time and adds it here.
+# The folders that hold your clones. The Files changed tab asks for one the first
+# time and adds it here. revu searches a list in order, and clones into the first.
 # workspace_dir: ~/Workspace
+# workspace_dir: [~/Workspace, ~/Workspace/side_projects]
 
 # Diff views for the Files changed and Commits tabs; m switches between them.
 # Each command runs in the repo's clone. {base} and {head} are commits, {paths} is
@@ -69,7 +70,9 @@ pub struct Config {
     pub groups: Vec<GroupConfig>,
     #[serde(default = "default_theme", deserialize_with = "theme_from_name")]
     pub theme: Theme,
-    pub workspace_dir: Option<String>,
+    /// Empty when the config has no workspace_dir.
+    #[serde(rename = "workspace_dir", default, deserialize_with = "one_or_many")]
+    pub workspace_dirs: Vec<String>,
     #[serde(default = "default_renderers")]
     pub diff_renderers: Vec<Renderer>,
 }
@@ -97,6 +100,46 @@ fn default_renderers() -> Vec<Renderer> {
 }
 
 /// The folder as a quoted YAML string, so spaces and quotes in it survive.
+/// workspace_dir is one folder in older configs, and may be a list now.
+fn one_or_many<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match Option::<OneOrMany>::deserialize(deserializer)? {
+        None => Vec::new(),
+        Some(OneOrMany::One(folder)) => vec![folder],
+        Some(OneOrMany::Many(folders)) => folders,
+    })
+}
+
+/// The folders as typed in the settings prompt, separated by commas.
+pub fn split_folders(text: &str) -> Vec<String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|folder| !folder.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// A plain value for one folder, so older configs keep their shape; a one-line list
+/// for more.
+pub fn workspace_value(folders: &[String]) -> String {
+    match folders {
+        [folder] => quoted(folder),
+        _ => format!(
+            "[{}]",
+            folders
+                .iter()
+                .map(|folder| quoted(folder))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
 pub fn quoted(text: &str) -> String {
     let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{escaped}\"")
@@ -114,7 +157,15 @@ pub fn save_setting(path: &Path, key: &str, value: &str) -> Result<()> {
     let prefix = format!("{key}:");
     let mut lines: Vec<&str> = text.lines().collect();
     match lines.iter().position(|line| line.starts_with(&prefix)) {
-        Some(index) => lines[index] = &setting,
+        Some(index) => {
+            // A value written as a block, such as a list, continues on indented lines.
+            let rest = &lines[index + 1..];
+            let block = rest
+                .iter()
+                .take_while(|line| line.starts_with([' ', '\t', '-']))
+                .count();
+            lines.splice(index..=index + block, [setting.as_str()]);
+        }
         None => lines.push(&setting),
     }
     let text = lines.join("\n") + "\n";
@@ -317,9 +368,50 @@ mod tests {
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.starts_with("# keep me\n"));
         assert_eq!(text.matches("workspace_dir:").count(), 1);
+        assert_eq!(parse(&text).unwrap().workspace_dirs, ["~/My \"Work\""]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn workspace_dir_takes_one_folder_or_a_list() {
+        let base = "open_diff: x\ngroups: []\n";
+        assert!(parse(base).unwrap().workspace_dirs.is_empty());
+        let one = parse(&format!("{base}workspace_dir: ~/Work\n")).unwrap();
+        assert_eq!(one.workspace_dirs, ["~/Work"]);
+        let list = format!("{base}workspace_dir:\n  - ~/Work\n  - ~/Work/side\n");
         assert_eq!(
-            parse(&text).unwrap().workspace_dir.as_deref(),
-            Some("~/My \"Work\"")
+            parse(&list).unwrap().workspace_dirs,
+            ["~/Work", "~/Work/side"]
+        );
+    }
+
+    #[test]
+    fn workspace_folders_save_as_one_line_and_read_back() {
+        let one = ["~/Work".to_string()];
+        assert_eq!(workspace_value(&one), "\"~/Work\"");
+        let two = ["~/Work".to_string(), "~/My \"Side\"".to_string()];
+        let line = format!(
+            "open_diff: x\ngroups: []\nworkspace_dir: {}\n",
+            workspace_value(&two)
+        );
+        assert_eq!(parse(&line).unwrap().workspace_dirs, two);
+        assert_eq!(
+            split_folders(" ~/Work, ~/Work/side ,, "),
+            ["~/Work", "~/Work/side"]
+        );
+    }
+
+    #[test]
+    fn saving_a_setting_replaces_the_list_written_under_it() {
+        let dir = std::env::temp_dir().join(format!("revu-list-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.yaml");
+        let text = "open_diff: x\ngroups: []\nworkspace_dir:\n  - ~/A\n  - ~/B\n# keep me\ntheme: dracula\n";
+        fs::write(&path, text).unwrap();
+        save_setting(&path, "workspace_dir", "[\"~/C\"]").unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "open_diff: x\ngroups: []\nworkspace_dir: [\"~/C\"]\n# keep me\ntheme: dracula\n"
         );
         fs::remove_dir_all(dir).unwrap();
     }

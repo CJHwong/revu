@@ -72,31 +72,44 @@ fn is_clone_of(dir: &Path, repo: &str) -> bool {
     origin_of(dir).and_then(|url| github_repo_of_remote(&url)) == Some(repo.to_lowercase())
 }
 
-/// Tries `<workspace>/<name>` first, then every folder directly inside the workspace,
-/// because a clone's folder name does not always match its repo name.
-pub fn find_clone(workspace: &Path, repo: &str) -> Result<CloneLookup> {
+/// Tries `<folder>/<name>` in every workspace folder first, then every folder directly
+/// inside each, because a clone's folder name does not always match its repo name. A
+/// missing clone belongs in the first folder.
+pub fn find_clone(workspaces: &[PathBuf], repo: &str) -> Result<CloneLookup> {
     // Without git every folder would look like a clone of nothing, and a clone fails.
     if !on_path("git") {
         bail!("git is not installed, so no diff can show. To add it: {GIT_INSTALL}");
     }
+    let Some(first) = workspaces.first() else {
+        bail!("no workspace folder is set");
+    };
     let name = repo.split_once('/').map_or(repo, |(_, name)| name);
-    let named = workspace.join(name);
-    if named.exists() && is_clone_of(&named, repo) {
-        return Ok(CloneLookup::Found(named));
+    for workspace in workspaces {
+        let named = workspace.join(name);
+        if named.exists() && is_clone_of(&named, repo) {
+            return Ok(CloneLookup::Found(named));
+        }
     }
-    let entries =
-        fs::read_dir(workspace).with_context(|| format!("read {}", workspace.display()))?;
-    for entry in entries.flatten() {
-        let dir = entry.path();
-        if dir.join(".git").exists() && is_clone_of(&dir, repo) {
+    for workspace in workspaces {
+        if let Some(dir) = clone_inside(workspace, repo)? {
             return Ok(CloneLookup::Found(dir));
         }
     }
+    let named = first.join(name);
     if named.exists() {
         let origin = origin_of(&named).unwrap_or_else(|| "no origin remote".to_string());
         return Ok(CloneLookup::Conflict { dir: named, origin });
     }
     Ok(CloneLookup::Missing(named))
+}
+
+fn clone_inside(workspace: &Path, repo: &str) -> Result<Option<PathBuf>> {
+    let entries =
+        fs::read_dir(workspace).with_context(|| format!("read {}", workspace.display()))?;
+    Ok(entries
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|dir| dir.join(".git").exists() && is_clone_of(dir, repo)))
 }
 
 /// A regular clone through gh, so it uses the user's GitHub login and protocol.
@@ -536,6 +549,48 @@ fn ensure_success(output: &Output, what: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn clone_of(dir: &Path, repo: &str) {
+        fs::create_dir_all(dir).unwrap();
+        let url = format!("https://github.com/{repo}.git");
+        for args in [&["init", "-q"][..], &["remote", "add", "origin", &url]] {
+            assert!(git(dir, args).unwrap().status.success());
+        }
+    }
+
+    #[test]
+    fn find_clone_searches_every_workspace_folder_in_order() {
+        let base = std::env::temp_dir().join(format!("revu-find-{}", std::process::id()));
+        let (work, side) = (base.join("work"), base.join("side"));
+        clone_of(&work.join("other"), "acme/other");
+        clone_of(&side.join("tool"), "acme/tool");
+        clone_of(&side.join("renamed"), "acme/lib");
+        let folders = [work.clone(), side.clone()];
+        let found = |repo| match find_clone(&folders, repo).unwrap() {
+            CloneLookup::Found(dir) => Some(dir),
+            _ => None,
+        };
+        assert_eq!(
+            found("acme/tool"),
+            Some(side.join("tool")),
+            "by name, second folder"
+        );
+        assert_eq!(found("acme/lib"), Some(side.join("renamed")), "by origin");
+        assert!(
+            matches!(
+                find_clone(&folders, "acme/new").unwrap(),
+                CloneLookup::Missing(dir) if dir == work.join("new")
+            ),
+            "a new clone goes into the first folder"
+        );
+        clone_of(&work.join("tool"), "acme/tool");
+        assert_eq!(
+            found("acme/tool"),
+            Some(work.join("tool")),
+            "the first folder wins"
+        );
+        fs::remove_dir_all(&base).unwrap();
+    }
 
     #[test]
     fn file_names_give_the_path_the_name_and_each_folder() {

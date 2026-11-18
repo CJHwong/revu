@@ -31,6 +31,13 @@ Press `Ctrl+L`, or paste, and give its link or `owner/repo#123`.
 
 `terminal` uses your terminal's own colors. See [Configuration](configuration.md#theme) for every theme.
 
+## Keep clones in more than one folder
+
+1. Press `,` and pick Workspace folders.
+2. Type the folders with commas between them, such as `~/Workspace, ~/Workspace/side_projects`, and press `Enter`.
+
+revu searches them in order and clones new repositories into the first. See [Configuration](configuration.md#workspace_dir) to write the list in the config instead.
+
 ## Add a diff view
 
 Add an entry to `diff_renderers` in the config. The command runs inside the clone:

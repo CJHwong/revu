@@ -22,9 +22,10 @@ GitHub keeps one pending review per person per pull request, so line comments yo
 
 The diffs come from git, not from GitHub's API, so they need the pull request's commits in a local clone.
 
-1. revu looks in `workspace_dir`: first for the folder named after the repository, then for any folder whose `origin` is that repository.
-2. If there is none, it asks before cloning, with `gh repo clone`.
-3. If the commits are missing, it fetches the pull request into `refs/revu/pr/<number>/` only, with `--no-write-fetch-head`.
+1. revu looks in each `workspace_dir` folder, in order, for the folder named after the repository.
+2. Then it looks inside each of them for any folder whose `origin` is that repository. Only folders directly inside are checked, not deeper ones.
+3. If there is none, it asks before cloning into the first folder, with `gh repo clone`.
+4. If the commits are missing, it fetches the pull request into `refs/revu/pr/<number>/` only, with `--no-write-fetch-head`.
 
 revu never checks out a branch or touches your working tree, the index or `FETCH_HEAD`, so it is safe to run beside an editor or another tool in the same clone.
 

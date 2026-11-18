@@ -560,7 +560,7 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 ",",
-                "settings: theme, workspace folder, how far back the inbox looks",
+                "settings: theme, workspace folders, how far back the inbox looks",
             ),
             ("?", "this list; j/k scroll it, any other key closes it"),
         ],
@@ -2046,7 +2046,7 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
         ),
         PromptKind::Workspace => (
             " Workspace folder ".to_string(),
-            "the folder that holds your clones. enter saves it to the config, esc cancels"
+            "the folders that hold your clones, with commas between. new clones go in the first. enter saves, esc cancels"
                 .to_string(),
         ),
         PromptKind::SearchRepo => (
