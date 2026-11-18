@@ -11,9 +11,11 @@ A `rs-github-inbox` folder from before the rename to revu moves to `revu` on the
 
 ## config.yaml
 
+`groups`, `open_diff` and `diff_renderers` have built-in defaults. The first run writes them into the file commented out, so you can see them. While a key stays commented out, or is missing, revu uses its current default, and a new release can improve it. A key you set replaces its default.
+
 ### groups
 
-One GitHub search per inbox group, in display order.
+One GitHub search per inbox group, in display order. Without `groups`, the inbox has five: Needs your review, Needs your teams' review, Your drafts, Waiting for review or checks, and Reviewed by you. `groups: []` leaves the inbox empty.
 
 | Field | Meaning |
 |---|---|
@@ -75,7 +77,7 @@ The placeholders, replaced and quoted for the shell:
 
 Write `{paths}`, not `"{paths}"`: the values are already quoted.
 
-The defaults are `word` (`git diff --word-diff`), `delta` and `difftastic`. The default `delta` command passes the theme placeholders, so all three share one set of syntax colors and tints, and follow a theme change. A list in your config replaces the defaults.
+The defaults are `word` (`git diff --word-diff`), `delta` and `difftastic`. The default `delta` command passes the theme placeholders, so all three share one set of syntax colors and tints, and follow a theme change. A list in your config replaces all three.
 
 When the saved renderer is not installed, revu shows `word` instead and keeps the saved choice for when it is installed. A renderer without `requires` that fails with "command not found" is skipped the same way. When the diff pane is narrower than 100 columns, difftastic draws one column instead of two, unless you set `DFT_DISPLAY` yourself.
 

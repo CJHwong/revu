@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 
 use crate::theme::{self, Theme};
 
-pub const DEFAULT_CONFIG: &str = r#"# revu config. Press r in the inbox to reload it.
+/// The top of the first-run config: the settings that have no built-in value to fall
+/// back on, written live.
+const CONFIG_HEAD: &str = r#"# revu config. Press r in the inbox to reload it.
 # Every group query gets "is:pr is:open archived:false" added,
 # plus "updated:>=<date>" when updated_within_days is set, and
 # "sort:updated-desc" unless the query has its own sort:.
@@ -17,13 +19,21 @@ updated_within_days: 30
 # catppuccin_latte, gruvbox_light, solarized_light, one_half_light, github.
 theme: dracula
 
-# Runs when you press d. {repo}, {number} and {url} are replaced.
-open_diff: "gh pr diff {number} -R {repo} | delta"
-
 # The folders that hold your clones. The Files changed tab asks for one the first
 # time and adds it here. revu searches a list in order, and clones into the first.
 # workspace_dir: ~/Workspace
 # workspace_dir: [~/Workspace, ~/Workspace/side_projects]
+
+# Everything below is revu's built-in defaults, shown commented out. While a key
+# stays commented, revu uses its current default, so a new release can improve it.
+# To set your own, uncomment the key and edit it; it then replaces that default.
+
+"#;
+
+/// The built-in open_diff, diff renderers and inbox groups. A config without one of
+/// these keys uses the one here.
+const DEFAULTS: &str = r#"# Runs when you press d. {repo}, {number} and {url} are replaced.
+open_diff: "gh pr diff {number} -R {repo} | delta"
 
 # Diff views for the Files changed and Commits tabs; m switches between them.
 # Each command runs in the repo's clone. {base} and {head} are commits, {paths} is
@@ -63,10 +73,30 @@ groups:
     collapsed: true
 "#;
 
+/// The config the first run writes: the head live, then the defaults commented out
+/// line by line, so the file always matches the defaults it describes.
+pub fn default_config_file() -> String {
+    let defaults: String = DEFAULTS
+        .lines()
+        .map(|line| match line {
+            "" => "\n".to_string(),
+            comment if comment.starts_with('#') => format!("{comment}\n"),
+            setting => format!("# {setting}\n"),
+        })
+        .collect();
+    format!("{CONFIG_HEAD}{defaults}")
+}
+
+fn defaults() -> Config {
+    parse(DEFAULTS).expect("the built-in defaults parse")
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub updated_within_days: Option<u32>,
+    #[serde(default = "default_open_diff")]
     pub open_diff: String,
+    #[serde(default = "default_groups")]
     pub groups: Vec<GroupConfig>,
     #[serde(default = "default_theme", deserialize_with = "theme_from_name")]
     pub theme: Theme,
@@ -92,11 +122,16 @@ pub struct Renderer {
     pub install: Option<String>,
 }
 
-/// The renderers in DEFAULT_CONFIG, for config files written before the key existed.
 fn default_renderers() -> Vec<Renderer> {
-    parse(DEFAULT_CONFIG)
-        .map(|config| config.diff_renderers)
-        .unwrap_or_default()
+    defaults().diff_renderers
+}
+
+fn default_open_diff() -> String {
+    defaults().open_diff
+}
+
+fn default_groups() -> Vec<GroupConfig> {
+    defaults().groups
 }
 
 /// The folder as a quoted YAML string, so spaces and quotes in it survive.
@@ -307,7 +342,8 @@ pub fn load_or_init(path: &Path) -> Result<Config> {
             .parent()
             .context("config path has no parent directory")?;
         fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-        fs::write(path, DEFAULT_CONFIG).with_context(|| format!("write {}", path.display()))?;
+        fs::write(path, default_config_file())
+            .with_context(|| format!("write {}", path.display()))?;
     }
     let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     parse(&text).with_context(|| format!("parse {}", path.display()))
@@ -343,8 +379,61 @@ mod tests {
     }
 
     #[test]
+    fn missing_keys_use_the_built_in_defaults_and_set_ones_replace_them() {
+        let config = parse("theme: dracula\n").unwrap();
+        assert_eq!(config.groups.len(), 5, "no groups key, the built-in groups");
+        assert_eq!(config.open_diff, "gh pr diff {number} -R {repo} | delta");
+        assert_eq!(config.diff_renderers.len(), 3);
+        let own = parse("groups:\n  - title: Mine\n    query: author:@me\n").unwrap();
+        assert_eq!(
+            own.groups.len(),
+            1,
+            "a list of your own replaces the defaults"
+        );
+        assert!(
+            parse("groups: []\n").unwrap().groups.is_empty(),
+            "an empty list stays empty"
+        );
+    }
+
+    #[test]
+    fn the_first_run_file_shows_the_defaults_commented_out() {
+        let text = default_config_file();
+        for key in ["groups:", "open_diff:", "diff_renderers:"] {
+            assert!(
+                !text.lines().any(|line| line.starts_with(key)),
+                "{key} is not live"
+            );
+            assert!(
+                text.contains(&format!("# {key}")),
+                "{key} shows as a comment"
+            );
+        }
+        // Uncomment the settings, as a user would, and leave the explanations.
+        let settings: Vec<&str> = DEFAULTS
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect();
+        let uncommented: String = text
+            .lines()
+            .map(|line| match line.strip_prefix("# ") {
+                Some(setting) if settings.contains(&setting) => setting,
+                _ => line,
+            })
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let config = parse(&uncommented).unwrap();
+        assert_eq!(
+            config.groups.len(),
+            5,
+            "uncommenting gives the defaults back"
+        );
+        assert_eq!(config.diff_renderers.len(), 3);
+    }
+
+    #[test]
     fn default_config_parses_into_five_groups() {
-        let config = parse(DEFAULT_CONFIG).unwrap();
+        let config = parse(&default_config_file()).unwrap();
         assert_eq!(config.updated_within_days, Some(30));
         assert_eq!(config.groups.len(), 5);
         assert_eq!(config.groups[0].title, "Needs your review");
@@ -503,7 +592,7 @@ mod tests {
         let path = dir.join("nested").join("config.yaml");
         let config = load_or_init(&path).unwrap();
         assert_eq!(config.groups.len(), 5);
-        assert_eq!(fs::read_to_string(&path).unwrap(), DEFAULT_CONFIG);
+        assert_eq!(fs::read_to_string(&path).unwrap(), default_config_file());
         fs::remove_dir_all(dir).unwrap();
     }
 }

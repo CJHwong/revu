@@ -272,6 +272,14 @@ fn render_inbox(frame: &mut Frame, app: &mut App, paint: Paint) {
         );
         return;
     }
+    if app.groups.is_empty() && !app.loading {
+        let hint = "No groups in config.yaml. Add some under groups:, or remove the groups \
+                    key for the built-in ones. r reloads the config.";
+        frame.render_widget(
+            Paragraph::new(paint.span(hint, paint.theme.muted)).wrap(Wrap { trim: true }),
+            body.inner(Margin::new(1, 1)),
+        );
+    }
     let row_width = body.width.saturating_sub(2) as usize;
     let selected = app.list_state.selected();
     let items: Vec<ListItem> = app
@@ -2532,6 +2540,26 @@ mod tests {
                 .collect()
         };
         lines.iter().map(text).collect()
+    }
+
+    #[test]
+    fn an_inbox_with_no_groups_says_how_to_get_some() {
+        let theme = theme::by_name("dracula").unwrap();
+        let mut app = App::new();
+        app.loading = false;
+        let backend = ratatui::backend::TestBackend::new(100, 10);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &mut app, &theme, Utc::now()))
+            .unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("No groups in config.yaml"), "{screen}");
     }
 
     #[test]

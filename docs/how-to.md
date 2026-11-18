@@ -4,7 +4,7 @@ Short recipes for common tasks. Each one assumes revu already runs; see [Getting
 
 ## Set up your inbox groups
 
-Each group is one GitHub search. Edit `groups` in `~/.config/revu/config.yaml`:
+Each group is one GitHub search. revu starts with five built-in groups. To set your own, uncomment `groups` in `~/.config/revu/config.yaml` and edit it. Your list replaces the built-in one:
 
 ```yaml
 groups:
