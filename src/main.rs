@@ -33,7 +33,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use app::{Action, App, DiffJob, DiffKey, PromptKind, RepoJob, RepoState};
+use app::{Action, App, DiffJob, DiffKey, EditorTarget, PromptKind, RepoJob, RepoState};
 use config::Config;
 use model::{ChangedFile, Group, PrActivity, PrDetail, PrRef};
 use repo::{CloneLookup, LocalRepo};
@@ -389,6 +389,7 @@ fn perform(
         Action::FetchDetail(pr) => start_load(app, session, pr),
         Action::OpenBrowser(url) => open_browser(app, &url),
         Action::RunDiff(pr) => run_diff(terminal, app, session, &pr)?,
+        Action::OpenEditor(target) => open_editor(terminal, app, session, &target)?,
         Action::FindWords {
             pr,
             dir,
@@ -1091,22 +1092,83 @@ fn run_diff(
         .replace("{repo}", &repo::shell_quote(&pr.repo))
         .replace("{number}", &pr.number.to_string())
         .replace("{url}", &repo::shell_quote(&pr.url()));
+    let failure = suspended(terminal, session, || {
+        let status = Command::new("sh").arg("-c").arg(&command).status();
+        let failure = match status {
+            Ok(status) if status.success() => None,
+            Ok(status) => Some(format!("diff command exited with {status}: {command}")),
+            Err(error) => Some(format!("diff command did not start: {error}")),
+        };
+        if let Some(message) = &failure {
+            wait_for_enter(message)?;
+        }
+        Ok(failure)
+    })?;
+    app.error = failure;
+    Ok(())
+}
+
+/// Runs $VISUAL or $EDITOR, else vi, on a file in the clone with `+LINE`, which vim,
+/// nvim, nano, emacs and micro take. Without a known line, it opens at the first change.
+fn open_editor(
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    session: &Session,
+    target: &EditorTarget,
+) -> Result<()> {
+    let line = target.line.or_else(|| first_change(target));
+    let mut command = Command::new("sh");
+    // Unquoted, so an editor with flags, such as "code -w", splits into its words.
+    command
+        .arg("-c")
+        .arg(r#"${VISUAL:-${EDITOR:-vi}} "$@""#)
+        .arg("sh")
+        .current_dir(&target.dir);
+    if let Some(line) = line {
+        command.arg(format!("+{line}"));
+    }
+    command.arg(&target.path);
+    let failure = suspended(terminal, session, || {
+        let failure = match command.status() {
+            Ok(status) if status.success() => None,
+            Ok(status) => Some(format!("{} exited with {status}", app::editor_name())),
+            Err(error) => Some(format!("the editor did not start: {error}")),
+        };
+        if let Some(message) = &failure {
+            wait_for_enter(message)?;
+        }
+        Ok(failure)
+    })?;
+    app.error = failure;
+    Ok(())
+}
+
+/// The new file's line of the first added line in the PR, else of its first line shown.
+fn first_change(target: &EditorTarget) -> Option<u64> {
+    let (base, head) = target.changes.as_ref()?;
+    let diff = repo::file_diff(&target.dir, base, head, std::slice::from_ref(&target.path)).ok()?;
+    let rows = line_diff::parse(&diff);
+    let added = rows
+        .iter()
+        .find(|row| row.kind == line_diff::RowKind::Added);
+    added
+        .or_else(|| rows.iter().find(|row| row.new.is_some()))
+        .and_then(|row| row.new)
+}
+
+/// Hands the terminal to another program while `run` runs, then takes it back.
+fn suspended<T>(
+    terminal: &mut DefaultTerminal,
+    session: &Session,
+    run: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     disable_input_modes(session.enhanced_keys)?;
     ratatui::restore();
-    let status = Command::new("sh").arg("-c").arg(&command).status();
-    let failure = match status {
-        Ok(status) if status.success() => None,
-        Ok(status) => Some(format!("diff command exited with {status}: {command}")),
-        Err(error) => Some(format!("diff command did not start: {error}")),
-    };
-    if let Some(message) = &failure {
-        wait_for_enter(message)?;
-    }
+    let result = run();
     *terminal = ratatui::init();
     enable_input_modes(session.enhanced_keys)?;
     terminal.clear()?;
-    app.error = failure;
-    Ok(())
+    result
 }
 
 /// Keeps a failed command's output on screen until the user has read it.

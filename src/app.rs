@@ -33,6 +33,8 @@ pub enum Action {
     Refresh,
     FetchDetail(PrRef),
     OpenBrowser(String),
+    /// Suspend the app and run the editor on a file in the clone.
+    OpenEditor(EditorTarget),
     RunDiff(PrRef),
     /// The words of the PR's changed lines, for the find prompt to complete.
     FindWords {
@@ -241,7 +243,56 @@ pub enum Overlay {
         /// The file with the renderer's or bat's colors.
         lines: Option<Result<Text<'static>, String>>,
         scroll: u16,
+        /// For a file read at the PR head, the line it opened at; None for a whole diff.
+        line: Option<usize>,
     },
+}
+
+/// Where o opens the file in view: its page on GitHub, or the clone's copy in the editor.
+#[derive(Debug)]
+pub struct OpenMenu {
+    pub file: String,
+    pub github: String,
+    /// What the GitHub page shows, for the menu to say.
+    pub github_note: String,
+    /// The clone's copy, or why the editor cannot open it.
+    pub editor: Result<EditorTarget, String>,
+    /// The editor's command, for the menu to name it.
+    pub editor_name: String,
+    /// 0 for GitHub, 1 for the editor.
+    pub selected: usize,
+}
+
+/// A file in the clone's working tree, for the editor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorTarget {
+    pub dir: PathBuf,
+    pub path: String,
+    pub line: Option<u64>,
+    /// Without a line, the editor opens at the file's first change between these commits.
+    pub changes: Option<(String, String)>,
+}
+
+/// The editor the shell would pick: $VISUAL, then $EDITOR, then vi.
+pub fn editor_name() -> String {
+    ["VISUAL", "EDITOR"]
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "vi".to_string())
+}
+
+/// A path for a GitHub URL, with the characters that would end or break it escaped.
+fn url_path(path: &str) -> String {
+    path.chars()
+        .map(|character| match character {
+            '%' => "%25".to_string(),
+            ' ' => "%20".to_string(),
+            '#' => "%23".to_string(),
+            '?' => "%3F".to_string(),
+            other => other.to_string(),
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -558,6 +609,78 @@ impl DetailView {
         }
     }
 
+    /// What o offers while a file is in view: a repo match's file, a whole diff, or the
+    /// selected changed file. None elsewhere, where o opens the browser at once.
+    fn open_menu(&self) -> Option<OpenMenu> {
+        if let Some(Overlay::File {
+            path,
+            line: Some(line),
+            ..
+        }) = self.overlays.last()
+        {
+            let head = &self.loaded()?.head_oid;
+            let repo = &self.pr.repo;
+            return Some(OpenMenu {
+                file: path.clone(),
+                github: format!(
+                    "https://github.com/{repo}/blob/{head}/{}#L{line}",
+                    url_path(path)
+                ),
+                github_note: format!("the file at the PR head, line {line}"),
+                editor: self.editor_target(path, Some(*line as u64)),
+                editor_name: editor_name(),
+                selected: 0,
+            });
+        }
+        if self.tab != Tab::Files {
+            return None;
+        }
+        let path = match self.overlays.last() {
+            Some(Overlay::File { path, .. }) => path.clone(),
+            _ => {
+                let files = self.loaded_files()?;
+                files.get(self.selected_file()?)?.path.clone()
+            }
+        };
+        let line = self
+            .line_mode
+            .as_ref()
+            .filter(|mode| mode.path == path)
+            .and_then(LineMode::editor_line);
+        Some(OpenMenu {
+            github: self.files_link(),
+            github_note: "the file in the PR's Files changed".to_string(),
+            editor: self.editor_target(&path, line),
+            editor_name: editor_name(),
+            file: path,
+            selected: 0,
+        })
+    }
+
+    /// The file in the clone's working tree, which may be on another branch than the PR.
+    fn editor_target(&self, path: &str, line: Option<u64>) -> Result<EditorTarget, String> {
+        let RepoState::Ready(repo) = &self.repo else {
+            return Err(self.clone_not_ready("the local clone is not ready yet"));
+        };
+        if !repo.dir.join(path).is_file() {
+            return Err(
+                "not in your clone's checkout; check out the PR branch to edit it".to_string(),
+            );
+        }
+        let changes = match line {
+            Some(_) => None,
+            None => self
+                .loaded()
+                .map(|detail| (detail.base_oid.clone(), detail.head_oid.clone())),
+        };
+        Ok(EditorTarget {
+            dir: repo.dir.clone(),
+            path: path.to_string(),
+            line,
+            changes,
+        })
+    }
+
     fn head_in_clone(&self) -> Result<(PathBuf, String), String> {
         let RepoState::Ready(repo) = &self.repo else {
             return Err(
@@ -576,6 +699,7 @@ impl DetailView {
             path: path.clone(),
             lines: None,
             scroll,
+            line: Some(line),
         });
         Ok(Action::ShowFile {
             pr: self.pr.clone(),
@@ -607,6 +731,7 @@ impl DetailView {
             path: path.clone(),
             lines: None,
             scroll: 0,
+            line: None,
         });
         Ok(Action::ShowWholeDiff(job))
     }
@@ -1745,6 +1870,21 @@ pub struct LineMode {
 }
 
 impl LineMode {
+    /// The new file's line at the cursor. A removed line or a hunk header has none, so
+    /// the next line that has one, else the one before.
+    fn editor_line(&self) -> Option<u64> {
+        let Some(Ok(rows)) = &self.rows else {
+            return None;
+        };
+        let after = rows.get(self.cursor..)?.iter().find_map(|row| row.new);
+        after.or_else(|| {
+            rows.get(..self.cursor)?
+                .iter()
+                .rev()
+                .find_map(|row| row.new)
+        })
+    }
+
     /// Moves the cursor by `delta` rows, within the diff.
     pub fn move_cursor(&mut self, delta: isize) {
         let last = match &self.rows {
@@ -2004,6 +2144,8 @@ pub struct App {
     pub label_menu: Option<LabelMenu>,
     /// The merge menu, while it is open.
     pub merge_menu: Option<MergeMenu>,
+    /// o's choice of GitHub or the editor, while it is open.
+    pub open_menu: Option<OpenMenu>,
     /// The number of the latest detail load, across every PR opened.
     next_load: u64,
     /// The clone lookup's answer, for the main loop to act on.
@@ -2068,6 +2210,7 @@ impl App {
             composer: None,
             label_menu: None,
             merge_menu: None,
+            open_menu: None,
             next_load: 0,
             clone_lookup: None,
             missing_renderers: HashSet::new(),
@@ -2647,6 +2790,9 @@ impl App {
             self.merge_menu_key(key.code);
             return None;
         }
+        if self.open_menu.is_some() {
+            return self.open_menu_key(key.code);
+        }
         if self.prompt.is_some() {
             return self.prompt_key(key.code);
         }
@@ -2941,7 +3087,6 @@ impl App {
                 view.diff_wrap = !view.diff_wrap;
                 view.diff_shift = 0;
             }
-            KeyCode::Char('o') => return Some(Action::OpenBrowser(view.link())),
             KeyCode::Char('y') => {
                 let Some(Ok(rows)) = &mode.rows else {
                     return None;
@@ -3128,6 +3273,27 @@ impl App {
         }
     }
 
+    fn open_menu_key(&mut self, key: KeyCode) -> Option<Action> {
+        let menu = self.open_menu.as_mut()?;
+        match key {
+            KeyCode::Char('j' | 'k') | KeyCode::Down | KeyCode::Up | KeyCode::Tab => {
+                menu.selected = 1 - menu.selected;
+            }
+            KeyCode::Esc | KeyCode::Char('q') => self.open_menu = None,
+            // The menu shows why the editor cannot open the file; it stays open.
+            KeyCode::Enter if menu.selected == 1 && menu.editor.is_err() => {}
+            KeyCode::Enter => {
+                let menu = self.open_menu.take()?;
+                return match (menu.selected, menu.editor) {
+                    (1, Ok(target)) => Some(Action::OpenEditor(target)),
+                    _ => Some(Action::OpenBrowser(menu.github)),
+                };
+            }
+            _ => {}
+        }
+        None
+    }
+
     /// X: asks before deleting the pending review.
     fn ask_discard(&mut self) -> Result<(), String> {
         let Screen::Detail(view) = &self.screen else {
@@ -3234,6 +3400,15 @@ impl App {
         let diff_pane = matches!(view.tab, Tab::Files | Tab::Commits);
         // An error stays in the footer until the next key.
         self.error = None;
+        if key == KeyCode::Char('o') {
+            return match view.open_menu() {
+                Some(menu) => {
+                    self.open_menu = Some(menu);
+                    None
+                }
+                None => Some(Action::OpenBrowser(view.link())),
+            };
+        }
         if !view.overlays.is_empty() {
             let result = view.overlay_key(key);
             return self.report(result);
@@ -4353,6 +4528,146 @@ mod tests {
         );
     }
 
+    /// o, then enter on GitHub, the menu's first choice.
+    fn open_on_github(app: &mut App) -> Option<Action> {
+        assert!(app.handle_key(key(KeyCode::Char('o'))).is_none());
+        assert!(app.open_menu.is_some(), "o on a file asks where to open it");
+        app.handle_key(key(KeyCode::Enter))
+    }
+
+    /// A clone folder holding `paths`, so the editor has a file to open.
+    fn clone_with(app: &mut App, pr: &PrRef, paths: &[&str]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "revu-open-{}-{}",
+            std::process::id(),
+            paths.join("-").replace('/', "_")
+        ));
+        for path in paths {
+            let file = dir.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, "x\n").unwrap();
+        }
+        app.set_repo(
+            pr,
+            Ok(LocalRepo {
+                dir: dir.clone(),
+                renames: HashMap::new(),
+            }),
+        );
+        dir
+    }
+
+    #[test]
+    fn o_on_a_changed_file_opens_the_editor_at_its_first_change() {
+        let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        let dir = clone_with(&mut app, &pr, &["a.md"]);
+        app.handle_key(key(KeyCode::Char('o')));
+        app.handle_key(key(KeyCode::Char('j')));
+        let Some(Action::OpenEditor(target)) = app.handle_key(key(KeyCode::Enter)) else {
+            panic!("expected the editor");
+        };
+        assert_eq!(
+            (target.dir, target.path.as_str(), target.line),
+            (dir, "a.md", None)
+        );
+        let (_, head) = target
+            .changes
+            .expect("the first change, between base and head");
+        assert_eq!(head, "head999");
+        assert!(app.open_menu.is_none());
+    }
+
+    #[test]
+    fn the_editor_says_why_when_the_file_is_not_checked_out() {
+        let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        clone_with(&mut app, &pr, &["other.md"]);
+        app.handle_key(key(KeyCode::Char('o')));
+        app.handle_key(key(KeyCode::Char('j')));
+        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
+        let menu = app
+            .open_menu
+            .as_ref()
+            .expect("the menu stays, with the reason");
+        assert!(
+            menu.editor
+                .as_ref()
+                .unwrap_err()
+                .contains("check out the PR branch")
+        );
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.open_menu.is_none());
+    }
+
+    #[test]
+    fn select_lines_opens_the_editor_at_the_cursor_or_the_next_new_line() {
+        let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        clone_with(&mut app, &pr, &["a.md"]);
+        view_mut(&mut app).line_mode = Some(LineMode {
+            path: "a.md".to_string(),
+            rows: Some(Ok(crate::line_diff::parse(
+                "@@ -1,3 +1,3 @@\n keep\n-old\n+new\n last\n",
+            ))),
+            // The removed line: it has no new line, so the added line after it.
+            cursor: 2,
+            anchor: None,
+            scroll: 0,
+        });
+        app.handle_key(key(KeyCode::Char('o')));
+        app.handle_key(key(KeyCode::Down));
+        let Some(Action::OpenEditor(target)) = app.handle_key(key(KeyCode::Enter)) else {
+            panic!("expected the editor");
+        };
+        assert_eq!((target.line, target.changes), (Some(2), None));
+    }
+
+    #[test]
+    fn o_on_a_repo_match_opens_the_file_at_the_pr_head_and_line() {
+        let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        clone_with(&mut app, &pr, &["a.md", "docs/x y.py"]);
+        app.handle_key(key(KeyCode::Char('/')));
+        type_text(&mut app, "needle");
+        app.handle_key(key(KeyCode::Enter));
+        app.set_find_files(&pr, "needle", Ok(Vec::new()));
+        let hit = GrepHit {
+            path: "docs/x y.py".to_string(),
+            line: 3,
+            text: "needle".to_string(),
+        };
+        app.set_find_repo(&pr, "needle", Ok(vec![hit]));
+        app.handle_key(key(KeyCode::Char('n')));
+        let blob = format!(
+            "https://github.com/{}/blob/head999/docs/x%20y.py#L3",
+            pr.repo
+        );
+        let action = open_on_github(&mut app);
+        assert!(
+            matches!(action, Some(Action::OpenBrowser(ref url)) if *url == blob),
+            "{action:?}"
+        );
+        assert_eq!(view(&app).overlays.len(), 1, "the file stays open");
+        app.handle_key(key(KeyCode::Char('o')));
+        app.handle_key(key(KeyCode::Char('j')));
+        let Some(Action::OpenEditor(target)) = app.handle_key(key(KeyCode::Enter)) else {
+            panic!("expected the editor");
+        };
+        assert_eq!(
+            (target.path.as_str(), target.line),
+            ("docs/x y.py", Some(3))
+        );
+    }
+
+    #[test]
+    fn o_away_from_a_file_opens_the_browser_at_once() {
+        let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        app.handle_key(key(KeyCode::Char('1')));
+        let action = app.handle_key(key(KeyCode::Char('o')));
+        assert!(
+            matches!(action, Some(Action::OpenBrowser(ref url)) if *url == pr.url()),
+            "{action:?}"
+        );
+        assert!(app.open_menu.is_none());
+    }
+
     #[test]
     fn o_opens_the_selected_file_or_line_in_githubs_diff() {
         let anchor = format!(
@@ -4367,7 +4682,7 @@ mod tests {
         let (mut app, _) = files_tab(vec![file("a.rs", ViewedState::Unviewed)]);
         view_mut(&mut app).tree_view = false;
         view_mut(&mut app).file_state.select(Some(0));
-        let action = app.handle_key(key(KeyCode::Char('o')));
+        let action = open_on_github(&mut app);
         assert!(
             matches!(action, Some(Action::OpenBrowser(ref url)) if *url == anchor),
             "{action:?}"
@@ -4381,7 +4696,7 @@ mod tests {
             anchor: None,
             scroll: 0,
         });
-        let action = app.handle_key(key(KeyCode::Char('o')));
+        let action = open_on_github(&mut app);
         let removed = format!("{anchor}L2");
         assert!(
             matches!(action, Some(Action::OpenBrowser(ref url)) if *url == removed),
@@ -4517,7 +4832,13 @@ mod tests {
             anchor: None,
             scroll: 0,
         });
-        for code in [KeyCode::Enter, KeyCode::Char('y'), KeyCode::Char('o')] {
+        // o opens the menu, with no line for the editor; esc closes it.
+        for code in [
+            KeyCode::Enter,
+            KeyCode::Char('y'),
+            KeyCode::Char('o'),
+            KeyCode::Esc,
+        ] {
             app.handle_key(key(code));
         }
         app.handle_key(key(KeyCode::Enter));

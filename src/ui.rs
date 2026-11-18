@@ -10,8 +10,8 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::app::{
     App, Click, ClickTarget, ComposeKind, Composer, DetailView, DiffOutput, LabelMenu, MergeItem,
-    MergeMenu, Overlay, OverviewLayout, Prompt, PromptKind, RepoState, Row, SETTINGS, SaveNote,
-    Screen, Tab,
+    MergeMenu, OpenMenu, Overlay, OverviewLayout, Prompt, PromptKind, RepoState, Row, SETTINGS,
+    SaveNote, Screen, Tab,
 };
 use crate::editor::Editor;
 use crate::file_tree::FileRow;
@@ -84,6 +84,9 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: &Theme, now: DateTime<Utc
     }
     if let Some(menu) = &app.merge_menu {
         render_merge_menu(frame, menu, paint);
+    }
+    if let Some(menu) = &app.open_menu {
+        render_open_menu(frame, menu, paint);
     }
     if let Some(selected) = app.theme_menu {
         render_theme_menu(frame, selected, app.theme_name, paint);
@@ -476,6 +479,7 @@ fn detail_hints(view: &DetailView) -> Hints {
             Overlay::File { .. } if view.repo_hit.is_some() => &[
                 ("j/k", "scroll"),
                 ("n/N", "next/previous match"),
+                ("o", "open"),
                 ("esc", "back to the diff"),
             ],
             Overlay::File { .. } => &[
@@ -483,6 +487,7 @@ fn detail_hints(view: &DetailView) -> Hints {
                 ("space", "page down"),
                 ("g", "top"),
                 ("G", "bottom"),
+                ("o", "open"),
                 ("esc", "back"),
             ],
         };
@@ -493,7 +498,7 @@ fn detail_hints(view: &DetailView) -> Hints {
             ("V", "range"),
             ("enter", "comment"),
             ("y", "copy"),
-            ("o", "browser"),
+            ("o", "open"),
             ("R", "review"),
             ("w", "wrap"),
             ("esc", "back to the diff"),
@@ -535,7 +540,7 @@ fn detail_hints(view: &DetailView) -> Hints {
             ("/", "find"),
             ("R", "review"),
             ("m", "view"),
-            ("o", "browser"),
+            ("o", "open"),
             ("t", "tree"),
             ("z", "list"),
         ],
@@ -604,6 +609,7 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
             ("esc, h, q", "back to the inbox"),
             ("g/G, space/b", "top, bottom, page down, page up"),
             ("o, d, r", "open in the browser, run open_diff, fetch again"),
+            ("o on a file", "open it on GitHub or in your editor"),
             (
                 "R",
                 "review: Comment, Approve or Request changes, with your line comments",
@@ -872,8 +878,12 @@ fn render_overlay(
             scroll,
             ..
         } => {
+            // The path gives way first, from its start, so the match count stays whole.
+            let place_width = place.as_ref().map_or(0, Line::width);
+            let room = usize::from(area.width).saturating_sub(place_width + 17);
+            let shown = truncate_start(path, room);
             let mut block =
-                Block::new().title(paint.bold(format!(" {path} at the PR head "), theme.heading));
+                Block::new().title(paint.bold(format!(" {shown} at the PR head "), theme.heading));
             if let Some(place) = place {
                 block = block.title(place);
             }
@@ -1427,14 +1437,14 @@ fn keep_in_view(heights: &[usize], scroll: usize, cursor: usize, height: usize) 
 
 /// " /query  2 of 5 lines ", at the right of the diff pane's title, so the find text and
 /// the place among its matches stay in view. In another file it says n finds there.
-/// "/text  repo match 3 of 155  n/N next/previous", over the file a repo match opened.
+/// "/text  repo match 3 of 155", over the file a repo match opened.
 fn repo_place(view: &DetailView, paint: Paint) -> Option<Line<'static>> {
     let (Some(query), Some(hit), Some(Ok(hits))) = (&view.find, view.repo_hit, &view.find_repo)
     else {
         return None;
     };
     let place = format!(
-        " repo match {} of {}  n/N next/previous ",
+        " repo match {} of {} ",
         hit + 1,
         repo_count(view, hits.len())
     );
@@ -2727,7 +2737,6 @@ fn merge_menu_lines(menu: &MergeMenu, paint: Paint) -> Vec<Line<'static>> {
 
 /// The merge menu: GitHub's merge button and its dropdown.
 fn render_merge_menu(frame: &mut Frame, menu: &MergeMenu, paint: Paint) {
-    let theme = paint.theme;
     let lines = merge_menu_lines(menu, paint);
     let title = match (menu.items.first(), menu.ready, menu.bypass) {
         (Some(MergeItem::DisableAuto), ..) => " Auto-merge is on ".to_string(),
@@ -2736,8 +2745,52 @@ fn render_merge_menu(frame: &mut Frame, menu: &MergeMenu, paint: Paint) {
         (_, false, _) if menu.can_auto_merge => " Enable auto-merge ".to_string(),
         _ => " Merging is blocked ".to_string(),
     };
+    render_menu_box(frame, title, lines, paint);
+}
+
+/// o's choice: the file's GitHub page, or the clone's copy in the editor.
+fn render_open_menu(frame: &mut Frame, menu: &OpenMenu, paint: Paint) {
+    let theme = paint.theme;
+    let editor_note = match &menu.editor {
+        Ok(target) => {
+            let at = match target.line {
+                Some(line) => format!("line {line}"),
+                None => "its first change".to_string(),
+            };
+            paint.span(
+                format!("   {} on your clone's copy, at {at}", menu.editor_name),
+                theme.muted,
+            )
+        }
+        Err(why) => paint.span(format!("   {why}"), theme.danger),
+    };
+    let items = [
+        (
+            "GitHub",
+            paint.span(format!("   {}", menu.github_note), theme.muted),
+        ),
+        ("Editor", editor_note),
+    ];
+    let mut lines = Vec::new();
+    for (index, (title, note)) in items.into_iter().enumerate() {
+        let row = [
+            Line::from(paint.bold(format!(" {title}"), theme.foreground)),
+            Line::from(note),
+        ];
+        let selected = index == menu.selected;
+        lines.extend(row.into_iter().map(|line| match selected {
+            true => line.style(Style::new().bg(theme.selection)),
+            false => line,
+        }));
+    }
+    let name = menu.file.rsplit('/').next().unwrap_or(&menu.file);
+    render_menu_box(frame, format!(" Open {name} "), lines, paint);
+}
+
+/// A centered box as wide as its longest line, so notes wrap only on a narrow terminal.
+fn render_menu_box(frame: &mut Frame, title: String, lines: Vec<Line<'static>>, paint: Paint) {
+    let theme = paint.theme;
     let area = frame.area();
-    // As wide as the longest line, so the notes wrap only on a narrow terminal.
     let longest = lines.iter().map(Line::width).max().unwrap_or(0) + 1;
     let width = (longest as u16 + 2).min(area.width);
     let inner = usize::from(width.saturating_sub(2)).max(1);

@@ -35,7 +35,7 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 | `R` | Review: `Tab` picks Comment, Approve or Request changes. `ctrl+s` asks to confirm and `y` sends. Your pending line comments go with it. Request changes needs a comment; Comment needs a comment or line comments. Only Comment applies on your own PR, as GitHub requires, and on a merged or closed one. |
 | `X` | Discard your pending review and every line comment in it, after a `y`. |
 | `M` | Merge: the methods the repo allows, as on GitHub, starting on your usual one. `Enter` picks one and `y` sends it. When GitHub blocks the merge, a method turns on auto-merge instead, where the repo allows it; an admin can tick Bypass requirements to merge at once. When auto-merge is on, `M` turns it off. While GitHub is still checking the PR, `r` fetches it again. |
-| `o` | Open in the browser. On Files changed, GitHub's diff opens at the selected file, and in select lines at the cursor's line. |
+| `o` | Open in the browser. On a file (Files changed, select lines, a full file, a repo match), `o` asks: GitHub or Editor. GitHub opens the PR's diff at the file, in select lines at the cursor's line, and a repo match at its line at the PR head. Editor suspends revu and runs `$VISUAL` or `$EDITOR` (else `vi`) with `+LINE` on the file in your clone: at the cursor's line, the match's line, or the file's first change. It opens the clone's working tree, which is the PR's code only when its branch is checked out. Editors that take `+LINE` include vim, nvim, nano, emacs and micro. |
 | `d` | Run the `open_diff` command |
 
 ## Overview
@@ -61,7 +61,7 @@ A file with review threads shows their count, such as `●3`, and the diff pane'
 | `v` | Toggle Viewed. It syncs to GitHub's Viewed checkbox at once. On a folder, it marks every file under it viewed, or unmarks them all when every one is viewed already. |
 | `V` | Hide viewed files |
 | `]` / `[` | Next or previous unviewed file |
-| `S` | Select lines in the selected file: its plain diff with line numbers. `j`/`k` or the wheel move, `V` marks a range (on one side only, as GitHub requires), `Enter` writes a comment, `y` copies the line or range, `o` opens it on GitHub, `w` wraps long lines or cuts them, as in the diff, `S` or `esc` goes back. The comment joins your pending review on GitHub, which only you see until `R` submits it; a dot marks lines it already covers. |
+| `S` | Select lines in the selected file: its plain diff with line numbers. `j`/`k` or the wheel move, `V` marks a range (on one side only, as GitHub requires), `Enter` writes a comment, `y` copies the line or range, `o` opens it on GitHub or in your editor, `w` wraps long lines or cuts them, as in the diff, `S` or `esc` goes back. The comment joins your pending review on GitHub, which only you see until `R` submits it; a dot marks lines it already covers. |
 
 ## Files changed and Commits
 
