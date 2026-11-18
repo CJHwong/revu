@@ -26,11 +26,12 @@ pub struct Theme {
 
 /// The built-in themes in menu order: the terminal's own colors, then dark and light
 /// themes, each A to Z.
-const THEMES: [(&str, Theme); 15] = [
+const THEMES: [(&str, Theme); 17] = [
     ("terminal", TERMINAL),
     ("catppuccin_frappe", CATPPUCCIN_FRAPPE),
     ("catppuccin_macchiato", CATPPUCCIN_MACCHIATO),
     ("catppuccin_mocha", CATPPUCCIN_MOCHA),
+    ("darcula", DARCULA),
     ("dracula", DRACULA),
     ("gruvbox_dark", GRUVBOX_DARK),
     ("monokai", MONOKAI),
@@ -40,6 +41,7 @@ const THEMES: [(&str, Theme); 15] = [
     ("catppuccin_latte", CATPPUCCIN_LATTE),
     ("github", GITHUB),
     ("gruvbox_light", GRUVBOX_LIGHT),
+    ("intellij_light", INTELLIJ_LIGHT),
     ("one_half_light", ONE_HALF_LIGHT),
     ("solarized_light", SOLARIZED_LIGHT),
 ];
@@ -296,6 +298,42 @@ const GITHUB: Theme = Theme {
     bat_theme: "GitHub",
     added_bg: Color::Rgb(0xb8, 0xd1, 0xc4),
     removed_bg: Color::Rgb(0xdf, 0xbc, 0xc2),
+};
+
+/// IntelliJ's classic dark theme: orange keywords, olive strings, blue numbers. bat has no
+/// Darcula, so code takes Visual Studio Dark+, the nearest on the same dark grey.
+const DARCULA: Theme = Theme {
+    background: Color::Rgb(0x2b, 0x2b, 0x2b),
+    foreground: Color::Rgb(0xa9, 0xb7, 0xc6),
+    muted: Color::Rgb(0x80, 0x80, 0x80),
+    selection: Color::Rgb(0x21, 0x42, 0x83),
+    heading: Color::Rgb(0xcc, 0x78, 0x32),
+    accent: Color::Rgb(0x68, 0x97, 0xbb),
+    success: Color::Rgb(0x6a, 0x87, 0x59),
+    warning: Color::Rgb(0xff, 0xc6, 0x6d),
+    danger: Color::Rgb(0xff, 0x6b, 0x68),
+    fold: Color::Rgb(0x98, 0x76, 0xaa),
+    bat_theme: "Visual Studio Dark+",
+    added_bg: Color::Rgb(0x29, 0x44, 0x36),
+    removed_bg: Color::Rgb(0x55, 0x34, 0x34),
+};
+
+/// IntelliJ Light: navy keywords, green strings, purple fields on white. bat has no
+/// IntelliJ theme, so code takes GitHub, the nearest light one.
+const INTELLIJ_LIGHT: Theme = Theme {
+    background: Color::Rgb(0xff, 0xff, 0xff),
+    foreground: Color::Rgb(0x08, 0x08, 0x08),
+    muted: Color::Rgb(0x8c, 0x8c, 0x8c),
+    selection: Color::Rgb(0xa6, 0xd2, 0xff),
+    heading: Color::Rgb(0x00, 0x33, 0xb3),
+    accent: Color::Rgb(0x00, 0x62, 0x7a),
+    success: Color::Rgb(0x06, 0x7d, 0x17),
+    warning: Color::Rgb(0x9e, 0x88, 0x0d),
+    danger: Color::Rgb(0xc7, 0x22, 0x2d),
+    fold: Color::Rgb(0x87, 0x10, 0x94),
+    bat_theme: "GitHub",
+    added_bg: Color::Rgb(0xbe, 0xe6, 0xbe),
+    removed_bg: Color::Rgb(0xf2, 0xc4, 0xc4),
 };
 
 /// A pull request's state, as GitHub's state pill names it.

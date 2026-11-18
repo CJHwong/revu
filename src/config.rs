@@ -14,9 +14,9 @@ const CONFIG_HEAD: &str = r#"# revu config. Press r in the inbox to reload it.
 updated_within_days: 30
 
 # Color theme, or press T in the app to pick one. dracula, terminal (your terminal's
-# own colors), catppuccin_mocha, catppuccin_macchiato, catppuccin_frappe, nord,
+# own colors), catppuccin_mocha, catppuccin_macchiato, catppuccin_frappe, darcula, nord,
 # gruvbox_dark, solarized_dark, one_half_dark, monokai, and the light ones:
-# catppuccin_latte, gruvbox_light, solarized_light, one_half_light, github.
+# catppuccin_latte, gruvbox_light, intellij_light, solarized_light, one_half_light, github.
 theme: dracula
 
 # The folders that hold your clones. The Files changed tab asks for one the first

@@ -31,10 +31,10 @@ Adds `updated:>=<date>` to every query. Remove the key, or set it to `null`, to 
 
 ### theme
 
-The color theme. Each one pairs with the `bat` theme of the same name, so code in diffs matches the rest of the screen.
+The color theme. Each one pairs with the `bat` theme of the same name, so code in diffs matches the rest of the screen. bat has no IntelliJ themes, so `darcula` colors code with Visual Studio Dark+ and `intellij_light` with GitHub.
 
-- Dark: `dracula` (the default), `catppuccin_mocha`, `catppuccin_macchiato`, `catppuccin_frappe`, `nord`, `gruvbox_dark`, `solarized_dark`, `one_half_dark`, `monokai`
-- Light: `catppuccin_latte`, `gruvbox_light`, `solarized_light`, `one_half_light`, `github`
+- Dark: `dracula` (the default), `catppuccin_mocha`, `catppuccin_macchiato`, `catppuccin_frappe`, `darcula`, `nord`, `gruvbox_dark`, `solarized_dark`, `one_half_dark`, `monokai`
+- Light: `catppuccin_latte`, `gruvbox_light`, `intellij_light`, `solarized_light`, `one_half_light`, `github`
 - `terminal`: your terminal's own colors
 
 Pull request states (open, draft, merged, closed) keep GitHub's colors in every theme.

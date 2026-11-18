@@ -4212,7 +4212,10 @@ mod tests {
         app.theme_name = "dracula";
         app.handle_key(key(KeyCode::Char(',')));
         app.handle_key(key(KeyCode::Enter));
-        assert_eq!(app.theme_menu, Some(4));
+        let dracula = crate::theme::THEME_NAMES
+            .iter()
+            .position(|name| *name == "dracula");
+        assert_eq!(app.theme_menu, dracula);
         app.handle_key(key(KeyCode::Char('j')));
         let action = app.handle_key(key(KeyCode::Enter));
         assert!(matches!(action, Some(Action::SetTheme("gruvbox_dark"))));
