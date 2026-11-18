@@ -291,6 +291,17 @@
 				<string>#bcbec4</string>
 			</dict>
 		</dict>
+		<dict>
+			<key>name</key>
+			<string>Rust attribute mark</string>
+			<key>scope</key>
+			<string>punctuation.definition.annotation.rust</string>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#bcbec4</string>
+			</dict>
+		</dict>
 	</array>
 </dict>
 </plist>
