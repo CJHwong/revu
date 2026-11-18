@@ -1660,7 +1660,8 @@ fn place_piece(span: Span<'static>, short: Option<String>, shortest: Option<Stri
 }
 
 /// A pane's title. It takes one row when that holds every piece but the key hints,
-/// with `below` at the right end; otherwise `below` moves to a second row, under it.
+/// with `below` at the right end. Otherwise the first row keeps the view and the path,
+/// and `right` and `below` move to a second row under it, so neither row is crowded.
 struct TitleRows {
     first: Line<'static>,
     second: Option<Line<'static>>,
@@ -1682,9 +1683,10 @@ impl TitleRows {
                 second: None,
             };
         }
+        right.extend(below);
         TitleRows {
-            first: fit_title(width, left, right),
-            second: Some(fit_title(width, below, Vec::new())),
+            first: fit_title(width, left, Vec::new()),
+            second: Some(fit_title(width, right, Vec::new())),
         }
     }
 
@@ -3473,7 +3475,7 @@ mod tests {
     }
 
     #[test]
-    fn the_block_takes_a_second_row_only_when_one_row_cannot_hold_it() {
+    fn the_find_and_block_take_a_second_row_only_when_one_row_cannot_hold_them() {
         let text = |line: &Line| -> String {
             line.spans
                 .iter()
@@ -3501,8 +3503,12 @@ mod tests {
             (" word   /needle   in App > run_loop ".to_string(), None)
         );
         let (first, second) = rows(30);
-        assert_eq!(first, " word m switches      /needle ");
-        assert_eq!(second.as_deref(), Some("  in App > run_loop "));
+        assert_eq!(first, " word m switches ", "the view keeps row 1");
+        assert_eq!(
+            second.as_deref(),
+            Some(" /needle   in App > run_loop "),
+            "the find and the block move under it"
+        );
     }
 
     #[test]
