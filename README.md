@@ -1,6 +1,6 @@
 # revu
 
-Your GitHub pull requests, reviewed in the terminal. revu collects the pull requests that wait on you across every repository, opens each one the way GitHub's Overview does, and shows the diff in word diff, delta or difftastic. You can review, comment on lines and label without opening the browser.
+Your GitHub pull requests, reviewed in the terminal. revu collects the pull requests that wait on you across every repository, opens each one the way GitHub's Overview does, and shows the diff in word diff, delta or difftastic. You can review, comment on lines, reply to threads and label without opening the browser.
 
 ![revu on ripgrep: the inbox, a pull request's Overview, three diff views and a find](docs/demo.gif)
 
