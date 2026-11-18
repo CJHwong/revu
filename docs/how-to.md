@@ -18,7 +18,7 @@ groups:
 1. Write the query as you would in GitHub's search box. revu adds `is:pr is:open archived:false`, and `sort:updated-desc` unless the query has its own `sort:`.
 2. Press `r` in the inbox to reload the config.
 
-To see older pull requests too, remove `updated_within_days`, or change it under Settings (`,`).
+To see older pull requests too, remove `updated_within_days`, or change it under Settings (`,`): leave it empty for no limit.
 
 ## Open a pull request that is not in your inbox
 

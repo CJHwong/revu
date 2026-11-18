@@ -32,8 +32,9 @@ theme: dracula
 
 /// The built-in open_diff, diff renderers and inbox groups. A config without one of
 /// these keys uses the one here.
-const DEFAULTS: &str = r#"# Runs when you press d. {repo}, {number} and {url} are replaced.
-open_diff: "gh pr diff {number} -R {repo} | delta"
+const DEFAULTS: &str = r#"# Runs when you press d. {repo}, {number} and {url} are replaced. Without delta,
+# the diff opens in less.
+open_diff: "if command -v delta >/dev/null; then gh pr diff {number} -R {repo} | delta; else gh pr diff {number} -R {repo} --color=always | less -R; fi"
 
 # Diff views for the Files changed and Commits tabs; m switches between them.
 # Each command runs in the repo's clone. {base} and {head} are commits, {paths} is
@@ -122,7 +123,7 @@ pub struct Renderer {
     pub install: Option<String>,
 }
 
-fn default_renderers() -> Vec<Renderer> {
+pub fn default_renderers() -> Vec<Renderer> {
     defaults().diff_renderers
 }
 
@@ -382,7 +383,15 @@ mod tests {
     fn missing_keys_use_the_built_in_defaults_and_set_ones_replace_them() {
         let config = parse("theme: dracula\n").unwrap();
         assert_eq!(config.groups.len(), 5, "no groups key, the built-in groups");
-        assert_eq!(config.open_diff, "gh pr diff {number} -R {repo} | delta");
+        assert!(
+            config.open_diff.contains("| delta;"),
+            "{}",
+            config.open_diff
+        );
+        assert!(
+            config.open_diff.contains("| less -R"),
+            "no delta, still a diff"
+        );
         assert_eq!(config.diff_renderers.len(), 3);
         let own = parse("groups:\n  - title: Mine\n    query: author:@me\n").unwrap();
         assert_eq!(
@@ -578,6 +587,19 @@ mod tests {
             "a missing key keeps its default"
         );
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn updated_within_days_saved_as_null_means_no_limit() {
+        let dir = std::env::temp_dir().join(format!("revu-null-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.yaml");
+        fs::write(&path, "# mine\nupdated_within_days: 30\ngroups: []\n").unwrap();
+        save_setting(&path, "updated_within_days", "null").unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# mine\n"), "{text}");
+        assert_eq!(parse(&text).unwrap().updated_within_days, None);
+        fs::remove_file(&path).unwrap();
     }
 
     #[test]

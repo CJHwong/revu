@@ -69,13 +69,15 @@ pub enum Action {
     /// Apply a built-in theme and save it to the config.
     SetTheme(&'static str),
     /// Save how many days back the inbox looks, and reload it.
-    SetUpdatedWithin(u32),
+    /// None looks back without a limit.
+    SetUpdatedWithin(Option<u32>),
     /// Put text on the system clipboard.
     Copy(String),
     /// Send a review, or submit the pending one, with a verdict.
     SubmitReview {
         pr: PrRef,
         pull_request_id: String,
+        head_oid: String,
         pending_review: Option<String>,
         verdict: Verdict,
         body: String,
@@ -84,6 +86,7 @@ pub enum Action {
     AddComment {
         pr: PrRef,
         pull_request_id: String,
+        head_oid: String,
         pending_review: Option<String>,
         target: LineTarget,
         body: String,
@@ -252,6 +255,12 @@ pub enum Overlay {
     },
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ViewedSync {
+    confirmed: ViewedState,
+    pending: u32,
+}
+
 /// How far a movement key moves a list or a page.
 fn step(key: KeyCode) -> Option<i16> {
     match key {
@@ -272,6 +281,9 @@ pub struct OverviewLayout {
 
 pub struct DetailView {
     pub pr: PrRef,
+    /// The latest load of the detail and activity. A result from an earlier load, which
+    /// can finish after a later one, is dropped.
+    pub load: u64,
     /// The inbox row the PR was opened from, which draws the header until the detail
     /// arrives. None for a PR opened by link.
     pub summary: Option<PrSummary>,
@@ -300,6 +312,10 @@ pub struct DetailView {
     /// Indexes into the visible files, not into `files`.
     pub file_state: ListState,
     pub hide_viewed: bool,
+    /// Files with a Viewed write on its way: GitHub's last confirmed state, and how
+    /// many writes are still out. A failed write restores the confirmed state once
+    /// it is the last one out.
+    viewed_sync: HashMap<String, ViewedSync>,
     /// Files changed lists folders as a tree, like GitHub, or flat paths.
     pub tree_view: bool,
     /// Tree folders the user folded, by path.
@@ -371,6 +387,7 @@ impl DetailView {
         };
         Self {
             pr,
+            load: 0,
             summary: None,
             detail: None,
             activity: None,
@@ -397,6 +414,7 @@ impl DetailView {
             file_list_top: None,
             file_list_height: 0,
             hide_viewed: prefs.hide_viewed,
+            viewed_sync: HashMap::new(),
             repo: RepoState::Unknown,
             renderer,
             diff_scroll: 0,
@@ -1002,6 +1020,7 @@ impl DetailView {
         };
         let mut paths = Vec::new();
         for file in under.iter_mut().filter(|file| file.viewed != target) {
+            note_viewed_write(&mut self.viewed_sync, &file.path, file.viewed);
             file.viewed = target;
             paths.push(file.path.clone());
         }
@@ -1019,6 +1038,7 @@ impl DetailView {
         let pull_request_id = self.loaded()?.id.clone();
         let file = self.files.as_mut()?.as_mut().ok()?.get_mut(index)?;
         let viewed = file.viewed != ViewedState::Viewed;
+        note_viewed_write(&mut self.viewed_sync, &file.path, file.viewed);
         file.viewed = if viewed {
             ViewedState::Viewed
         } else {
@@ -1035,6 +1055,39 @@ impl DetailView {
             paths: vec![path],
             viewed,
         })
+    }
+
+    /// A Viewed write came back. A failed one puts each file back to GitHub's last
+    /// confirmed state, unless a later write for it is still out.
+    fn settle_viewed(&mut self, paths: &[String], viewed: bool, saved: bool) {
+        let mut restore = Vec::new();
+        for path in paths {
+            let Some(sync) = self.viewed_sync.get_mut(path) else {
+                continue;
+            };
+            sync.pending = sync.pending.saturating_sub(1);
+            if saved {
+                sync.confirmed = match viewed {
+                    true => ViewedState::Viewed,
+                    false => ViewedState::Unviewed,
+                };
+            }
+            if sync.pending > 0 {
+                continue;
+            }
+            if !saved {
+                restore.push((path.clone(), sync.confirmed));
+            }
+            self.viewed_sync.remove(path);
+        }
+        let Some(Ok(files)) = self.files.as_mut() else {
+            return;
+        };
+        for (path, state) in restore {
+            if let Some(file) = files.iter_mut().find(|file| file.path == path) {
+                file.viewed = state;
+            }
+        }
     }
 
     /// The selected file's path, or the selected folder's with a trailing slash.
@@ -1403,7 +1456,12 @@ impl Action {
             ),
             _ => return None,
         };
-        Some(SaveNote { doing, done })
+        let reload_on_error = matches!(self, Action::SetLabels { .. });
+        Some(SaveNote {
+            doing,
+            done,
+            reload_on_error,
+        })
     }
 }
 
@@ -1412,6 +1470,8 @@ impl Action {
 pub struct SaveNote {
     pub doing: &'static str,
     pub done: &'static str,
+    /// A failure may still have changed GitHub, so the PR loads again to show it.
+    pub reload_on_error: bool,
 }
 
 /// The label checklist: the repo's labels, ticked for the ones the PR will have.
@@ -1500,6 +1560,15 @@ fn comment_only_reason(detail: &PrDetail) -> Option<&'static str> {
         _ if detail.viewer_is_author => Some("GitHub takes only Comment on your own PR"),
         _ => None,
     }
+}
+
+/// Counts a Viewed write for the file; the first one out keeps the state GitHub had.
+fn note_viewed_write(sync: &mut HashMap<String, ViewedSync>, path: &str, before: ViewedState) {
+    let entry = sync.entry(path.to_string()).or_insert(ViewedSync {
+        confirmed: before,
+        pending: 0,
+    });
+    entry.pending += 1;
 }
 
 /// A row of the merge menu.
@@ -1672,10 +1741,11 @@ impl LineMode {
             return Err("the diff is still loading".to_string());
         };
         let (first, last) = self.marked();
-        let targets: Vec<(Side, u64)> = rows[first..=last]
-            .iter()
-            .filter_map(DiffRow::target)
-            .collect();
+        // A binary file's diff has no rows at all.
+        let Some(selected) = rows.get(first..=last) else {
+            return Err("this file has no lines to comment on".to_string());
+        };
+        let targets: Vec<(Side, u64)> = selected.iter().filter_map(DiffRow::target).collect();
         let (Some(&(side, start)), Some(&(end_side, end))) = (targets.first(), targets.last())
         else {
             return Err("a hunk header takes no comment; move to a line".to_string());
@@ -1721,6 +1791,9 @@ pub enum ComposeKind {
 pub struct Composer {
     pub pr: PrRef,
     pub pull_request_id: String,
+    /// The head commit the diff showed. A review revu creates is pinned to it, so it
+    /// covers what you saw, not commits pushed since.
+    pub head_oid: String,
     pub pending_review: Option<String>,
     pub kind: ComposeKind,
     pub editor: Editor,
@@ -1738,6 +1811,7 @@ impl Composer {
         Composer {
             pr,
             pull_request_id: detail.id.clone(),
+            head_oid: detail.head_oid.clone(),
             pending_review: activity.pending_review.clone(),
             kind,
             editor: Editor::default(),
@@ -1812,10 +1886,12 @@ impl Composer {
             self.pull_request_id.clone(),
             self.pending_review.clone(),
         );
+        let head_oid = self.head_oid.clone();
         match &self.kind {
             ComposeKind::Review { verdict, .. } => Action::SubmitReview {
                 pr,
                 pull_request_id,
+                head_oid,
                 pending_review,
                 verdict: *verdict,
                 body,
@@ -1823,6 +1899,7 @@ impl Composer {
             ComposeKind::LineComment(target) => Action::AddComment {
                 pr,
                 pull_request_id,
+                head_oid,
                 pending_review,
                 target: target.clone(),
                 body,
@@ -1902,6 +1979,10 @@ pub struct App {
     pub label_menu: Option<LabelMenu>,
     /// The merge menu, while it is open.
     pub merge_menu: Option<MergeMenu>,
+    /// The number of the latest detail load, across every PR opened.
+    next_load: u64,
+    /// The clone lookup's answer, for the main loop to act on.
+    pub clone_lookup: Option<(RepoJob, Result<crate::repo::CloneLookup, String>)>,
     /// Renderers whose command is not installed; m skips them.
     pub missing_renderers: HashSet<usize>,
     /// A warning for the diff footer, such as a renderer that is not installed.
@@ -1962,6 +2043,8 @@ impl App {
             composer: None,
             label_menu: None,
             merge_menu: None,
+            next_load: 0,
+            clone_lookup: None,
             missing_renderers: HashSet::new(),
             notice: None,
             notice_seen: false,
@@ -2318,6 +2401,11 @@ impl App {
         }
     }
 
+    /// Whether this PR is the one on screen.
+    pub fn shows(&mut self, pr: &PrRef) -> bool {
+        self.view_for(pr).is_some()
+    }
+
     fn view_for(&mut self, pr: &PrRef) -> Option<&mut DetailView> {
         match &mut self.screen {
             Screen::Detail(view) if view.pr == *pr => Some(view),
@@ -2325,11 +2413,70 @@ impl App {
         }
     }
 
-    pub fn set_detail(&mut self, pr: &PrRef, result: Result<PrDetail, String>) {
-        if let Some(view) = self.view_for(pr) {
-            view.detail = Some(result);
-            view.overview = None;
+    /// Starts a load of the open PR's detail and activity, and returns its number.
+    pub fn start_load(&mut self, pr: &PrRef) -> Option<u64> {
+        self.next_load += 1;
+        let load = self.next_load;
+        let view = self.view_for(pr)?;
+        view.load = load;
+        Some(load)
+    }
+
+    /// Whether a result belongs to the latest load of the open PR.
+    fn is_latest_load(&mut self, pr: &PrRef, load: u64) -> bool {
+        self.view_for(pr).is_some_and(|view| view.load == load)
+    }
+
+    pub fn set_loaded_detail(&mut self, pr: &PrRef, load: u64, result: Result<PrDetail, String>) {
+        if self.is_latest_load(pr, load) {
+            self.set_detail(pr, result);
         }
+    }
+
+    pub fn set_loaded_activity(
+        &mut self,
+        pr: &PrRef,
+        load: u64,
+        result: Result<PrActivity, String>,
+    ) {
+        if self.is_latest_load(pr, load) {
+            self.set_activity(pr, result);
+        }
+    }
+
+    pub fn set_loaded_hunks(
+        &mut self,
+        pr: &PrRef,
+        load: u64,
+        hunks: HashMap<String, Vec<HunkLine>>,
+    ) {
+        if self.is_latest_load(pr, load) {
+            self.set_hunks(pr, hunks);
+        }
+    }
+
+    pub fn set_detail(&mut self, pr: &PrRef, result: Result<PrDetail, String>) {
+        let (prefs, renderer_names) = (self.prefs.clone(), self.renderer_names.clone());
+        let Some(view) = self.view_for(pr) else {
+            return;
+        };
+        let commits = |detail: &PrDetail| (detail.base_oid.clone(), detail.head_oid.clone());
+        let before = match &view.detail {
+            Some(Ok(detail)) => Some(commits(detail)),
+            _ => None,
+        };
+        let after = result.as_ref().ok().map(commits);
+        // New commits make the files, the clone's refs and every drawn diff stale, as
+        // r would; the activity of this load stays.
+        if before.is_some() && after.is_some() && before != after {
+            let activity = view.activity.take();
+            let load = view.load;
+            Self::reload(view, &prefs, &renderer_names);
+            view.activity = activity;
+            view.load = load;
+        }
+        view.detail = Some(result);
+        view.overview = None;
     }
 
     pub fn set_activity(&mut self, pr: &PrRef, result: Result<PrActivity, String>) {
@@ -2371,6 +2518,9 @@ impl App {
         viewed: bool,
         result: Result<(), String>,
     ) {
+        if let Some(view) = self.view_for(pr) {
+            view.settle_viewed(paths, viewed, result.is_ok());
+        }
         let Err(error) = result else {
             return;
         };
@@ -2379,20 +2529,6 @@ impl App {
             _ => format!("{} files", paths.len()),
         };
         self.error = Some(format!("Viewed not saved for {what}: {error}"));
-        let Some(view) = self.view_for(pr) else {
-            return;
-        };
-        let Some(Ok(files)) = view.files.as_mut() else {
-            return;
-        };
-        let before = if viewed {
-            ViewedState::Unviewed
-        } else {
-            ViewedState::Viewed
-        };
-        for file in files.iter_mut().filter(|file| paths.contains(&file.path)) {
-            file.viewed = before;
-        }
     }
 
     /// A mouse wheel tick at `column`: positive scrolls down. It moves what the pointer is
@@ -2581,10 +2717,14 @@ impl App {
     }
 
     fn submit_updated_within(&mut self, text: &str) -> Option<Action> {
+        if text.trim().is_empty() {
+            return Some(Action::SetUpdatedWithin(None));
+        }
         match text.trim().parse::<u32>() {
-            Ok(days) if days > 0 => Some(Action::SetUpdatedWithin(days)),
+            Ok(days) if days > 0 => Some(Action::SetUpdatedWithin(Some(days))),
             _ => {
-                let error = "type a number of days, such as 30".to_string();
+                let error =
+                    "type a number of days, such as 30, or nothing for no limit".to_string();
                 self.set_prompt_error(PromptKind::UpdatedWithin, text, error);
                 None
             }
@@ -2986,8 +3126,11 @@ impl App {
     /// A write finished: a sent box closes, a failed one shows why and keeps the text.
     pub fn set_written(&mut self, pr: &PrRef, result: Result<(), String>) {
         let note = self.saving.take();
-        if result.is_ok() {
+        let reload_on_error = note.as_ref().is_some_and(|note| note.reload_on_error);
+        if result.is_ok() || reload_on_error {
             self.reload_after_write = Some(pr.clone());
+        }
+        if result.is_ok() {
             self.saved = note.map(|note| note.done.to_string());
         }
         let Some(composer) = self.composer.as_mut().filter(|composer| &composer.pr == pr) else {
@@ -3860,7 +4003,16 @@ mod tests {
         assert!(app.prompt.as_ref().unwrap().error.is_some());
         app.prompt.as_mut().unwrap().text = "14".to_string();
         let action = app.handle_key(key(KeyCode::Enter));
-        assert!(matches!(action, Some(Action::SetUpdatedWithin(14))));
+        assert!(matches!(action, Some(Action::SetUpdatedWithin(Some(14)))));
+        app.handle_key(key(KeyCode::Char(',')));
+        app.handle_key(key(KeyCode::Char('k')));
+        app.handle_key(key(KeyCode::Enter));
+        app.prompt.as_mut().unwrap().text = " ".to_string();
+        let action = app.handle_key(key(KeyCode::Enter));
+        assert!(
+            matches!(action, Some(Action::SetUpdatedWithin(None))),
+            "empty is no limit"
+        );
     }
 
     #[test]
@@ -4263,6 +4415,103 @@ mod tests {
     }
 
     #[test]
+    fn an_older_load_that_finishes_last_does_not_replace_the_newer_one() {
+        let (mut app, pr) = files_tab(Vec::new());
+        let first = app.start_load(&pr).unwrap();
+        let second = app.start_load(&pr).unwrap();
+        let mut newer = crate::model::tests::sample_detail();
+        newer.head_oid = "new".to_string();
+        let mut older = crate::model::tests::sample_detail();
+        older.head_oid = "old".to_string();
+        app.set_loaded_detail(&pr, second, Ok(newer));
+        app.set_loaded_detail(&pr, first, Err("late and stale".to_string()));
+        app.set_loaded_detail(&pr, first, Ok(older));
+        let Some(Ok(shown)) = &view(&app).detail else {
+            panic!("the newer detail stays");
+        };
+        assert_eq!(shown.head_oid, "new");
+        let activity = crate::model::tests::sample_activity();
+        app.set_loaded_activity(&pr, first, Err("stale".to_string()));
+        assert!(
+            matches!(view(&app).activity, Some(Ok(_))),
+            "stale activity dropped"
+        );
+        app.set_loaded_activity(&pr, second, Ok(activity));
+        assert!(matches!(view(&app).activity, Some(Ok(_))));
+    }
+
+    #[test]
+    fn new_commits_after_a_reload_drop_the_stale_files_and_diffs() {
+        let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        ready_repo(&mut app, &pr);
+        let same = crate::model::tests::sample_detail();
+        app.set_detail(&pr, Ok(same.clone()));
+        assert!(
+            view(&app).files.is_some(),
+            "the same commits keep the files"
+        );
+        let mut pushed = same;
+        pushed.head_oid = "pushed".to_string();
+        app.set_detail(&pr, Ok(pushed));
+        assert!(view(&app).files.is_none(), "the file list loads again");
+        assert!(matches!(view(&app).repo, RepoState::Unknown));
+        assert_eq!(view(&app).tab, Tab::Files);
+        assert!(
+            matches!(view(&app).activity, Some(Ok(_))),
+            "the activity stays"
+        );
+        assert!(app.take_files_request().is_some());
+    }
+
+    #[test]
+    fn a_failed_label_write_loads_the_pr_again_to_show_what_github_has() {
+        let (mut app, pr) = files_tab(Vec::new());
+        let labels = Action::SetLabels {
+            pr: pr.clone(),
+            pull_request_id: "PR_node".to_string(),
+            add: vec!["L1".to_string()],
+            remove: vec!["L2".to_string()],
+        };
+        app.saving = labels.save_note();
+        app.set_written(&pr, Err("label not found".to_string()));
+        assert_eq!(app.reload_after_write.as_ref(), Some(&pr));
+        assert_eq!(app.error.as_deref(), Some("label not found"));
+        let discard = Action::DiscardReview {
+            pr: pr.clone(),
+            pending_review: "R1".to_string(),
+        };
+        app.reload_after_write = None;
+        app.saving = discard.save_note();
+        app.set_written(&pr, Err("offline".to_string()));
+        assert!(
+            app.reload_after_write.is_none(),
+            "other writes keep the screen as it is"
+        );
+    }
+
+    #[test]
+    fn select_lines_on_a_binary_file_says_so_instead_of_crashing() {
+        let (mut app, _) = files_tab(vec![file("logo.png", ViewedState::Unviewed)]);
+        let diff =
+            "diff --git a/logo.png b/logo.png\nBinary files a/logo.png and b/logo.png differ\n";
+        view_mut(&mut app).line_mode = Some(LineMode {
+            path: "logo.png".to_string(),
+            rows: Some(Ok(crate::line_diff::parse(diff))),
+            cursor: 0,
+            anchor: None,
+            scroll: 0,
+        });
+        for code in [KeyCode::Enter, KeyCode::Char('y'), KeyCode::Char('o')] {
+            app.handle_key(key(code));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.error.as_deref(),
+            Some("this file has no lines to comment on")
+        );
+    }
+
+    #[test]
     fn the_wheel_moves_the_cursor_in_select_lines() {
         let (mut app, _) = files_tab(vec![file("a.rs", ViewedState::Unviewed)]);
         let diff = "@@ -1,6 +1,6 @@\n a\n b\n c\n d\n e\n f\n";
@@ -4349,10 +4598,20 @@ mod tests {
         app.handle_key(ctrl('s'));
         assert!(app.composer.as_ref().unwrap().confirming);
         let action = app.handle_key(key(KeyCode::Char('y')));
-        let Some(Action::SubmitReview { verdict, body, .. }) = action else {
+        let Some(Action::SubmitReview {
+            verdict,
+            body,
+            head_oid,
+            ..
+        }) = action
+        else {
             panic!("y sends the review");
         };
         assert_eq!((verdict, body.as_str()), (Verdict::Approve, "ship it"));
+        assert_eq!(
+            head_oid, "head999",
+            "the review is pinned to the commit shown"
+        );
         app.set_written(&pr, Err("GitHub said no".to_string()));
         let composer = app.composer.as_ref().expect("a failed send keeps the text");
         assert_eq!(composer.editor.text, "ship it");
@@ -4755,6 +5014,47 @@ mod tests {
             ViewedState::Unviewed
         );
         assert!(app.error.as_deref().unwrap().contains("forbidden"));
+    }
+
+    #[test]
+    fn a_failed_sync_restores_what_github_last_had_after_quick_presses() {
+        let state = |app: &App| view(app).loaded_files().unwrap()[0].viewed;
+        let paths = ["a.md".to_string()];
+        let press_v = |app: &mut App| {
+            view_mut(app).file_state.select(Some(0));
+            app.handle_key(key(KeyCode::Char('v')));
+        };
+        let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Dismissed)]);
+        press_v(&mut app);
+        app.set_viewed_result(&pr, &paths, true, Err("offline".to_string()));
+        assert_eq!(
+            state(&app),
+            ViewedState::Dismissed,
+            "not the opposite of Viewed"
+        );
+
+        let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        press_v(&mut app);
+        press_v(&mut app);
+        app.set_viewed_result(&pr, &paths, true, Err("offline".to_string()));
+        assert_eq!(
+            state(&app),
+            ViewedState::Unviewed,
+            "the second write is still out"
+        );
+        app.set_viewed_result(&pr, &paths, false, Err("offline".to_string()));
+        assert_eq!(state(&app), ViewedState::Unviewed, "neither reached GitHub");
+
+        let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        press_v(&mut app);
+        press_v(&mut app);
+        app.set_viewed_result(&pr, &paths, true, Ok(()));
+        app.set_viewed_result(&pr, &paths, false, Err("offline".to_string()));
+        assert_eq!(
+            state(&app),
+            ViewedState::Viewed,
+            "GitHub kept the first write"
+        );
     }
 
     /// The files tab as a folder tree, with the cursor on the `src` folder row.

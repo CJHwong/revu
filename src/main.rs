@@ -66,15 +66,18 @@ enum Message {
     },
     Activity {
         pr: PrRef,
+        load: u64,
         result: Result<Box<PrActivity>, String>,
     },
     /// The code under each review thread, by thread ID, after the activity.
     Hunks {
         pr: PrRef,
+        load: u64,
         hunks: std::collections::HashMap<String, Vec<model::HunkLine>>,
     },
     Detail {
         pr: PrRef,
+        load: u64,
         result: Result<Box<PrDetail>, String>,
     },
     Files {
@@ -96,6 +99,11 @@ enum Message {
     Repo {
         pr: PrRef,
         result: Result<LocalRepo, String>,
+    },
+    /// Where the PR's clone is, or should go, found off the UI thread.
+    CloneLookup {
+        job: RepoJob,
+        result: Result<CloneLookup, String>,
     },
     Diff {
         pr: PrRef,
@@ -141,6 +149,16 @@ struct Session {
     enhanced_keys: bool,
     /// The PR waiting on the user's answer to "clone it?".
     pending_clone: Option<RepoJob>,
+    /// Viewed writes, sent one at a time in the order of the presses, so GitHub ends on
+    /// the last one.
+    viewed_writes: Sender<ViewedWrite>,
+}
+
+struct ViewedWrite {
+    pr: PrRef,
+    pull_request_id: String,
+    paths: Vec<String>,
+    viewed: bool,
 }
 
 fn main() -> Result<()> {
@@ -148,6 +166,7 @@ fn main() -> Result<()> {
     config::move_old_dir(&config_path)?;
     let config = config::load_or_init(&config_path)?;
     let (sender, receiver) = mpsc::channel();
+    let viewed_writes = start_viewed_writer(sender.clone());
     let mut session = Session {
         config,
         config_path,
@@ -155,6 +174,7 @@ fn main() -> Result<()> {
         receiver,
         enhanced_keys: false,
         pending_clone: None,
+        viewed_writes,
     };
     let mut app = App::new();
     app.renderer_names = renderer_names(&session.config);
@@ -318,11 +338,13 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
                 app.gh_problem = Some(problem);
                 app.gh_checked_at = Some(Utc::now());
             }
-            Message::Activity { pr, result } => {
-                app.set_activity(&pr, result.map(|activity| *activity))
+            Message::Activity { pr, load, result } => {
+                app.set_loaded_activity(&pr, load, result.map(|activity| *activity))
             }
-            Message::Hunks { pr, hunks } => app.set_hunks(&pr, hunks),
-            Message::Detail { pr, result } => app.set_detail(&pr, result.map(|detail| *detail)),
+            Message::Hunks { pr, load, hunks } => app.set_loaded_hunks(&pr, load, hunks),
+            Message::Detail { pr, load, result } => {
+                app.set_loaded_detail(&pr, load, result.map(|detail| *detail))
+            }
             Message::Files { pr, result } => app.set_files(&pr, result),
             Message::Written { pr, result } => app.set_written(&pr, result),
             Message::LineDiff { pr, path, result } => app.set_line_rows(&pr, &path, result),
@@ -337,6 +359,11 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
                 result,
             } => app.set_viewed_result(&pr, &paths, viewed, result),
             Message::Repo { pr, result } => app.set_repo(&pr, result),
+            Message::CloneLookup { job, result } => {
+                if app.shows(&job.pr) {
+                    app.clone_lookup = Some((job, result));
+                }
+            }
             Message::Diff { pr, key, result } => app.set_diff(&pr, key, result),
             Message::Grep { pr, query, result } => app.set_grep(&pr, &query, result),
             Message::FindFiles { pr, query, result } => app.set_find_files(&pr, &query, result),
@@ -359,10 +386,7 @@ fn perform(
     match action {
         Action::Quit => return Ok(false),
         Action::Refresh => refresh(app, session),
-        Action::FetchDetail(pr) => {
-            start_activity_fetch(session, pr.clone());
-            start_detail_fetch(session, pr);
-        }
+        Action::FetchDetail(pr) => start_load(app, session, pr),
         Action::OpenBrowser(url) => open_browser(app, &url),
         Action::RunDiff(pr) => run_diff(terminal, app, session, &pr)?,
         Action::Grep {
@@ -422,13 +446,11 @@ fn perform(
             });
         }
         Action::ShowWholeDiff(job) => {
-            let Some(command) = renderer_command(session, &job) else {
-                return Ok(true);
-            };
+            let command = renderer_command(session, &job);
             let syntax = renderer_syntax(session, &job);
             let sender = session.sender.clone();
             thread::spawn(move || {
-                let result = render_diff(&job, &command, true, syntax);
+                let result = command.and_then(|command| render_diff(&job, &command, true, syntax));
                 let path = job.paths.last().cloned().unwrap_or_default();
                 let _ = sender.send(Message::File {
                     pr: job.pr,
@@ -444,15 +466,21 @@ fn perform(
         Action::SubmitReview {
             pr,
             pull_request_id,
+            head_oid,
             pending_review,
             verdict,
             body,
         } => start_write(session, pr, move || {
-            github::submit_review(&pull_request_id, pending_review.as_deref(), verdict, &body)
+            let review = github::Review {
+                pull_request_id: &pull_request_id,
+                head_oid: &head_oid,
+            };
+            github::submit_review(&review, pending_review.as_deref(), verdict, &body)
         }),
         Action::AddComment {
             pr,
             pull_request_id,
+            head_oid,
             pending_review,
             target,
             body,
@@ -464,8 +492,11 @@ fn perform(
                 start_line: target.start_line,
                 body: &body,
             };
-            github::add_line_comment(&pull_request_id, pending_review.as_deref(), &comment)
-                .map(|_| ())
+            let review = github::Review {
+                pull_request_id: &pull_request_id,
+                head_oid: &head_oid,
+            };
+            github::add_line_comment(&review, pending_review.as_deref(), &comment).map(|_| ())
         }),
         Action::LineDiff(job) => {
             let sender = session.sender.clone();
@@ -580,11 +611,13 @@ fn renderer_names(config: &Config) -> Vec<String> {
 /// Starts whatever the screen now needs: a file list, a local clone, or a diff.
 fn dispatch_requests(app: &mut App, session: &mut Session) {
     if let Some(pr) = app.reload_after_write.take() {
-        start_activity_fetch(session, pr.clone());
-        start_detail_fetch(session, pr);
+        start_load(app, session, pr);
     }
     if let Some(pr) = app.take_files_request() {
         start_files_fetch(session, pr);
+    }
+    if let Some((job, lookup)) = app.clone_lookup.take() {
+        finish_repo_lookup(app, session, job, lookup);
     }
     if let Some(job) = app.take_repo_request() {
         prepare_repo(app, session, job);
@@ -609,7 +642,27 @@ fn prepare_repo(app: &mut App, session: &mut Session, job: RepoJob) {
         .iter()
         .map(|folder| repo::expand_home(folder))
         .collect();
-    match repo::find_clone(&workspaces, &job.pr.repo) {
+    app.set_repo_state(RepoState::Busy(format!(
+        "looking for the clone of {}",
+        job.pr.repo
+    )));
+    // The lookup reads every workspace folder and runs git, so it stays off the UI thread.
+    let sender = session.sender.clone();
+    thread::spawn(move || {
+        let result =
+            repo::find_clone(&workspaces, &job.pr.repo).map_err(|error| format!("{error:#}"));
+        let _ = sender.send(Message::CloneLookup { job, result });
+    });
+}
+
+/// Fetches into the clone that was found, or asks before cloning a missing one.
+fn finish_repo_lookup(
+    app: &mut App,
+    session: &mut Session,
+    job: RepoJob,
+    lookup: Result<CloneLookup, String>,
+) {
+    match lookup {
         Ok(CloneLookup::Found(dir)) => {
             app.set_repo_state(RepoState::Busy(format!(
                 "fetching the PR into {}",
@@ -636,7 +689,7 @@ fn prepare_repo(app: &mut App, session: &mut Session, job: RepoJob) {
             );
             app.set_repo(&job.pr, Err(message));
         }
-        Err(error) => app.set_repo(&job.pr, Err(format!("{error:#}"))),
+        Err(error) => app.set_repo(&job.pr, Err(error)),
     }
 }
 
@@ -692,12 +745,10 @@ fn set_workspace(app: &mut App, session: &mut Session, text: String) {
 }
 
 /// Saves how many days back the inbox looks, then reloads the inbox with it.
-fn set_updated_within(app: &mut App, session: &mut Session, days: u32) {
-    let saved = config::save_setting(
-        &session.config_path,
-        "updated_within_days",
-        &days.to_string(),
-    );
+fn set_updated_within(app: &mut App, session: &mut Session, days: Option<u32>) {
+    // YAML's null reads back as no limit.
+    let value = days.map_or_else(|| "null".to_string(), |days| days.to_string());
+    let saved = config::save_setting(&session.config_path, "updated_within_days", &value);
     match saved {
         Ok(()) => refresh(app, session),
         Err(error) => app.error = Some(format!("not saved: {error:#}")),
@@ -731,16 +782,26 @@ fn fetch_local_repo(job: &RepoJob, dir: &std::path::Path, clone_first: bool) -> 
     })
 }
 
+/// The renderer the diff asks for, or why there is none.
+fn pick_renderer(
+    renderers: &[config::Renderer],
+    index: usize,
+) -> Result<&config::Renderer, String> {
+    renderers
+        .get(index)
+        .ok_or_else(|| "no diff view: diff_renderers in the config is empty".to_string())
+}
+
 /// The renderer's shell command for this job, with its values quoted.
-fn renderer_command(session: &Session, job: &DiffJob) -> Option<String> {
-    let renderer = session.config.diff_renderers.get(job.key.renderer)?;
+fn renderer_command(session: &Session, job: &DiffJob) -> Result<String, String> {
+    let renderer = pick_renderer(&session.config.diff_renderers, job.key.renderer)?;
     let theme = &session.config.theme;
     let paths: Vec<String> = job
         .paths
         .iter()
         .map(|path| repo::shell_quote(path))
         .collect();
-    Some(repo::fill_template(
+    Ok(repo::fill_template(
         &renderer.command,
         &[
             ("base", repo::shell_quote(&job.base)),
@@ -784,13 +845,11 @@ fn render_diff(
 }
 
 fn start_diff(session: &Session, job: DiffJob) {
-    let Some(command) = renderer_command(session, &job) else {
-        return;
-    };
+    let command = renderer_command(session, &job);
     let syntax = renderer_syntax(session, &job);
     let sender = session.sender.clone();
     thread::spawn(move || {
-        let result = render_diff(&job, &command, false, syntax);
+        let result = command.and_then(|command| render_diff(&job, &command, false, syntax));
         let _ = sender.send(Message::Diff {
             pr: job.pr,
             key: job.key,
@@ -862,7 +921,17 @@ fn report_gh_problem(sender: &Sender<Message>, error: &str) {
     }
 }
 
-fn start_activity_fetch(session: &Session, pr: PrRef) {
+/// Loads the open PR's detail and activity, numbered so an older load that finishes
+/// later cannot replace them.
+fn start_load(app: &mut App, session: &Session, pr: PrRef) {
+    let Some(load) = app.start_load(&pr) else {
+        return;
+    };
+    start_activity_fetch(session, pr.clone(), load);
+    start_detail_fetch(session, pr, load);
+}
+
+fn start_activity_fetch(session: &Session, pr: PrRef, load: u64) {
     let sender = session.sender.clone();
     thread::spawn(move || {
         let result = github::fetch_activity(&pr.repo, pr.number)
@@ -874,6 +943,7 @@ fn start_activity_fetch(session: &Session, pr: PrRef) {
         let loaded = result.is_ok();
         let _ = sender.send(Message::Activity {
             pr: pr.clone(),
+            load,
             result,
         });
         if !loaded {
@@ -881,12 +951,12 @@ fn start_activity_fetch(session: &Session, pr: PrRef) {
         }
         // The code is extra: when it fails, the threads stay as they are, without it.
         if let Ok(hunks) = github::fetch_hunks(&pr.repo, pr.number) {
-            let _ = sender.send(Message::Hunks { pr, hunks });
+            let _ = sender.send(Message::Hunks { pr, load, hunks });
         }
     });
 }
 
-fn start_detail_fetch(session: &Session, pr: PrRef) {
+fn start_detail_fetch(session: &Session, pr: PrRef, load: u64) {
     let sender = session.sender.clone();
     thread::spawn(move || {
         let result = github::fetch_detail(&pr.repo, pr.number)
@@ -895,7 +965,7 @@ fn start_detail_fetch(session: &Session, pr: PrRef) {
         if let Err(error) = &result {
             report_gh_problem(&sender, error);
         }
-        let _ = sender.send(Message::Detail { pr, result });
+        let _ = sender.send(Message::Detail { pr, load, result });
     });
 }
 
@@ -960,17 +1030,41 @@ fn start_viewed_sync(
     paths: Vec<String>,
     viewed: bool,
 ) {
-    let sender = session.sender.clone();
-    thread::spawn(move || {
-        let result = github::set_viewed(&pull_request_id, &paths, viewed)
-            .map_err(|error| format!("{error:#}"));
-        let _ = sender.send(Message::Viewed {
-            pr,
-            paths,
-            viewed,
-            result,
+    let write = ViewedWrite {
+        pr,
+        pull_request_id,
+        paths,
+        viewed,
+    };
+    if let Err(mpsc::SendError(write)) = session.viewed_writes.send(write) {
+        let _ = session.sender.send(Message::Viewed {
+            pr: write.pr,
+            paths: write.paths,
+            viewed: write.viewed,
+            result: Err("the Viewed writer stopped".to_string()),
         });
+    }
+}
+
+/// The one thread that sends Viewed writes, in order.
+fn start_viewed_writer(sender: Sender<Message>) -> Sender<ViewedWrite> {
+    let (writes, queue) = mpsc::channel::<ViewedWrite>();
+    thread::spawn(move || {
+        for write in queue {
+            let result = github::set_viewed(&write.pull_request_id, &write.paths, write.viewed)
+                .map_err(|error| format!("{error:#}"));
+            let message = Message::Viewed {
+                pr: write.pr,
+                paths: write.paths,
+                viewed: write.viewed,
+                result,
+            };
+            if sender.send(message).is_err() {
+                return;
+            }
+        }
     });
+    writes
 }
 
 fn open_browser(app: &mut App, url: &str) {
@@ -1029,6 +1123,17 @@ fn wait_for_enter(message: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_renderer_is_an_error_the_diff_pane_shows() {
+        let error = pick_renderer(&[], 0).unwrap_err();
+        assert!(error.contains("diff_renderers"), "{error}");
+        let renderers = config::default_renderers();
+        assert_eq!(
+            pick_renderer(&renderers, 1).unwrap().name,
+            renderers[1].name
+        );
+    }
 
     #[test]
     fn the_renderer_warning_names_what_is_missing_and_how_to_add_it() {

@@ -286,12 +286,20 @@ fn graphql_args(document: &str, strings: &[(&str, &str)], numbers: &[(&str, u64)
     args
 }
 
+/// The PR a review goes on, and the head commit the diff showed. A review revu creates
+/// is pinned to that commit, so it covers what you saw, not commits pushed since.
+pub struct Review<'a> {
+    pub pull_request_id: &'a str,
+    pub head_oid: &'a str,
+}
+
 /// Creates your pending review: a review with no verdict, which GitHub keeps hidden
 /// from others until you submit it. GitHub allows one per person per PR.
-fn start_pending_review(pull_request_id: &str) -> Result<String> {
-    let document = "mutation($pr: ID!) { addPullRequestReview(input: { pullRequestId: $pr }) \
-                    { pullRequestReview { id } } }";
-    let response = run_graphql(&graphql_args(document, &[("pr", pull_request_id)], &[]))?;
+fn start_pending_review(review: &Review) -> Result<String> {
+    let document = "mutation($pr: ID!, $commit: GitObjectID!) { addPullRequestReview(input: { \
+                    pullRequestId: $pr, commitOID: $commit }) { pullRequestReview { id } } }";
+    let strings = [("pr", review.pull_request_id), ("commit", review.head_oid)];
+    let response = run_graphql(&graphql_args(document, &strings, &[]))?;
     let id = response.pointer("/addPullRequestReview/pullRequestReview/id");
     id.and_then(Value::as_str)
         .map(str::to_string)
@@ -311,15 +319,15 @@ fn find_pending_review(pull_request_id: &str) -> Result<Option<String>> {
 /// Adds a line comment to your pending review, creating the review first when there is
 /// none. Returns the pending review's id.
 pub fn add_line_comment(
-    pull_request_id: &str,
+    target: &Review,
     pending_review: Option<&str>,
     comment: &NewComment,
 ) -> Result<String> {
     let review = match pending_review {
         Some(review) => review.to_string(),
-        None => match find_pending_review(pull_request_id)? {
+        None => match find_pending_review(target.pull_request_id)? {
             Some(review) => review,
-            None => start_pending_review(pull_request_id)?,
+            None => start_pending_review(target)?,
         },
     };
     let document = "mutation($review: ID!, $path: String!, $body: String!, $side: DiffSide!, \
@@ -352,14 +360,14 @@ pub fn add_line_comment(
 /// Submits your pending review with a verdict, or sends a new review in one step when
 /// there is no pending one.
 pub fn submit_review(
-    pull_request_id: &str,
+    target: &Review,
     pending_review: Option<&str>,
     verdict: Verdict,
     body: &str,
 ) -> Result<()> {
     let found = match pending_review {
         Some(review) => Some(review.to_string()),
-        None => find_pending_review(pull_request_id)?,
+        None => find_pending_review(target.pull_request_id)?,
     };
     let args = match found.as_deref() {
         Some(review) => graphql_args(
@@ -374,11 +382,12 @@ pub fn submit_review(
             &[],
         ),
         None => graphql_args(
-            "mutation($pr: ID!, $event: PullRequestReviewEvent!, $body: String) { \
-             addPullRequestReview(input: { pullRequestId: $pr, event: $event, body: $body }) \
-             { pullRequestReview { id } } }",
+            "mutation($pr: ID!, $commit: GitObjectID!, $event: PullRequestReviewEvent!, \
+             $body: String) { addPullRequestReview(input: { pullRequestId: $pr, \
+             commitOID: $commit, event: $event, body: $body }) { pullRequestReview { id } } }",
             &[
-                ("pr", pull_request_id),
+                ("pr", target.pull_request_id),
+                ("commit", target.head_oid),
                 ("event", verdict.graphql()),
                 ("body", body),
             ],
@@ -451,25 +460,38 @@ pub fn repo_labels(repo: &str) -> Result<Vec<RepoLabel>> {
 }
 
 /// Adds and removes labels on a PR, one call each.
+/// Adds and removes labels in one request.
 pub fn set_labels(pull_request_id: &str, add: &[String], remove: &[String]) -> Result<()> {
-    for (mutation, ids) in [
-        ("addLabelsToLabelable", add),
-        ("removeLabelsFromLabelable", remove),
-    ] {
-        if ids.is_empty() {
-            continue;
-        }
-        let document = format!(
-            "mutation($id: ID!, $labels: [ID!]!) {{ {mutation}(input: {{ labelableId: $id, \
-             labelIds: $labels }}) {{ clientMutationId }} }}"
-        );
-        let mut args = graphql_args(&document, &[("id", pull_request_id)], &[]);
+    let Some(document) = labels_document(!add.is_empty(), !remove.is_empty()) else {
+        return Ok(());
+    };
+    let mut args = graphql_args(&document, &[("id", pull_request_id)], &[]);
+    for (variable, ids) in [("add", add), ("remove", remove)] {
         for label in ids {
-            args.extend(["-f".to_string(), format!("labels[]={label}")]);
+            args.extend(["-f".to_string(), format!("{variable}[]={label}")]);
         }
-        run_graphql(&args)?;
     }
+    run_graphql(&args)?;
     Ok(())
+}
+
+/// The label mutations for one request: an add, a remove, or both. GraphQL refuses a
+/// declared variable that goes unused, so each list is declared only when it is sent.
+fn labels_document(add: bool, remove: bool) -> Option<String> {
+    let parts = [
+        (add, "add", "addLabelsToLabelable"),
+        (remove, "remove", "removeLabelsFromLabelable"),
+    ];
+    let mut variables = String::from("$id: ID!");
+    let mut fields = String::new();
+    for (_, variable, mutation) in parts.iter().filter(|(sent, ..)| *sent) {
+        variables.push_str(&format!(", ${variable}: [ID!]!"));
+        fields.push_str(&format!(
+            " {variable}: {mutation}(input: {{ labelableId: $id, labelIds: ${variable} }}) \
+             {{ clientMutationId }}"
+        ));
+    }
+    (add || remove).then(|| format!("mutation({variables}) {{{fields} }}"))
 }
 
 /// Splits `gh api -i` output into the header block and the body. Output without a status
@@ -648,6 +670,25 @@ fn run_graphql(args: &[String]) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn labels_go_in_one_request_declaring_only_the_lists_sent() {
+        assert_eq!(labels_document(false, false), None);
+        let both = labels_document(true, true).unwrap();
+        assert!(
+            both.starts_with("mutation($id: ID!, $add: [ID!]!, $remove: [ID!]!)"),
+            "{both}"
+        );
+        assert!(
+            both.contains("add: addLabelsToLabelable")
+                && both.contains("remove: removeLabelsFromLabelable")
+        );
+        let remove_only = labels_document(false, true).unwrap();
+        assert!(
+            !remove_only.contains("$add") && !remove_only.contains("addLabels"),
+            "{remove_only}"
+        );
+    }
 
     #[test]
     fn rate_limits_read_as_what_to_do() {

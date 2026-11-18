@@ -17,7 +17,7 @@ revu reads by default. It writes only when you press a key that asks it to:
 | `e` | Adds or removes labels |
 | `v` | The Viewed checkbox on a file |
 
-A merge names the head commit revu showed you. If someone pushed after that, GitHub refuses the merge with "Head branch was modified"; press `r` and look again.
+A merge names the head commit revu showed you. If someone pushed after that, GitHub refuses the merge with "Head branch was modified"; press `r` and look again. A review revu starts is pinned to that commit too, so an approval covers the code you read, not commits pushed since.
 
 GitHub keeps one pending review per person per pull request, so line comments you start in the browser and in revu land in the same review.
 

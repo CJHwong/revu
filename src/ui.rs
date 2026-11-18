@@ -2246,7 +2246,7 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
         ),
         PromptKind::UpdatedWithin => (
             " Updated within, in days ".to_string(),
-            "the inbox shows PRs updated in this many days. enter saves it and reloads, esc keeps it"
+            "PRs updated in this many days, or empty for no limit. enter saves and reloads, esc keeps it"
                 .to_string(),
         ),
         PromptKind::FindInDiff => (

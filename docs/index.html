@@ -5,12 +5,22 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>revu: GitHub pull requests, reviewed in your terminal</title>
 <meta name="description" content="revu is a terminal app for the GitHub pull requests that wait on you: an inbox like GitHub's, the full Overview, three diff views, find, and reviews, without the browser.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://cjhwong.github.io/revu/">
+<meta property="og:title" content="revu: GitHub pull requests, reviewed in your terminal">
+<meta property="og:description" content="An inbox of the pull requests that wait on you, GitHub's Overview, three diff views, and reviews, without the browser.">
+<meta property="og:image" content="https://cjhwong.github.io/revu/og.png">
+<meta property="og:image:alt" content="revu's inbox in a terminal, listing pull requests with their review and check states.">
+<meta name="twitter:card" content="summary_large_image">
 <style>
   :root {
     --bg: #282a36;
     --bg-raised: #21222c;
     --fg: #f8f8f2;
-    --muted: #6272a4;
+    /* Text that reads as secondary. #9aa8cb has a 5.99:1 contrast on --bg. */
+    --muted: #9aa8cb;
+    /* Decoration only, such as list markers: 3:1 is too faint for text. */
+    --faint: #6272a4;
     --line: #44475a;
     --heading: #bd93f9;
     --accent: #8be9fd;
@@ -20,6 +30,10 @@
     --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
   }
   * { box-sizing: border-box; }
+  .visually-hidden {
+    position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip-path: inset(50%); white-space: nowrap;
+  }
   html { scroll-behavior: smooth; }
   body {
     margin: 0;
@@ -62,7 +76,7 @@
     color: var(--muted); background: transparent;
     border: 1px solid var(--line); border-radius: 6px; padding: 3px 10px;
   }
-  button.copy:hover { color: var(--fg); border-color: var(--muted); }
+  button.copy:hover { color: var(--fg); border-color: var(--faint); }
   .button {
     border: 1px solid var(--heading); color: var(--heading);
     border-radius: 8px; padding: 10px 16px;
@@ -87,7 +101,7 @@
 
   section { padding: 56px 0 8px; }
   h2 { font-size: 22px; margin: 0; color: var(--heading); }
-  h2::before { content: "## "; color: var(--muted); }
+  h2::before { content: "## "; color: var(--faint); }
   .sub { color: var(--muted); margin: 4px 0 26px; }
 
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
@@ -96,7 +110,7 @@
     padding: 18px 20px;
   }
   .card h3 { margin: 0 0 8px; font-size: 15px; }
-  .card h3 .num { color: var(--muted); font-weight: 400; margin-right: 6px; }
+  .card h3 .num { color: var(--faint); font-weight: 400; margin-right: 6px; }
   .card p { margin: 0 0 10px; color: #c9cbd6; font-size: 14px; }
   .card .keys { color: var(--muted); font-size: 13px; margin: 0; }
   .card .keys kbd { color: var(--accent); }
@@ -111,10 +125,10 @@
 
   .steps { margin: 0; padding-left: 22px; color: #c9cbd6; }
   .steps li { margin-bottom: 14px; }
-  .steps li::marker { color: var(--muted); }
+  .steps li::marker { color: var(--faint); }
   .steps .cmd { margin-top: 8px; width: fit-content; }
   ul.plain { margin: 8px 0 0; padding-left: 20px; color: #c9cbd6; }
-  ul.plain li::marker { color: var(--muted); }
+  ul.plain li::marker { color: var(--faint); }
 
   footer { margin-top: 72px; border-top: 1px solid var(--line); padding: 22px 0 40px; color: var(--muted); font-size: 13px; }
   footer .wrap { display: flex; flex-wrap: wrap; gap: 18px; }
@@ -278,15 +292,19 @@
   </div>
 </footer>
 
+<p id="copy-status" class="visually-hidden" aria-live="polite"></p>
 <script>
+  const copyStatus = document.getElementById("copy-status");
   for (const button of document.querySelectorAll("button.copy")) {
     button.addEventListener("click", async () => {
       const text = document.getElementById(button.dataset.copy).textContent;
       try {
         await navigator.clipboard.writeText(text);
         button.textContent = "copied";
+        copyStatus.textContent = "Copied to the clipboard";
       } catch (error) {
         button.textContent = "select and copy";
+        copyStatus.textContent = "Copy failed; select the text and copy it";
       }
       setTimeout(() => { button.textContent = "copy"; }, 1600);
     });

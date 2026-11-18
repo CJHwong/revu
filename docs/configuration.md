@@ -27,7 +27,7 @@ A group shows at most 100 pull requests, the newest ones. Its header says `100 o
 
 ### updated_within_days
 
-Adds `updated:>=<date>` to every query. Remove the key to see older pull requests. Settings (`,`) changes it too.
+Adds `updated:>=<date>` to every query. Remove the key, or set it to `null`, to see older pull requests. Settings (`,`) changes it too; an empty value there means no limit.
 
 ### theme
 
@@ -83,7 +83,7 @@ When the saved renderer is not installed, revu shows `word` instead and keeps th
 
 ### open_diff
 
-The shell command that `d` runs. `{repo}`, `{number}` and `{url}` are replaced. The default is `gh pr diff {number} -R {repo} | delta`.
+The shell command that `d` runs. `{repo}`, `{number}` and `{url}` are replaced. The default shows `gh pr diff {number} -R {repo}` in delta, or in `less` when delta is not installed.
 
 ## view.yaml
 
