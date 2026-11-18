@@ -73,6 +73,7 @@ Press `s` on any pull request tab. It searches every file in the repository at t
 
 ## Copy text
 
+- On Files changed, `y` copies the selected file's path. In comment mode (`c`), `y` copies the line or the `V` range as a Markdown diff snippet with its path and line numbers. See [Keys](keys.md#copy-lines).
 - In a review or comment box, `ctrl+c` copies the selection, or all the text when nothing is selected. Inside tmux, add `set -g set-clipboard on` to `~/.tmux.conf`.
 - Anywhere else, hold your terminal's bypass modifier while you select with the mouse: Shift in most terminals, Option or Fn in some. revu captures the mouse, so a plain drag does not select.
 
