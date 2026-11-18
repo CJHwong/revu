@@ -431,6 +431,8 @@ pub struct DetailView {
     find_words_requested: bool,
     /// Select lines on Files changed: a line cursor over the file's plain diff.
     pub line_mode: Option<LineMode>,
+    /// The diff lines whose review threads t opened in select lines, by side and line.
+    pub open_threads: HashSet<(crate::model::Side, u64)>,
     /// Each parsed file's definitions, by commit and path; None for a language revu
     /// does not parse.
     pub outlines: HashMap<(String, String), Option<crate::syntax::Outline>>,
@@ -522,6 +524,7 @@ impl DetailView {
             outlines: HashMap::new(),
             hunk_firsts: HashMap::new(),
             structure_asked: HashSet::new(),
+            open_threads: HashSet::new(),
             def_walk: None,
             repo_labels: None,
         }
@@ -645,6 +648,7 @@ impl DetailView {
             return Err("comments go on the files in Files changed".to_string());
         };
         let job = diff_job(&self.pr, repo, detail, key);
+        self.open_threads.clear();
         self.line_mode = Some(LineMode {
             path,
             rows: None,
@@ -874,6 +878,40 @@ impl DetailView {
             return None;
         };
         Some(files.iter().map(|(_, count)| count).sum())
+    }
+
+    /// t in select lines: opens or closes the review threads on the cursor's line.
+    fn toggle_threads(&mut self) -> Result<(), String> {
+        let mode = self.line_mode.as_ref().ok_or("select lines first")?;
+        let Some(Ok(rows)) = &mode.rows else {
+            return Err("the diff is still loading".to_string());
+        };
+        let row = rows.get(mode.cursor).ok_or("no line here")?;
+        let target = row
+            .target()
+            .filter(|_| !self.threads_on_row(&mode.path, row).is_empty());
+        let Some(target) = target else {
+            return Err("no review threads on this line".to_string());
+        };
+        if !self.open_threads.remove(&target) {
+            self.open_threads.insert(target);
+        }
+        Ok(())
+    }
+
+    /// The review threads on a row of a file's diff.
+    pub fn threads_on_row<'a>(
+        &'a self,
+        path: &'a str,
+        row: &DiffRow,
+    ) -> Vec<&'a crate::model::ThreadLine> {
+        let Some(Ok(activity)) = &self.activity else {
+            return Vec::new();
+        };
+        activity
+            .threads_on(path)
+            .filter(|thread| thread.at.is_some_and(|at| row_holds(row, at)))
+            .collect()
     }
 
     /// The file's name at the base: its old name when the PR renamed it.
@@ -3348,6 +3386,10 @@ impl App {
                 let result = view.line_names_request().map(Some);
                 return self.report(result);
             }
+            KeyCode::Char('t') => {
+                let result = view.toggle_threads();
+                self.error = result.err();
+            }
             _ => {}
         }
         None
@@ -3996,6 +4038,16 @@ fn diff_job(pr: &PrRef, repo: &LocalRepo, detail: &PrDetail, key: DiffKey) -> Di
         head,
         paths,
     }
+}
+
+/// Whether a review thread on `at` belongs under this row. An unchanged line holds a
+/// thread on either side.
+pub fn row_holds(row: &DiffRow, at: (crate::model::Side, u64)) -> bool {
+    let left_of_context = row.kind == RowKind::Context
+        && row
+            .old
+            .is_some_and(|old| at == (crate::model::Side::Left, old));
+    row.target() == Some(at) || left_of_context
 }
 
 /// The file view's top line, so a few wrapped rows of context show above the line it
@@ -5429,6 +5481,42 @@ mod tests {
             app.error.as_deref(),
             Some("no names on this line to look up")
         );
+    }
+
+    #[test]
+    fn t_opens_and_closes_the_threads_on_the_cursors_line() {
+        let (mut app, pr) = files_tab(vec![file("b.md", ViewedState::Unviewed)]);
+        app.set_activity(&pr, Ok(crate::model::tests::sample_activity()));
+        view_mut(&mut app).line_mode = Some(LineMode {
+            path: "b.md".to_string(),
+            rows: Some(Ok(crate::line_diff::parse(
+                "@@ -10,3 +10,3 @@\n x\n y\n z\n",
+            ))),
+            cursor: 3,
+            anchor: None,
+            scroll: 0,
+        });
+        let right_12 = (crate::model::Side::Right, 12);
+        app.handle_key(key(KeyCode::Char('t')));
+        assert!(
+            view(&app).open_threads.contains(&right_12),
+            "line 12 holds a thread"
+        );
+        app.handle_key(key(KeyCode::Char('t')));
+        assert!(view(&app).open_threads.is_empty(), "t again closes it");
+        view_mut(&mut app).line_mode.as_mut().unwrap().cursor = 1;
+        app.handle_key(key(KeyCode::Char('t')));
+        assert_eq!(app.error.as_deref(), Some("no review threads on this line"));
+    }
+
+    #[test]
+    fn an_unchanged_line_holds_threads_on_either_side() {
+        let rows = crate::line_diff::parse("@@ -9,2 +12,2 @@\n same\n-gone\n+new\n");
+        let (same, gone, new) = (&rows[1], &rows[2], &rows[3]);
+        use crate::model::Side::{Left, Right};
+        assert!(row_holds(same, (Left, 9)) && row_holds(same, (Right, 12)));
+        assert!(row_holds(gone, (Left, 10)) && !row_holds(gone, (Right, 13)));
+        assert!(row_holds(new, (Right, 13)) && !row_holds(new, (Left, 10)));
     }
 
     #[test]

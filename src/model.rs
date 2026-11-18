@@ -229,6 +229,9 @@ pub struct ThreadLine {
     pub path: String,
     /// "line 548" or "lines 827-830".
     pub lines: String,
+    /// The diff line it is on now: its side and number. None when the thread is
+    /// outdated, as its line is no longer in the diff.
+    pub at: Option<(Side, u64)>,
     pub resolved: bool,
     /// The thread's own comments, oldest first.
     pub comments: Vec<ThreadComment>,
@@ -1510,6 +1513,11 @@ fn review_verb(state: &str) -> &'static str {
 
 /// A thread on an outdated diff has no current line, so it falls back to the original one.
 fn thread_line(thread: RawThread) -> ThreadLine {
+    let side = match thread.diff_side.as_deref() {
+        Some("LEFT") => Side::Left,
+        _ => Side::Right,
+    };
+    let at = thread.line.map(|line| (side, line));
     let end = thread.line.or(thread.original_line);
     let start = thread.start_line.or(thread.original_start_line);
     let lines = match (start, end) {
@@ -1531,6 +1539,7 @@ fn thread_line(thread: RawThread) -> ThreadLine {
         id: thread.id,
         path: thread.path,
         lines,
+        at,
         resolved: thread.is_resolved,
         comments: comments.collect(),
         code: Vec::new(),
@@ -1868,6 +1877,19 @@ pub mod tests {
                   ]} },
             ]},
         })
+    }
+
+    #[test]
+    fn a_thread_sits_on_its_current_line_or_on_none_when_outdated() {
+        let activity = sample_activity();
+        let at = |path: &str| {
+            activity
+                .threads_on(path)
+                .map(|thread| thread.at)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(at("a.md"), [None], "outdated: GitHub sends no line");
+        assert_eq!(at("b.md"), [Some((Side::Right, 12))]);
     }
 
     #[test]

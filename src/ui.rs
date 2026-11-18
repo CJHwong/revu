@@ -20,7 +20,7 @@ use crate::line_diff::{DiffRow, RowKind};
 use crate::model::{
     ChangedFile, CheckLine, CheckState, CheckSummary, CommitLine, Group, Label, Lifecycle,
     MergeMethod, MergeRequest, PrActivity, PrDetail, PrRef, PrSummary, RateLimit, ReviewState,
-    Reviewer, Side, SinceCounts, Verdict, ViewedState,
+    Reviewer, Side, SinceCounts, ThreadLine, Verdict, ViewedState,
 };
 use crate::theme::{ON_STATE, PrState, Theme};
 use crate::{markdown, overview};
@@ -498,6 +498,23 @@ fn detail_hints(view: &DetailView) -> Hints {
             ],
         };
     }
+    let threads = match (&view.line_mode, &view.activity) {
+        (Some(mode), Some(Ok(activity))) => activity.threads_on(&mode.path).next().is_some(),
+        _ => false,
+    };
+    if threads {
+        return &[
+            ("j/k", "line"),
+            ("V", "range"),
+            ("enter", "comment"),
+            ("t", "threads"),
+            ("y", "copy"),
+            ("D", "definition"),
+            ("o", "open"),
+            ("R", "review"),
+            ("esc", "back to the diff"),
+        ];
+    }
     if view.line_mode.is_some() {
         return &[
             ("j/k", "line"),
@@ -665,7 +682,7 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "S",
-                "select lines: j/k or the wheel pick a line, V a range; enter comments in your pending review, y copies them as a Markdown diff, D goes to the definition of a name on the line, o opens them on GitHub",
+                "select lines: j/k or the wheel pick a line, V a range; enter comments in your pending review, y copies them as a Markdown diff, D goes to the definition of a name on the line, t opens or closes the review threads under it, o opens them on GitHub",
             ),
         ],
     ),
@@ -1309,6 +1326,8 @@ fn render_gh_problem(
 /// the range V marked, and a dot on lines your pending review already comments on.
 fn render_line_mode(frame: &mut Frame, view: &mut DetailView, area: Rect, paint: Paint) {
     let theme = paint.theme;
+    let (top_threads, row_threads) =
+        line_mode_threads(view, usize::from(area.width.saturating_sub(1)), paint);
     let drafts: Vec<(Side, u64, u64)> = match (&view.activity, &view.line_mode) {
         (Some(Ok(activity)), Some(mode)) => activity
             .drafts
@@ -1365,11 +1384,18 @@ fn render_line_mode(frame: &mut Frame, view: &mut DetailView, area: Rect, paint:
     let height = usize::from(inner.height.max(1));
     let width = usize::from(inner.width);
     let wrap = view.diff_wrap;
+    // A row's height counts the review threads under it; the first row's, the outdated
+    // threads above it.
     let heights: Vec<usize> = rows
         .iter()
-        .map(|row| match wrap {
-            true => split_to_width(&row.text, width.saturating_sub(SELECT_GUTTER)).len(),
-            false => 1,
+        .enumerate()
+        .map(|(index, row)| {
+            let code = match wrap {
+                true => split_to_width(&row.text, width.saturating_sub(SELECT_GUTTER)).len(),
+                false => 1,
+            };
+            let above = if index == 0 { top_threads.len() } else { 0 };
+            code + above + row_threads.get(index).map_or(0, Vec::len)
         })
         .collect();
     mode.scroll = keep_in_view(&heights, mode.scroll, mode.cursor, height);
@@ -1391,17 +1417,181 @@ fn render_line_mode(frame: &mut Frame, view: &mut DetailView, area: Rect, paint:
                 (false, false) => Span::raw(" "),
             };
             let lines = select_row(row, mark, width, wrap, paint);
-            match (first..=last).contains(&index) {
+            let lines: Vec<Line> = match (first..=last).contains(&index) {
                 true => lines
                     .into_iter()
                     .map(|line| line.style(Style::new().bg(theme.selection)))
                     .collect(),
                 false => lines,
-            }
+            };
+            let above = if index == 0 {
+                top_threads.clone()
+            } else {
+                Vec::new()
+            };
+            let below = row_threads.get(index).cloned().unwrap_or_default();
+            above.into_iter().chain(lines).chain(below)
         })
         .take(height)
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The review threads in select lines: the outdated ones, listed above the first row,
+/// and each row's, drawn under it.
+fn line_mode_threads(
+    view: &DetailView,
+    width: usize,
+    paint: Paint,
+) -> (Vec<Line<'static>>, Vec<Vec<Line<'static>>>) {
+    let (Some(mode), Some(Ok(activity))) = (&view.line_mode, &view.activity) else {
+        return (Vec::new(), Vec::new());
+    };
+    let Some(Ok(rows)) = &mode.rows else {
+        return (Vec::new(), Vec::new());
+    };
+    let under: Vec<Vec<Line<'static>>> = rows
+        .iter()
+        .map(|row| {
+            let open = row
+                .target()
+                .is_some_and(|target| view.open_threads.contains(&target));
+            let threads = view.threads_on_row(&mode.path, row);
+            let lines = threads
+                .iter()
+                .flat_map(|thread| thread_lines(thread, open, None, width, paint));
+            lines.collect()
+        })
+        .collect();
+    let placed = |thread: &&ThreadLine| {
+        let at = thread.at;
+        at.is_some_and(|at| rows.iter().any(|row| crate::app::row_holds(row, at)))
+    };
+    let outdated: Vec<&ThreadLine> = activity
+        .threads_on(&mode.path)
+        .filter(|thread| !placed(thread))
+        .collect();
+    let mut top = Vec::new();
+    if !outdated.is_empty() {
+        let note = " outdated review threads, no longer on a line of this diff:";
+        top.push(Line::from(paint.span(note, paint.theme.muted)));
+        for thread in outdated {
+            top.extend(thread_lines(
+                thread,
+                false,
+                Some(&thread.lines),
+                width,
+                paint,
+            ));
+        }
+    }
+    (top, under)
+}
+
+/// A review thread under its line: folded to its first comment, or open with every
+/// comment. `place` names the line of a thread that is not drawn under one.
+fn thread_lines(
+    thread: &ThreadLine,
+    open: bool,
+    place: Option<&str>,
+    width: usize,
+    paint: Paint,
+) -> Vec<Line<'static>> {
+    let theme = paint.theme;
+    let Some(first) = thread.comments.first() else {
+        return Vec::new();
+    };
+    let color = if thread.resolved {
+        theme.muted
+    } else {
+        theme.accent
+    };
+    let text = if thread.resolved {
+        theme.muted
+    } else {
+        theme.foreground
+    };
+    let indent = || Span::raw(" ".repeat(SELECT_GUTTER));
+    let resolved = if thread.resolved {
+        "  ✓ resolved"
+    } else {
+        ""
+    };
+    if !open {
+        let more = match thread.comments.len() {
+            1 => String::new(),
+            count => format!("  ({} more)", count - 1),
+        };
+        let place = place.map(|place| format!("{place}, ")).unwrap_or_default();
+        let gist = first_rendered_line(&first.body, width, theme);
+        let used = SELECT_GUTTER
+            + 2
+            + display_width(&place)
+            + display_width(&first.author.login)
+            + 2
+            + display_width(&more)
+            + display_width(resolved);
+        let gist = markdown::truncate(&gist, width.saturating_sub(used));
+        return vec![Line::from(vec![
+            indent(),
+            paint.span("╭ ", color),
+            paint.span(place, theme.muted),
+            paint.bold(first.author.login.clone(), color),
+            paint.span(format!(": {gist}"), text),
+            paint.span(format!("{more}{resolved}"), theme.muted),
+        ])];
+    }
+    let body_width = width.saturating_sub(SELECT_GUTTER + 2);
+    let toggled = std::collections::HashSet::new();
+    let mut lines = Vec::new();
+    for (index, comment) in thread.comments.iter().enumerate() {
+        let corner = if index == 0 { "╭ " } else { "├ " };
+        lines.push(Line::from(vec![
+            indent(),
+            paint.span(corner, color),
+            paint.bold(comment.author.login.clone(), color),
+            paint.span(
+                format!("  {}", relative_time(comment.at, paint.now)),
+                theme.muted,
+            ),
+        ]));
+        let mut folds = markdown::Folds::new(&toggled);
+        let body = markdown::layout(
+            &markdown::parse(&comment.body, theme),
+            body_width,
+            &mut folds,
+            theme,
+        );
+        for row in body {
+            let mut spans = vec![indent(), paint.span("│ ", color)];
+            spans.extend(row.line.spans);
+            lines.push(Line::from(spans));
+        }
+    }
+    lines.push(Line::from(vec![
+        indent(),
+        paint.span("╰", color),
+        paint.span(resolved, theme.muted),
+    ]));
+    lines
+}
+
+/// A comment's first line as the Overview shows it, without its Markdown marks.
+fn first_rendered_line(body: &str, width: usize, theme: &Theme) -> String {
+    let toggled = std::collections::HashSet::new();
+    let mut folds = markdown::Folds::new(&toggled);
+    let rows = markdown::layout(&markdown::parse(body, theme), width, &mut folds, theme);
+    rows.iter()
+        .map(|row| {
+            row.line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .map(|text| text.trim().to_string())
+        .find(|text| !text.is_empty())
+        .unwrap_or_default()
 }
 
 /// The columns before a row's code: the mark, both line numbers, and the +/- sign.
@@ -3508,6 +3698,53 @@ mod tests {
             second.as_deref(),
             Some(" /needle   in App > run_loop "),
             "the find and the block move under it"
+        );
+    }
+
+    #[test]
+    fn a_thread_folds_to_its_first_comment_and_opens_to_all() {
+        let theme = theme::by_name("dracula").unwrap();
+        let paint = Paint {
+            theme: &theme,
+            now: Utc::now(),
+        };
+        let activity = crate::model::tests::sample_activity();
+        let thread = activity.threads_on("b.md").next().unwrap();
+        let text = |lines: Vec<Line>| -> Vec<String> {
+            lines
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect()
+                })
+                .collect()
+        };
+        let folded = text(thread_lines(thread, false, None, 80, paint));
+        assert_eq!(folded.len(), 1);
+        assert!(
+            folded[0].ends_with("╭ lead: Why here?  (1 more)"),
+            "{folded:?}"
+        );
+        let open = text(thread_lines(thread, true, None, 80, paint));
+        let shown: Vec<&str> = open.iter().map(|line| line.trim_start()).collect();
+        assert!(shown[0].starts_with("╭ lead  "), "{shown:?}");
+        assert_eq!(shown[1], "│ Why here?", "the body is rendered Markdown");
+        assert!(shown[2].starts_with("├ octo  "), "{shown:?}");
+        assert_eq!(shown[3], "│ Because.");
+        assert_eq!(shown[4], "╰");
+        let outdated = activity.threads_on("a.md").next().unwrap();
+        let place = text(thread_lines(
+            outdated,
+            false,
+            Some("lines 827-830"),
+            80,
+            paint,
+        ));
+        assert!(
+            place[0].contains("╭ lines 827-830, lead: Rename this.  ✓ resolved"),
+            "{place:?}"
         );
     }
 
