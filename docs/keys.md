@@ -61,7 +61,7 @@ A file with review threads shows their count, such as `●3`, and the diff pane'
 | `v` | Toggle Viewed. It syncs to GitHub's Viewed checkbox at once. On a folder, it marks every file under it viewed, or unmarks them all when every one is viewed already. |
 | `V` | Hide viewed files |
 | `]` / `[` | Next or previous unviewed file |
-| `S` | Select lines in the selected file: its plain diff with line numbers. `j`/`k` or the wheel move, `V` marks a range (on one side only, as GitHub requires), `Enter` writes a comment, `y` copies the line or range, `o` opens it on GitHub, `S` or `esc` goes back. The comment joins your pending review on GitHub, which only you see until `R` submits it; a dot marks lines it already covers. |
+| `S` | Select lines in the selected file: its plain diff with line numbers. `j`/`k` or the wheel move, `V` marks a range (on one side only, as GitHub requires), `Enter` writes a comment, `y` copies the line or range, `o` opens it on GitHub, `w` wraps long lines or cuts them, as in the diff, `S` or `esc` goes back. The comment joins your pending review on GitHub, which only you see until `R` submits it; a dot marks lines it already covers. |
 
 ## Files changed and Commits
 

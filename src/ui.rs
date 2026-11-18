@@ -15,7 +15,7 @@ use crate::app::{
 use crate::editor::Editor;
 use crate::file_tree::FileRow;
 use crate::github::GhProblem;
-use crate::line_diff::RowKind;
+use crate::line_diff::{DiffRow, RowKind};
 use crate::model::{
     ChangedFile, CheckLine, CheckState, CheckSummary, CommitLine, Group, Label, Lifecycle,
     PrActivity, PrDetail, PrRef, PrSummary, RateLimit, ReviewState, Reviewer, Side, SinceCounts,
@@ -489,6 +489,7 @@ fn detail_hints(view: &DetailView) -> Hints {
             ("y", "copy"),
             ("o", "browser"),
             ("R", "review"),
+            ("w", "wrap"),
             ("esc", "back to the diff"),
         ];
     }
@@ -1343,18 +1344,23 @@ fn render_line_mode(frame: &mut Frame, view: &mut DetailView, area: Rect, paint:
         Some(Ok(rows)) => rows,
     };
     let height = usize::from(inner.height.max(1));
-    mode.scroll = mode
-        .scroll
-        .min(mode.cursor)
-        .max((mode.cursor + 1).saturating_sub(height));
+    let width = usize::from(inner.width);
+    let wrap = view.diff_wrap;
+    let heights: Vec<usize> = rows
+        .iter()
+        .map(|row| match wrap {
+            true => split_to_width(&row.text, width.saturating_sub(SELECT_GUTTER)).len(),
+            false => 1,
+        })
+        .collect();
+    mode.scroll = keep_in_view(&heights, mode.scroll, mode.cursor, height);
     let (first, last) = mode.marked();
-    let number = |line: Option<u64>| line.map_or("     ".to_string(), |line| format!("{line:>5}"));
     let lines: Vec<Line> = rows
         .iter()
         .enumerate()
         .skip(mode.scroll)
         .take(height)
-        .map(|(index, row)| {
+        .flat_map(|(index, row)| {
             let commented = row.target().is_some_and(|(side, line)| {
                 drafts.iter().any(|&(draft_side, start, end)| {
                     draft_side == side && (start..=end).contains(&line)
@@ -1365,27 +1371,93 @@ fn render_line_mode(frame: &mut Frame, view: &mut DetailView, area: Rect, paint:
                 (false, true) => paint.span("●", theme.accent),
                 (false, false) => Span::raw(" "),
             };
-            let (sign, color) = match row.kind {
-                RowKind::Added => ("+", theme.success),
-                RowKind::Removed => ("-", theme.danger),
-                RowKind::Context => (" ", theme.foreground),
-                RowKind::Hunk | RowKind::Note => ("", theme.heading),
-            };
-            let line = Line::from(vec![
-                mark,
-                paint.span(
-                    format!("{} {} ", number(row.old), number(row.new)),
-                    theme.muted,
-                ),
-                paint.span(format!("{sign}{}", row.text), color),
-            ]);
+            let lines = select_row(row, mark, width, wrap, paint);
             match (first..=last).contains(&index) {
-                true => line.style(Style::new().bg(theme.selection)),
-                false => line,
+                true => lines
+                    .into_iter()
+                    .map(|line| line.style(Style::new().bg(theme.selection)))
+                    .collect(),
+                false => lines,
             }
         })
+        .take(height)
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The columns before a row's code: the mark, both line numbers, and the +/- sign.
+const SELECT_GUTTER: usize = 14;
+
+/// One diff row in select lines. Wrapped, the rest of the code goes on rows indented
+/// under it; unwrapped, the pane clips it.
+fn select_row(
+    row: &DiffRow,
+    mark: Span<'static>,
+    width: usize,
+    wrap: bool,
+    paint: Paint,
+) -> Vec<Line<'static>> {
+    let theme = paint.theme;
+    let number = |line: Option<u64>| line.map_or("     ".to_string(), |line| format!("{line:>5}"));
+    let (sign, color) = match row.kind {
+        RowKind::Added => ("+", theme.success),
+        RowKind::Removed => ("-", theme.danger),
+        RowKind::Context => (" ", theme.foreground),
+        RowKind::Hunk | RowKind::Note => ("", theme.heading),
+    };
+    let pieces = match wrap {
+        true => split_to_width(&row.text, width.saturating_sub(SELECT_GUTTER)),
+        false => vec![row.text.clone()],
+    };
+    let mut pieces = pieces.into_iter();
+    let first = Line::from(vec![
+        mark,
+        paint.span(
+            format!("{} {} ", number(row.old), number(row.new)),
+            theme.muted,
+        ),
+        paint.span(
+            format!("{sign}{}", pieces.next().unwrap_or_default()),
+            color,
+        ),
+    ]);
+    let indent = " ".repeat(SELECT_GUTTER);
+    let rest = pieces.map(|piece| Line::from(paint.span(format!("{indent}{piece}"), color)));
+    std::iter::once(first).chain(rest).collect()
+}
+
+/// Cuts code into pieces no wider than `width`, after the last space that fits, or at
+/// the width when there is none. Every space stays: one at a break hangs past the edge,
+/// where the pane clips it. A wide character that would cross the edge starts the next
+/// piece.
+fn split_to_width(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut pieces = Vec::new();
+    let mut current = String::new();
+    for character in text.chars() {
+        let overflows = display_width(&current) + character.width().unwrap_or(0) > width;
+        if overflows && character != ' ' && !current.is_empty() {
+            let indent = current.len() - current.trim_start().len();
+            let rest = match current[indent..].rfind(' ') {
+                Some(at) => current.split_off(indent + at + 1),
+                None => String::new(),
+            };
+            pieces.push(std::mem::replace(&mut current, rest));
+        }
+        current.push(character);
+    }
+    pieces.push(current);
+    pieces
+}
+
+/// The first row to draw, so that every screen row of the cursor's line shows.
+/// `heights` holds each row's screen rows.
+fn keep_in_view(heights: &[usize], scroll: usize, cursor: usize, height: usize) -> usize {
+    let mut scroll = scroll.min(cursor);
+    while scroll < cursor && heights[scroll..=cursor].iter().sum::<usize>() > height {
+        scroll += 1;
+    }
+    scroll
 }
 
 /// " /query  2 of 5 lines ", at the right of the diff pane's title, so the find text and
@@ -2637,6 +2709,58 @@ mod tests {
                 .collect()
         };
         lines.iter().map(text).collect()
+    }
+
+    #[test]
+    fn code_splits_at_the_width_and_keeps_its_spaces() {
+        assert_eq!(split_to_width("  abcdef", 3), ["  a", "bcd", "ef"]);
+        assert_eq!(split_to_width("", 3), [""]);
+        assert_eq!(
+            split_to_width("日本語", 4),
+            ["日本", "語"],
+            "a wide character is not cut"
+        );
+        assert_eq!(
+            split_to_width("aa bb cc", 5),
+            ["aa bb ", "cc"],
+            "breaks after a space"
+        );
+        assert_eq!(split_to_width("aaa bbbbbbb", 5), ["aaa ", "bbbbb", "bb"]);
+        assert_eq!(
+            split_to_width("    abcdefg", 6),
+            ["    ab", "cdefg"],
+            "not inside the indent"
+        );
+    }
+
+    #[test]
+    fn the_view_keeps_every_row_of_the_cursor_line() {
+        assert_eq!(keep_in_view(&[1, 3, 1, 1], 0, 1, 3), 1);
+        assert_eq!(keep_in_view(&[1, 3, 1, 1], 0, 3, 3), 2);
+        assert_eq!(
+            keep_in_view(&[1, 1, 1], 2, 0, 3),
+            0,
+            "the cursor above the view"
+        );
+        assert_eq!(
+            keep_in_view(&[5], 0, 0, 3),
+            0,
+            "a line taller than the pane"
+        );
+    }
+
+    #[test]
+    fn a_long_row_wraps_under_its_code_or_is_cut() {
+        let theme = theme::by_name("dracula").unwrap();
+        let paint = Paint {
+            theme: &theme,
+            now: Utc::now(),
+        };
+        let row = crate::line_diff::parse("@@ -1 +1 @@\n+abcdefghij\n").remove(1);
+        let wrapped = texts(&select_row(&row, Span::raw(" "), 20, true, paint));
+        assert_eq!(wrapped, ["           1 +abcdef", "              ghij"]);
+        let cut = texts(&select_row(&row, Span::raw(" "), 20, false, paint));
+        assert_eq!(cut, ["           1 +abcdefghij"], "the pane clips it");
     }
 
     #[test]

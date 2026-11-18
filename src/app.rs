@@ -2590,6 +2590,10 @@ impl App {
                 }
             }
             KeyCode::Esc | KeyCode::Char('S') | KeyCode::Char('q') => view.line_mode = None,
+            KeyCode::Char('w') => {
+                view.diff_wrap = !view.diff_wrap;
+                view.diff_shift = 0;
+            }
             KeyCode::Char('o') => return Some(Action::OpenBrowser(view.link())),
             KeyCode::Char('y') => {
                 let Some(Ok(rows)) = &mode.rows else {
