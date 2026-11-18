@@ -511,7 +511,21 @@ fn perform(
                 let result = repo::highlight_file(&dir, &commit, &path, line, bat_theme)
                     .map_err(|error| format!("{error:#}"))
                     .and_then(|bytes| highlight::to_text(&bytes, None));
-                let _ = sender.send(Message::File { pr, path, result });
+                let _ = sender.send(Message::File {
+                    pr: pr.clone(),
+                    path: path.clone(),
+                    result,
+                });
+                // The title names the block around the line once the file is parsed.
+                let outline = repo::show_file(&dir, &commit, &path)
+                    .ok()
+                    .and_then(|text| syntax::outline(&path, text.as_bytes()));
+                let _ = sender.send(Message::Outline {
+                    pr,
+                    commit,
+                    path,
+                    outline,
+                });
             });
         }
         Action::ShowWholeDiff(job) => {

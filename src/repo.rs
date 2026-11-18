@@ -577,13 +577,28 @@ pub fn diff_words(dir: &Path, base: &str, head: &str) -> Result<Vec<String>> {
     Ok(words)
 }
 
+/// Every word find can land on in the diff: the changed lines' words first, then the
+/// context lines', each group most used first.
 fn changed_words(diff: &str) -> Vec<String> {
+    let header = |line: &&str| line.starts_with("+++") || line.starts_with("---");
+    let changed = diff
+        .lines()
+        .filter(|line| !header(line) && (line.starts_with('+') || line.starts_with('-')));
+    let context = diff.lines().filter(|line| line.starts_with(' '));
+    let mut words = most_used_words(changed);
+    for word in most_used_words(context) {
+        if !words.contains(&word) {
+            words.push(word);
+        }
+    }
+    words
+}
+
+/// The words of 4 or more characters in lines that start with a diff mark, most used
+/// first.
+fn most_used_words<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<String> {
     let mut counts: HashMap<&str, usize> = HashMap::new();
-    let changed = diff.lines().filter(|line| {
-        let header = line.starts_with("+++") || line.starts_with("---");
-        !header && (line.starts_with('+') || line.starts_with('-'))
-    });
-    for line in changed {
+    for line in lines {
         let words =
             line[1..].split(|character: char| !(character.is_alphanumeric() || character == '_'));
         for word in words.filter(|word| word.chars().count() >= 4) {
@@ -714,10 +729,13 @@ mod tests {
     }
 
     #[test]
-    fn changed_words_come_from_changed_lines_most_used_first() {
+    fn changed_words_come_first_then_the_context_most_used_first() {
         let diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@ header_word\n\
-                    +invoice = make_invoice(invoice)\n-old_name\n unchanged_context\n";
-        assert_eq!(changed_words(diff), ["invoice", "make_invoice", "old_name"]);
+                    +invoice = make_invoice(invoice)\n-old_name\n unchanged_context invoice\n";
+        assert_eq!(
+            changed_words(diff),
+            ["invoice", "make_invoice", "old_name", "unchanged_context"]
+        );
     }
 
     #[test]

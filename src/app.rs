@@ -853,6 +853,29 @@ impl DetailView {
         self.show_definition(at).map(Some)
     }
 
+    /// The block around the line the file view opened at, "Haystack > path".
+    pub fn file_view_place(&self) -> Option<String> {
+        let Some(Overlay::File {
+            path,
+            line: Some(line),
+            ..
+        }) = self.overlays.last()
+        else {
+            return None;
+        };
+        let head = &self.loaded()?.head_oid;
+        let outline = self.outlines.get(&(head.clone(), path.clone()))?.as_ref()?;
+        outline.place(*line)
+    }
+
+    /// How many lines of the changed files hold the find text; None while git looks.
+    pub fn diff_match_count(&self) -> Option<usize> {
+        let Some(Ok(files)) = &self.find_files else {
+            return None;
+        };
+        Some(files.iter().map(|(_, count)| count).sum())
+    }
+
     /// The file's name at the base: its old name when the PR renamed it.
     fn base_path(&self, path: &str) -> String {
         match &self.repo {
@@ -4925,6 +4948,36 @@ mod tests {
             panic!("expected the editor");
         };
         assert_eq!((target.line, target.changes), (Some(2), None));
+    }
+
+    #[test]
+    fn a_repo_match_knows_its_block_and_the_diffs_match_count() {
+        let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        clone_with(&mut app, &pr, &["a.md", "b.py"]);
+        app.handle_key(key(KeyCode::Char('/')));
+        type_text(&mut app, "needle");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(view(&app).diff_match_count(), None, "git still looks");
+        app.set_find_files(&pr, "needle", Ok(vec![("a.md".to_string(), 5)]));
+        assert_eq!(view(&app).diff_match_count(), Some(5));
+        let hit = GrepHit {
+            path: "b.py".to_string(),
+            line: 3,
+            text: "needle".to_string(),
+        };
+        app.set_find_repo(&pr, "needle", Ok(vec![hit]));
+        for _ in 0..6 {
+            if view(&app).repo_hit.is_some() {
+                break;
+            }
+            app.handle_key(key(KeyCode::Char('n')));
+        }
+        assert_eq!(view(&app).repo_hit, Some(0));
+        assert_eq!(view(&app).file_view_place(), None, "not parsed yet");
+        let code = "class A:\n    def f(self):\n        needle()\n";
+        let outline = crate::syntax::outline("b.py", code.as_bytes());
+        app.set_outline(&pr, "head999".to_string(), "b.py".to_string(), outline);
+        assert_eq!(view(&app).file_view_place().as_deref(), Some("A > f"));
     }
 
     #[test]

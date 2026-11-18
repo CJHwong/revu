@@ -809,8 +809,9 @@ fn render_detail(
     view.body_width = body.width;
     view.clicks.extend(tab_targets(detail, tabs, paint));
     let place = repo_place(view, paint);
+    let finding = repo_finding(view);
     if let Some(overlay) = view.overlays.last_mut() {
-        let targets = render_overlay(frame, overlay, body, place, paint);
+        let targets = render_overlay(frame, overlay, body, place, finding.as_ref(), paint);
         view.clicks.extend(targets);
         return;
     }
@@ -875,6 +876,7 @@ fn render_overlay(
     overlay: &mut Overlay,
     area: Rect,
     place: Option<Line<'static>>,
+    finding: Option<&RepoFinding>,
     paint: Paint,
 ) -> Vec<ClickTarget> {
     let theme = paint.theme;
@@ -883,14 +885,15 @@ fn render_overlay(
             path,
             lines,
             scroll,
-            ..
+            line,
         } => {
             // The path gives way first, from its start, so the match count stays whole.
+            let at_line = line.map(|line| format!(":{line}")).unwrap_or_default();
             let place_width = place.as_ref().map_or(0, Line::width);
-            let room = usize::from(area.width).saturating_sub(place_width + 17);
+            let room = usize::from(area.width).saturating_sub(place_width + 17 + at_line.len());
             let shown = truncate_start(path, room);
-            let mut block =
-                Block::new().title(paint.bold(format!(" {shown} at the PR head "), theme.heading));
+            let mut block = Block::new()
+                .title(paint.bold(format!(" {shown}{at_line} at the PR head "), theme.heading));
             if let Some(place) = place {
                 block = block.title(place);
             }
@@ -903,9 +906,13 @@ fn render_overlay(
                 Some(Ok(text)) => Text::from(
                     text.lines
                         .iter()
+                        .enumerate()
                         .skip(*scroll as usize)
                         .take(inner.height as usize)
-                        .cloned()
+                        .map(|(index, line)| match finding {
+                            Some(finding) => finding.mark(index, line, paint),
+                            None => line.clone(),
+                        })
                         .collect::<Vec<_>>(),
                 ),
             };
@@ -1480,18 +1487,60 @@ fn repo_place(view: &DetailView, paint: Paint) -> Option<Line<'static>> {
     else {
         return None;
     };
+    let in_diff = view
+        .diff_match_count()
+        .map(|count| format!(", {count} in the diff"))
+        .unwrap_or_default();
     let place = format!(
-        " repo match {} of {} ",
+        " repo match {} of {}{in_diff}  n/N next/previous ",
         hit + 1,
         repo_count(view, hits.len())
     );
+    let block = view
+        .file_view_place()
+        .map(|block| format!("  in {block} "))
+        .unwrap_or_default();
     Some(
         Line::from(vec![
             paint.bold(format!(" /{query} "), paint.theme.warning),
             paint.span(place, paint.theme.muted),
+            paint.span(block, paint.theme.heading),
         ])
         .right_aligned(),
     )
+}
+
+/// The find a repo match's file view marks, and the index of the match's line.
+struct RepoFinding {
+    pattern: crate::find::Pattern,
+    current: Option<usize>,
+}
+
+impl RepoFinding {
+    /// Marks the find text as the diff pane does; the match's own line gets the
+    /// stronger mark.
+    fn mark(&self, index: usize, line: &Line<'static>, paint: Paint) -> Line<'static> {
+        if !self.pattern.matches_drawn(line) {
+            return line.clone();
+        }
+        let theme = paint.theme;
+        let mark = match Some(index) == self.current {
+            true => Style::new().fg(theme.background).bg(theme.warning),
+            false => Style::new().fg(theme.warning).bg(theme.selection),
+        };
+        mark_matches(line.clone(), &self.pattern.text, mark)
+    }
+}
+
+fn repo_finding(view: &DetailView) -> Option<RepoFinding> {
+    let (Some(query), Some(hit), Some(Ok(hits))) = (&view.find, view.repo_hit, &view.find_repo)
+    else {
+        return None;
+    };
+    Some(RepoFinding {
+        pattern: crate::find::Pattern::parse(query),
+        current: hits.get(hit).map(|hit| hit.line.saturating_sub(1)),
+    })
 }
 
 /// "155", or "980+" when git stopped at its limit.
@@ -3060,6 +3109,33 @@ mod tests {
             0,
             "a line taller than the pane"
         );
+    }
+
+    #[test]
+    fn a_repo_match_marks_the_text_and_its_own_line_strongest() {
+        let theme = theme::by_name("dracula").unwrap();
+        let paint = Paint {
+            theme: &theme,
+            now: Utc::now(),
+        };
+        let finding = RepoFinding {
+            pattern: crate::find::Pattern::parse("needle"),
+            current: Some(1),
+        };
+        let line = Line::from(" 2 a Needle here");
+        let marked_style = |index| {
+            let marked = finding.mark(index, &line, paint);
+            let span = marked.spans.iter().find(|span| span.content == "Needle");
+            span.map(|span| span.style.bg)
+        };
+        assert_eq!(
+            marked_style(1),
+            Some(Some(theme.warning)),
+            "the match's line"
+        );
+        assert_eq!(marked_style(5), Some(Some(theme.selection)), "another line");
+        let plain = finding.mark(0, &Line::from(" 1 nothing"), paint);
+        assert_eq!(plain, Line::from(" 1 nothing"));
     }
 
     #[test]

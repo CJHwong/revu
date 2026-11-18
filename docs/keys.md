@@ -100,10 +100,10 @@ src/app.rs:40-42
 `/` finds text in the diff, ignoring case.
 
 - `^` at the start ties the text to where the code starts, after line numbers, the +/- mark and indentation, so `^def ` finds definitions. `$` at the end ties it to where the code ends. In difftastic, each column counts on its own. `\^` and `\$` find the characters themselves.
-- While you type, the prompt offers the most used word of the PR's changed lines that starts with your text, or a changed file's path, name or folder. `Tab` takes it.
+- While you type, the prompt offers a word of 4 or more characters from the diff that starts with your text, or a changed file's path, name or folder. Words from the changed lines come before words from the context lines, the most used first. `Tab` takes it.
 - Every match is marked, the current one stronger, and the pane title shows `/text  match 2 of 3 in file 5 of 63`.
 - On Files changed, `n` past a file's last match goes on to the next file that holds the text, opening its folder. On Commits, it searches the commit on screen.
-- On Files changed, `n` past the last file's last match goes on to the matches in every other file in the repo at the PR head. Each opens at its match, with syntax colors from `bat` when it is installed, and the title shows `repo match 3 of 155`. Past the last one, `n` comes back to the diff; `esc` goes back at once. The footer counts them: `match 1 of 2 in file 1 of 3, 155 in the repo`. git stops at 1000 matches, shown as `1000+`. Binary, untracked and ignored files are not searched.
+- On Files changed, `n` past the last file's last match goes on to the matches in every other file in the repo at the PR head. Each opens at its line with the text marked, with syntax colors from `bat` when it is installed. The title shows the line and the block around it: `src/app.rs:110 ... repo match 3 of 155, 5 in the diff  n/N next/previous   in impl App > run`. Past the last one, `n` comes back to the diff; `esc` goes back at once. The footer counts them: `match 1 of 2 in file 1 of 3, 155 in the repo`. git stops at 1000 matches, shown as `1000+`. Binary, untracked and ignored files are not searched.
 
 ## Text boxes
 
