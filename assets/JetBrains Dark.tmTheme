@@ -159,7 +159,7 @@
 			<key>name</key>
 			<string>Macro, decorator</string>
 			<key>scope</key>
-			<string>entity.name.function.macro, support.function.macro, entity.name.function.decorator, meta.annotation, punctuation.definition.annotation</string>
+			<string>entity.name.function.macro, support.function.macro, entity.name.function.decorator, punctuation.definition.annotation, variable.annotation, meta.annotation meta.generic-name</string>
 			<key>settings</key>
 			<dict>
 				<key>foreground</key>
@@ -278,6 +278,17 @@
 			<dict>
 				<key>foreground</key>
 				<string>#d64d5b</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>name</key>
+			<string>Interpolation</string>
+			<key>scope</key>
+			<string>punctuation.section.interpolation, string meta.generic-name, meta.interpolation</string>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#bcbec4</string>
 			</dict>
 		</dict>
 	</array>
