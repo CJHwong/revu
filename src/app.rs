@@ -35,6 +35,22 @@ pub enum Action {
     OpenBrowser(String),
     /// Suspend the app and run the editor on a file in the clone.
     OpenEditor(EditorTarget),
+    /// The names a line of a file uses, for D to offer.
+    LineNames {
+        pr: PrRef,
+        dir: PathBuf,
+        commit: String,
+        path: String,
+        line: usize,
+    },
+    /// Where a name is defined at the PR head, the changed files first.
+    FindDefinition {
+        pr: PrRef,
+        dir: PathBuf,
+        head: String,
+        name: String,
+        changed: Vec<String>,
+    },
     RunDiff(PrRef),
     /// The words of the PR's changed lines, for the find prompt to complete.
     FindWords {
@@ -248,6 +264,16 @@ pub enum Overlay {
     },
 }
 
+/// The definitions D found for a name, and the one the file view shows.
+#[derive(Debug, Clone)]
+pub struct DefWalk {
+    pub name: String,
+    pub hits: Vec<GrepHit>,
+    pub at: usize,
+    /// git found the name in more files than revu reads.
+    pub capped: bool,
+}
+
 /// Where o opens the file in view: its page on GitHub, or the clone's copy in the editor.
 #[derive(Debug)]
 pub struct OpenMenu {
@@ -412,6 +438,8 @@ pub struct DetailView {
     pub hunk_firsts: HashMap<String, Vec<crate::line_diff::LineAt>>,
     /// The files whose structure was asked for, so each is read once.
     structure_asked: HashSet<String>,
+    /// D's definitions, walked with n and N in the file view.
+    pub def_walk: Option<DefWalk>,
     /// The repo's labels, loaded the first time the label menu opens on this PR.
     pub repo_labels: Option<Vec<RepoLabel>>,
     /// n or N moved to another file; the find runs there once its diff is drawn. True
@@ -494,6 +522,7 @@ impl DetailView {
             outlines: HashMap::new(),
             hunk_firsts: HashMap::new(),
             structure_asked: HashSet::new(),
+            def_walk: None,
             repo_labels: None,
         }
     }
@@ -736,6 +765,74 @@ impl DetailView {
         outline.place(usize::try_from(line).ok()?)
     }
 
+    /// D: asks for the names on select lines' cursor line, in the version of the file
+    /// that line belongs to.
+    fn line_names_request(&self) -> Result<Action, String> {
+        let RepoState::Ready(repo) = &self.repo else {
+            return Err(self.clone_not_ready("the local clone is not ready yet"));
+        };
+        let mode = self.line_mode.as_ref().ok_or("select lines first")?;
+        let Some(Ok(rows)) = &mode.rows else {
+            return Err("the diff is still loading".to_string());
+        };
+        let row = rows.get(mode.cursor).ok_or("no line here")?;
+        let detail = self.loaded().ok_or("the pull request is still loading")?;
+        let (commit, path, line) = match (row.new, row.old) {
+            (Some(line), _) => (&detail.head_oid, mode.path.clone(), line),
+            (None, Some(line)) => (&detail.base_oid, self.base_path(&mode.path), line),
+            (None, None) => return Err("move to a line of code".to_string()),
+        };
+        Ok(Action::LineNames {
+            pr: self.pr.clone(),
+            dir: repo.dir.clone(),
+            commit: commit.clone(),
+            path,
+            line: usize::try_from(line).unwrap_or(usize::MAX),
+        })
+    }
+
+    /// Looks for where `name` is defined at the PR head.
+    fn find_definition(&mut self, name: &str) -> Result<Option<Action>, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("type a name to look up".to_string());
+        }
+        let (dir, head) = self.head_in_clone()?;
+        let changed = self
+            .loaded_files()
+            .map(|files| files.iter().map(|file| file.path.clone()).collect())
+            .unwrap_or_default();
+        Ok(Some(Action::FindDefinition {
+            pr: self.pr.clone(),
+            dir,
+            head,
+            name: name.to_string(),
+            changed,
+        }))
+    }
+
+    /// Opens a definition in the file view, in place of the one shown.
+    fn show_definition(&mut self, at: usize) -> Result<Action, String> {
+        let walk = self.def_walk.as_mut().ok_or("no definitions to show")?;
+        let hit = walk.hits.get(at).ok_or("no such definition")?.clone();
+        walk.at = at;
+        if matches!(self.overlays.last(), Some(Overlay::File { .. })) {
+            self.overlays.pop();
+        }
+        self.open_file(hit.path, hit.line)
+    }
+
+    /// n and N in a definition's file view; past either end they wrap around.
+    fn next_definition(&mut self, forward: bool) -> Result<Option<Action>, String> {
+        let walk = self.def_walk.as_ref().ok_or("no definitions to walk")?;
+        let count = walk.hits.len();
+        let at = match forward {
+            true => (walk.at + 1) % count,
+            false => (walk.at + count - 1) % count,
+        };
+        self.show_definition(at).map(Some)
+    }
+
     /// The file's name at the base: its old name when the PR renamed it.
     fn base_path(&self, path: &str) -> String {
         match &self.repo {
@@ -808,6 +905,13 @@ impl DetailView {
             (_, KeyCode::Esc | KeyCode::Char('q' | 'h') | KeyCode::Left) => {
                 self.overlays.pop();
                 self.repo_hit = None;
+                self.def_walk = None;
+            }
+            (Overlay::File { .. }, KeyCode::Char('n')) if self.def_walk.is_some() => {
+                return self.next_definition(true);
+            }
+            (Overlay::File { .. }, KeyCode::Char('N')) if self.def_walk.is_some() => {
+                return self.next_definition(false);
             }
             // n and N go on through the repo's matches while one is on screen.
             (Overlay::File { .. }, KeyCode::Char('n')) if self.repo_hit.is_some() => {
@@ -1622,6 +1726,10 @@ pub enum Screen {
 pub enum PromptKind {
     #[default]
     OpenLink,
+    /// D in select lines: the name to look up, with the line's names to pick from.
+    Definition {
+        names: Vec<String>,
+    },
     Workspace,
     FindInDiff,
     UpdatedWithin,
@@ -2210,6 +2318,8 @@ pub struct App {
     pub merge_menu: Option<MergeMenu>,
     /// o's choice of GitHub or the editor, while it is open.
     pub open_menu: Option<OpenMenu>,
+    /// An action a reply from a worker started, for the main loop to run.
+    pub queued: Option<Action>,
     /// The number of the latest detail load, across every PR opened.
     next_load: u64,
     /// The clone lookup's answer, for the main loop to act on.
@@ -2275,6 +2385,7 @@ impl App {
             label_menu: None,
             merge_menu: None,
             open_menu: None,
+            queued: None,
             next_load: 0,
             clone_lookup: None,
             missing_renderers: HashSet::new(),
@@ -3042,6 +3153,9 @@ impl App {
             PromptKind::Workspace => Some(Action::SetWorkspace(prompt.text.trim().to_string())),
             PromptKind::ConfirmClone { pr, dir } => self.submit_clone(pr, dir, &prompt.text),
             PromptKind::FindInDiff => self.in_view(|view| view.start_find(&prompt.text)),
+            PromptKind::Definition { .. } => {
+                self.in_view(|view| view.find_definition(&prompt.text))
+            }
             PromptKind::UpdatedWithin => self.submit_updated_within(&prompt.text),
             PromptKind::ConfirmDiscard { pr, pending_review } => prompt
                 .text
@@ -3171,6 +3285,10 @@ impl App {
                 let result = self.open_review();
                 self.error = result.err();
             }
+            KeyCode::Char('D') => {
+                let result = view.line_names_request().map(Some);
+                return self.report(result);
+            }
             _ => {}
         }
         None
@@ -3201,6 +3319,68 @@ impl App {
         if let Some(view) = self.view_for(pr) {
             view.outlines.insert((commit, path), outline);
         }
+    }
+
+    /// The names on the line D asked about: one is looked up at once, several are
+    /// offered in a prompt, the calls first.
+    pub fn set_line_names(&mut self, pr: &PrRef, names: Vec<String>) {
+        let Some(view) = self.view_for(pr) else {
+            return;
+        };
+        match names.as_slice() {
+            [] => self.error = Some("no names on this line to look up".to_string()),
+            [name] => {
+                let result = view.find_definition(name);
+                self.queued = self.report(result);
+            }
+            [first, ..] => {
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::Definition {
+                        names: names.clone(),
+                    },
+                    text: first.clone(),
+                    error: None,
+                    words: names,
+                });
+            }
+        }
+    }
+
+    /// D's answer: the first definition opens, and n and N walk the others.
+    pub fn set_definitions(
+        &mut self,
+        pr: &PrRef,
+        name: String,
+        result: Result<(Vec<GrepHit>, bool), String>,
+    ) {
+        let Some(view) = self.view_for(pr) else {
+            return;
+        };
+        let (hits, capped) = match result {
+            Ok(found) => found,
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
+        };
+        if hits.is_empty() {
+            let searched = match capped {
+                true => "in the files revu read",
+                false => "at the PR head",
+            };
+            self.error = Some(format!(
+                "no definition of {name} {searched}; it may come from a library"
+            ));
+            return;
+        }
+        view.def_walk = Some(DefWalk {
+            name,
+            hits,
+            at: 0,
+            capped,
+        });
+        let result = view.show_definition(0).map(Some);
+        self.queued = self.report(result);
     }
 
     /// Whether this diff job's file still needs its structure read; asking marks it.
@@ -4997,6 +5177,80 @@ mod tests {
             place(&mut app, 5).as_deref(),
             Some("A > new"),
             "added: the head"
+        );
+    }
+
+    #[test]
+    fn d_offers_the_lines_names_then_walks_the_definitions() {
+        let (mut app, pr) = files_tab(vec![file("app.py", ViewedState::Unviewed)]);
+        ready_repo(&mut app, &pr);
+        view_mut(&mut app).line_mode = Some(LineMode {
+            path: "app.py".to_string(),
+            rows: Some(Ok(crate::line_diff::parse(
+                "@@ -1,1 +1,1 @@\n-old()\n+bar = foo(x)\n",
+            ))),
+            cursor: 2,
+            anchor: None,
+            scroll: 0,
+        });
+        let Some(Action::LineNames { commit, line, .. }) = app.handle_key(key(KeyCode::Char('D')))
+        else {
+            panic!("expected the line's names");
+        };
+        assert_eq!((commit.as_str(), line), ("head999", 1));
+        app.set_line_names(
+            &pr,
+            vec!["foo".to_string(), "bar".to_string(), "x".to_string()],
+        );
+        let prompt = app.prompt.as_ref().expect("several names: a prompt");
+        assert_eq!(prompt.text, "foo", "the call first");
+        let Some(Action::FindDefinition { name, .. }) = app.handle_key(key(KeyCode::Enter)) else {
+            panic!("expected a lookup");
+        };
+        assert_eq!(name, "foo");
+        let hit = |path: &str, line| GrepHit {
+            path: path.to_string(),
+            line,
+            text: "def foo():".to_string(),
+        };
+        app.set_definitions(&pr, name, Ok((vec![hit("a.py", 3), hit("b.py", 9)], false)));
+        let Some(Action::ShowFile { path, line, .. }) = app.queued.take() else {
+            panic!("expected the first definition");
+        };
+        assert_eq!((path.as_str(), line), ("a.py", 3));
+        let Some(Action::ShowFile { path, .. }) = app.handle_key(key(KeyCode::Char('n'))) else {
+            panic!("expected the next definition");
+        };
+        assert_eq!(path, "b.py");
+        assert_eq!(view(&app).overlays.len(), 1, "one file view at a time");
+        let Some(Action::ShowFile { path, .. }) = app.handle_key(key(KeyCode::Char('n'))) else {
+            panic!("expected a wrap");
+        };
+        assert_eq!(path, "a.py", "past the last, back to the first");
+        app.handle_key(key(KeyCode::Esc));
+        assert!(view(&app).overlays.is_empty() && view(&app).def_walk.is_none());
+        assert!(view(&app).line_mode.is_some(), "back in select lines");
+    }
+
+    #[test]
+    fn d_looks_up_a_lone_name_at_once_and_says_when_nothing_defines_it() {
+        let (mut app, pr) = files_tab(vec![file("app.py", ViewedState::Unviewed)]);
+        ready_repo(&mut app, &pr);
+        app.set_line_names(&pr, vec!["foo".to_string()]);
+        assert!(app.prompt.is_none());
+        assert!(matches!(
+            app.queued.take(),
+            Some(Action::FindDefinition { .. })
+        ));
+        app.set_definitions(&pr, "foo".to_string(), Ok((Vec::new(), false)));
+        assert_eq!(
+            app.error.as_deref(),
+            Some("no definition of foo at the PR head; it may come from a library")
+        );
+        app.set_line_names(&pr, Vec::new());
+        assert_eq!(
+            app.error.as_deref(),
+            Some("no names on this line to look up")
         );
     }
 

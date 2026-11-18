@@ -476,6 +476,12 @@ const INBOX_HINTS: Hints = &[
 fn detail_hints(view: &DetailView) -> Hints {
     if let Some(overlay) = view.overlays.last() {
         return match overlay {
+            Overlay::File { .. } if view.def_walk.is_some() => &[
+                ("j/k", "scroll"),
+                ("n/N", "next/previous definition"),
+                ("o", "open"),
+                ("esc", "back"),
+            ],
             Overlay::File { .. } if view.repo_hit.is_some() => &[
                 ("j/k", "scroll"),
                 ("n/N", "next/previous match"),
@@ -498,6 +504,7 @@ fn detail_hints(view: &DetailView) -> Hints {
             ("V", "range"),
             ("enter", "comment"),
             ("y", "copy"),
+            ("D", "definition"),
             ("o", "open"),
             ("R", "review"),
             ("w", "wrap"),
@@ -657,7 +664,7 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "S",
-                "select lines: j/k or the wheel pick a line, V a range; enter comments in your pending review, y copies them as a Markdown diff, o opens them on GitHub",
+                "select lines: j/k or the wheel pick a line, V a range; enter comments in your pending review, y copies them as a Markdown diff, D goes to the definition of a name on the line, o opens them on GitHub",
             ),
         ],
     ),
@@ -1454,6 +1461,21 @@ fn keep_in_view(heights: &[usize], scroll: usize, cursor: usize, height: usize) 
 /// the place among its matches stay in view. In another file it says n finds there.
 /// "/text  repo match 3 of 155", over the file a repo match opened.
 fn repo_place(view: &DetailView, paint: Paint) -> Option<Line<'static>> {
+    if let Some(walk) = &view.def_walk {
+        let more = if walk.capped {
+            ", more files not read"
+        } else {
+            ""
+        };
+        let place = format!(" definition {} of {}{more} ", walk.at + 1, walk.hits.len());
+        return Some(
+            Line::from(vec![
+                paint.bold(format!(" {} ", walk.name), paint.theme.warning),
+                paint.span(place, paint.theme.muted),
+            ])
+            .right_aligned(),
+        );
+    }
     let (Some(query), Some(hit), Some(Ok(hits))) = (&view.find, view.repo_hit, &view.find_repo)
     else {
         return None;
@@ -2277,6 +2299,13 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
         height: 4,
     };
     let (title, hint) = match &prompt.kind {
+        PromptKind::Definition { names } => (
+            " Definition of ".to_string(),
+            format!(
+                "on this line: {}. tab completes; enter looks it up at the PR head",
+                names.join(", ")
+            ),
+        ),
         PromptKind::OpenLink => (
             " Open a pull request ".to_string(),
             "paste a PR link or owner/repo#123, enter to open, esc to cancel".to_string(),

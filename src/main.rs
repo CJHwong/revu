@@ -55,6 +55,15 @@ enum Message {
         path: String,
         result: Result<String, String>,
     },
+    LineNames {
+        pr: PrRef,
+        names: Vec<String>,
+    },
+    Definitions {
+        pr: PrRef,
+        name: String,
+        result: Result<(Vec<repo::GrepHit>, bool), String>,
+    },
     /// The first changed line of each hunk in a file's plain diff.
     HunkFirsts {
         pr: PrRef,
@@ -243,6 +252,11 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App, session: &mut Session) -> 
         apply_messages(app, &session.receiver);
         app.settle_find();
         dispatch_requests(app, session);
+        if let Some(action) = app.queued.take()
+            && !perform(action, terminal, app, session)?
+        {
+            return Ok(());
+        }
         let mut input = next_input(Duration::from_millis(100))?;
         // Every input already waiting is handled before the next draw, so a long wheel
         // fling costs a few frames, not one per event. The time cap keeps the screen
@@ -371,6 +385,8 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
                 outline,
             } => app.set_outline(&pr, commit, path, outline),
             Message::HunkFirsts { pr, path, firsts } => app.set_hunk_firsts(&pr, path, firsts),
+            Message::LineNames { pr, names } => app.set_line_names(&pr, names),
+            Message::Definitions { pr, name, result } => app.set_definitions(&pr, name, result),
             Message::Labels { pr, result } => app.set_repo_labels(&pr, result),
             Message::FilesProgress { pr, loaded, total } => {
                 app.set_files_progress(&pr, loaded, total)
@@ -413,6 +429,35 @@ fn perform(
         Action::OpenBrowser(url) => open_browser(app, &url),
         Action::RunDiff(pr) => run_diff(terminal, app, session, &pr)?,
         Action::OpenEditor(target) => open_editor(terminal, app, session, &target)?,
+        Action::LineNames {
+            pr,
+            dir,
+            commit,
+            path,
+            line,
+        } => {
+            let sender = session.sender.clone();
+            thread::spawn(move || {
+                let names = repo::show_file(&dir, &commit, &path)
+                    .map(|text| syntax::names_on_line(&path, text.as_bytes(), line))
+                    .unwrap_or_default();
+                let _ = sender.send(Message::LineNames { pr, names });
+            });
+        }
+        Action::FindDefinition {
+            pr,
+            dir,
+            head,
+            name,
+            changed,
+        } => {
+            let sender = session.sender.clone();
+            thread::spawn(move || {
+                let result = repo::definitions(&dir, &head, &name, &changed)
+                    .map_err(|error| format!("{error:#}"));
+                let _ = sender.send(Message::Definitions { pr, name, result });
+            });
+        }
         Action::FindWords {
             pr,
             dir,

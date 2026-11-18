@@ -260,6 +260,96 @@ pub fn find_in_repo(dir: &Path, commit: &str, query: &str) -> Result<Vec<GrepHit
         .collect())
 }
 
+/// D reads at most this many files for a name; a name like `get` is in thousands.
+pub const MAX_DEFINITION_FILES: usize = 300;
+
+/// Where `name` is defined at `commit`: git finds the files that hold the word, in the
+/// languages revu parses, and tree-sitter keeps the lines that define it. The changed
+/// files come first. True when git found more files than revu reads.
+pub fn definitions(
+    dir: &Path,
+    commit: &str,
+    name: &str,
+    changed: &[String],
+) -> Result<(Vec<GrepHit>, bool)> {
+    let globs: Vec<String> = crate::syntax::code_extensions()
+        .iter()
+        .map(|extension| format!("*.{extension}"))
+        .collect();
+    let mut args = vec!["grep", "-l", "-w", "-F", "-I", "-e", name, commit, "--"];
+    args.extend(globs.iter().map(String::as_str));
+    let output = git(dir, &args)?;
+    // git grep exits 1 when nothing matches.
+    if !output.status.success() && output.status.code() != Some(1) {
+        ensure_success(&output, "git grep")?;
+    }
+    let prefix = format!("{commit}:");
+    let mut paths: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix(&prefix).map(str::to_string))
+        .collect();
+    paths.sort_by_key(|path| !changed.contains(path));
+    let capped = paths.len() > MAX_DEFINITION_FILES;
+    paths.truncate(MAX_DEFINITION_FILES);
+    let mut hits = Vec::new();
+    for (path, text) in read_files(dir, commit, &paths)? {
+        let Some(outline) = crate::syntax::outline(&path, text.as_bytes()) else {
+            continue;
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        for line in outline.definitions_of(name) {
+            let code = lines.get(line - 1).copied().unwrap_or_default();
+            hits.push(GrepHit {
+                path: path.clone(),
+                line,
+                text: code.trim().to_string(),
+            });
+        }
+    }
+    Ok((hits, capped))
+}
+
+/// Many files at a commit in one `git cat-file --batch`, rather than a git per file.
+fn read_files(dir: &Path, commit: &str, paths: &[String]) -> Result<Vec<(String, String)>> {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["cat-file", "--batch"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| git_spawn_error(error, "git cat-file"))?;
+    let mut stdin = child.stdin.take().context("open git cat-file's input")?;
+    let request: String = paths
+        .iter()
+        .map(|path| format!("{commit}:{path}\n"))
+        .collect();
+    // Write from another thread: git fills its output pipe while it reads the list.
+    let writer = std::thread::spawn(move || stdin.write_all(request.as_bytes()));
+    let mut stdout = BufReader::new(child.stdout.take().context("read git cat-file")?);
+    let mut files = Vec::new();
+    for path in paths {
+        let mut header = String::new();
+        stdout.read_line(&mut header).context("read git cat-file")?;
+        // "<oid> blob <size>", or "<name> missing".
+        let Some(size) = header
+            .split_whitespace()
+            .nth(2)
+            .and_then(|size| size.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        let mut body = vec![0; size + 1];
+        stdout.read_exact(&mut body).context("read git cat-file")?;
+        body.pop();
+        files.push((path.clone(), String::from_utf8_lossy(&body).into_owned()));
+    }
+    let _ = writer.join();
+    child.wait().context("wait for git cat-file")?;
+    Ok(files)
+}
+
 /// Parses one `git grep -n -z <commit>` record: `<commit>:<path>\0<line>\0<text>`.
 pub fn parse_grep_record(record: &[u8], prefix: &str) -> Option<GrepHit> {
     let record = String::from_utf8_lossy(record);
@@ -781,6 +871,39 @@ mod tests {
         };
         assert_eq!(hit, Some(expected));
         assert_eq!(parse_grep_record(b"other:src/a.rs\x001\x00x", "abc:"), None);
+    }
+
+    #[test]
+    fn definitions_finds_where_a_name_is_defined_not_where_it_is_called() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let head = String::from_utf8(git(dir, &["rev-parse", "HEAD"]).unwrap().stdout).unwrap();
+        let (hits, capped) = definitions(dir, head.trim(), "parse_grep_record", &[]).unwrap();
+        assert!(!capped);
+        let places: Vec<(&str, &str)> = hits
+            .iter()
+            .map(|hit| (hit.path.as_str(), hit.text.as_str()))
+            .collect();
+        assert_eq!(
+            places,
+            [(
+                "src/repo.rs",
+                "pub fn parse_grep_record(record: &[u8], prefix: &str) -> Option<GrepHit> {"
+            )]
+        );
+    }
+
+    #[test]
+    fn read_files_reads_many_files_at_once_and_skips_missing_ones() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let paths = [
+            "Cargo.toml".to_string(),
+            "no/such.rs".to_string(),
+            "LICENSE".to_string(),
+        ];
+        let files = read_files(dir, "HEAD", &paths).unwrap();
+        let names: Vec<&str> = files.iter().map(|(path, _)| path.as_str()).collect();
+        assert_eq!(names, ["Cargo.toml", "LICENSE"]);
+        assert!(files[0].1.contains("[package]"));
     }
 
     #[test]

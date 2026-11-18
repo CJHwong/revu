@@ -50,7 +50,11 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 
 ## Files changed
 
-A file with review threads shows their count, such as `●3`, and the diff pane's title lists their lines.
+A file with review threads shows their count, such as `●3`, and the diff pane's title lists their lines. The title also names the function or class the hunk at the top changes, such as `in BaseApp > on_mount`, and select lines names the one around the cursor. This works for Python, Rust, JavaScript, TypeScript and Go. The diff pane shows it when the view's hunks match git's, as in the word view and delta.
+
+## Go to definition
+
+In select lines, `D` lists the names on the cursor's line, calls first, in a prompt. `Tab` completes one, or type any name, and `Enter` looks it up. A line with one name skips the prompt. revu finds the files at the PR head that hold the name, the changed files first, and opens each definition in the file view: `n`/`N` go to the next and previous, `o` opens it on GitHub or in your editor, and `esc` goes back to select lines. It reads at most 300 files, so a common name like `get` may miss some; the title says so. A name from a library has no definition in the repo.
 
 | Key | Action |
 |---|---|
@@ -61,7 +65,7 @@ A file with review threads shows their count, such as `●3`, and the diff pane'
 | `v` | Toggle Viewed. It syncs to GitHub's Viewed checkbox at once. On a folder, it marks every file under it viewed, or unmarks them all when every one is viewed already. |
 | `V` | Hide viewed files |
 | `]` / `[` | Next or previous unviewed file |
-| `S` | Select lines in the selected file: its plain diff with line numbers. `j`/`k` or the wheel move, `V` marks a range (on one side only, as GitHub requires), `Enter` writes a comment, `y` copies the line or range, `o` opens it on GitHub or in your editor, `w` wraps long lines or cuts them, as in the diff, `S` or `esc` goes back. The comment joins your pending review on GitHub, which only you see until `R` submits it; a dot marks lines it already covers. |
+| `S` | Select lines in the selected file: its plain diff with line numbers. `j`/`k` or the wheel move, `V` marks a range (on one side only, as GitHub requires), `Enter` writes a comment, `y` copies the line or range, `D` goes to the definition of a name on the line, `o` opens it on GitHub or in your editor, `w` wraps long lines or cuts them, as in the diff, `S` or `esc` goes back. The comment joins your pending review on GitHub, which only you see until `R` submits it; a dot marks lines it already covers. |
 
 ## Files changed and Commits
 
