@@ -174,12 +174,12 @@
       </div>
       <div class="card">
         <h3><span class="num">[02]</span>The whole Overview</h3>
-        <p>The description, comments and review threads, a merge box, reviewers with their state, and what changed since you last commented.</p>
+        <p>The description, comments and review threads with the code under each, a merge box, reviewers with their state, and what changed since you last commented.</p>
         <p class="keys"><kbd>enter</kbd> fold, <kbd>f</kbd> filter, <kbd>n</kbd> hide bots</p>
       </div>
       <div class="card">
         <h3><span class="num">[03]</span>Three diff views</h3>
-        <p>Word diff, delta and difftastic, with syntax colors. Views you have not installed drop out, and narrow panes switch difftastic to one column.</p>
+        <p>Word diff, delta and difftastic, with syntax colors. Views you have not installed drop out, and narrow panes switch difftastic to one column. Files with review threads show how many.</p>
         <p class="keys"><kbd>m</kbd> switch view, <kbd>w</kbd> wrap, <kbd>enter</kbd> full file</p>
       </div>
       <div class="card">
@@ -189,13 +189,13 @@
       </div>
       <div class="card">
         <h3><span class="num">[05]</span>Review without the browser</h3>
-        <p>Comment on a line or a range into your pending review, then submit it as a comment, an approval or a change request. Edit labels and mark files viewed.</p>
-        <p class="keys"><kbd>c</kbd> comment, <kbd>R</kbd> review, <kbd>e</kbd> labels, <kbd>v</kbd> viewed</p>
+        <p>Select a line or a range to comment on in your pending review, copy as a Markdown diff, or open on GitHub. Submit the review as a comment, an approval or a change request. Edit labels and mark files, or whole folders, viewed.</p>
+        <p class="keys"><kbd>S</kbd> select lines, <kbd>y</kbd> copy, <kbd>R</kbd> review, <kbd>v</kbd> viewed</p>
       </div>
       <div class="card">
         <h3><span class="num">[06]</span>Your clones stay as they are</h3>
         <p>Diffs come from your local clone. revu fetches a PR's commits into its own refs and never checks out a branch or touches your working tree.</p>
-        <p class="keys">needs <code>workspace_dir</code> in the config</p>
+        <p class="keys">needs <code>workspace_dir</code> in the config: one folder or a list</p>
       </div>
     </div>
   </section>
@@ -222,7 +222,7 @@
           <tr><td>R</td><td>submit a review</td></tr>
           <tr><td>e</td><td>labels</td></tr>
           <tr><td>s</td><td>search the repo</td></tr>
-          <tr><td>o</td><td>open in the browser</td></tr>
+          <tr><td>o</td><td>open in the browser, at the file or line</td></tr>
           <tr><td>h</td><td>back to the inbox</td></tr>
         </table>
       </div>
@@ -231,7 +231,8 @@
         <table class="keys">
           <tr><td>m</td><td>next diff view</td></tr>
           <tr><td>/</td><td>find in every changed file</td></tr>
-          <tr><td>c</td><td>comment on lines</td></tr>
+          <tr><td>S</td><td>select lines: comment, copy, open</td></tr>
+          <tr><td>y</td><td>copy the file path</td></tr>
           <tr><td>v</td><td>mark the file viewed</td></tr>
           <tr><td>]</td><td>next unviewed file</td></tr>
           <tr><td>t</td><td>tree or flat list</td></tr>
