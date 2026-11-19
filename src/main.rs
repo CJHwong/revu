@@ -60,6 +60,11 @@ enum Message {
         pr: PrRef,
         result: Result<Box<PrDetail>, String>,
     },
+    /// A worktree at the PR's head, ready for the editor; or why it is not.
+    Worktree {
+        target: EditorTarget,
+        result: Result<(std::path::PathBuf, Option<String>), String>,
+    },
     /// The repo's labels, for the label menu.
     Labels {
         pr: PrRef,
@@ -430,6 +435,7 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
             Message::Definitions { pr, name, result } => app.set_definitions(&pr, name, result),
             Message::Labels { pr, result } => app.set_repo_labels(&pr, result),
             Message::Preview { pr, result } => app.set_preview(pr, result),
+            Message::Worktree { target, result } => open_in_worktree(app, target, result),
             Message::Image { item, result } => app.set_image(item, result),
             Message::FilesProgress { pr, loaded, total } => {
                 app.set_files_progress(&pr, loaded, total)
@@ -490,6 +496,9 @@ fn perform(
         Action::OpenBrowser(url) => open_browser(app, &url),
         Action::LoadImage(item) => load_image(terminal, app, session, item)?,
         Action::RunDiff(pr) => run_diff(terminal, app, session, &pr)?,
+        Action::OpenEditor(target) if target.elsewhere.is_some() => {
+            start_worktree(app, session, target)
+        }
         Action::OpenEditor(target) => open_editor(terminal, app, session, &target)?,
         Action::LineNames {
             pr,
@@ -1542,6 +1551,49 @@ fn start_beside(mut process: Command, name: &str, sender: Sender<Message>) {
 }
 
 /// The footer after an editor opened beside revu, warning when the clone is not at the PR.
+/// Your clone is on another branch, so the file opens in a worktree at the PR's head.
+/// `git worktree add` checks out every file, which takes a while on a big repo.
+fn start_worktree(app: &mut App, session: &Session, target: EditorTarget) {
+    app.notice = Some("checking out the PR's head in a worktree...".to_string());
+    let sender = session.sender.clone();
+    thread::spawn(move || {
+        let result = repo::worktree_root()
+            .and_then(|root| repo::pr_worktree(&root, &target.dir, &target.pr, &target.head))
+            .map_err(|error| format!("no worktree at the PR's head: {error:#}"));
+        let _ = sender.send(Message::Worktree { target, result });
+    });
+}
+
+fn open_in_worktree(
+    app: &mut App,
+    target: EditorTarget,
+    result: Result<(std::path::PathBuf, Option<String>), String>,
+) {
+    app.notice = None;
+    let (dir, kept) = match result {
+        Ok(found) => found,
+        Err(error) => {
+            app.error = Some(error);
+            return;
+        }
+    };
+    if !dir.join(&target.path).is_file() {
+        app.error = Some(format!("the PR's head has no {}", target.path));
+        return;
+    }
+    if let Some(commit) = kept {
+        app.notice = Some(format!(
+            "the worktree {} keeps your changes, on {commit}, not the PR's head",
+            dir.display()
+        ));
+    }
+    app.queued = Some(Action::OpenEditor(EditorTarget {
+        dir,
+        elsewhere: None,
+        ..target
+    }));
+}
+
 fn opened_note(name: &str, target: &EditorTarget, line: u64) -> String {
     let opened = format!("opened {} at line {line} in {name}", target.path);
     match &target.elsewhere {
