@@ -2907,6 +2907,16 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
             "the folders that hold your clones, with commas between. new clones go in the first. enter saves, esc cancels"
                 .to_string(),
         ),
+        PromptKind::Editor => (
+            " Editor ".to_string(),
+            "the command o runs. {file} is the file's path, {line} the line, {dir} the clone. empty uses $VISUAL or $EDITOR. enter saves, esc keeps it"
+                .to_string(),
+        ),
+        PromptKind::OpenDiff => (
+            " Open diff command ".to_string(),
+            "the shell command d runs. {repo}, {number} and {url} are replaced. empty goes back to the built-in one. enter saves, esc keeps it"
+                .to_string(),
+        ),
         PromptKind::UpdatedWithin => (
             " Updated within, in days ".to_string(),
             "PRs updated in this many days, or empty for no limit. enter saves and reloads, esc keeps it"

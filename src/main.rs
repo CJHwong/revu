@@ -204,14 +204,7 @@ fn main() -> Result<()> {
         viewed_writes,
     };
     let mut app = App::new();
-    app.renderer_names = renderer_names(&session.config);
-    app.editor_name = editor_command::editor_name(
-        session.config.editor.as_ref(),
-        &editor_command::shell_editor(),
-    );
-    check_renderers(&session.config, &mut app);
-    app.workspace_dirs = session.config.workspace_dirs.clone();
-    app.updated_within_days = session.config.updated_within_days;
+    show_config(&mut app, &session.config);
     match config::load_prefs(&config::prefs_path(&session.config_path)) {
         Ok(prefs) => app.prefs = prefs,
         Err(error) => app.set_inbox_error(format!("view toggles not loaded: {error:#}")),
@@ -557,6 +550,14 @@ fn perform(
         Action::SetWorkspace(text) => set_workspace(app, session, text),
         Action::SetTheme(name) => set_theme(app, session, name),
         Action::SetUpdatedWithin(days) => set_updated_within(app, session, days),
+        Action::SetEditor(editor) => {
+            let value = editor.as_ref().map(config::editor_value);
+            save_and_reload(app, session, "editor", value);
+        }
+        Action::SetOpenDiff(command) => {
+            let value = command.as_deref().map(config::quoted);
+            save_and_reload(app, session, "open_diff", value);
+        }
         Action::Copy(text) => copy_to_clipboard(app, &text),
         Action::SubmitReview {
             pr,
@@ -1013,22 +1014,44 @@ fn start_structure(session: &Session, job: &DiffJob) {
 }
 
 /// Reloads the config first, so edits to the groups apply without a restart.
+/// Copies the config's values the app reads or the settings panel shows.
+fn show_config(app: &mut App, config: &config::Config) {
+    app.renderer_names = renderer_names(config);
+    app.editor_name =
+        editor_command::editor_name(config.editor.as_ref(), &editor_command::shell_editor());
+    app.editor_config = config.editor.clone();
+    app.open_diff = config.open_diff.clone();
+    check_renderers(config, app);
+    app.workspace_dirs = config.workspace_dirs.clone();
+    app.updated_within_days = config.updated_within_days;
+}
+
+/// Saves a key the settings panel changed, then loads the config again without
+/// fetching the inbox, since neither the editor nor d changes it.
+fn save_and_reload(app: &mut App, session: &mut Session, key: &str, value: Option<String>) {
+    let saved = match &value {
+        Some(value) => config::save_setting(&session.config_path, key, value),
+        None => config::remove_setting(&session.config_path, key),
+    };
+    let loaded = saved.and_then(|()| config::load_or_init(&session.config_path));
+    match loaded {
+        Ok(config) => {
+            show_config(app, &config);
+            session.config = config;
+        }
+        Err(error) => app.error = Some(format!("not saved: {error:#}")),
+    }
+}
+
 fn refresh(app: &mut App, session: &mut Session) {
     match config::load_or_init(&session.config_path) {
         Ok(config) => {
-            app.renderer_names = renderer_names(&config);
-            app.editor_name = editor_command::editor_name(
-                config.editor.as_ref(),
-                &editor_command::shell_editor(),
-            );
-            check_renderers(&config, app);
             if config.theme != session.config.theme {
                 use_syntax_theme(app, &config.theme);
                 app.forget_colors();
             }
             app.theme_name = theme::name_of(&config.theme).unwrap_or(app.theme_name);
-            app.workspace_dirs = config.workspace_dirs.clone();
-            app.updated_within_days = config.updated_within_days;
+            show_config(app, &config);
             session.config = config;
         }
         Err(error) => {

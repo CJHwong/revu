@@ -152,7 +152,7 @@ pub fn default_renderers() -> Vec<Renderer> {
     defaults().diff_renderers
 }
 
-fn default_open_diff() -> String {
+pub fn default_open_diff() -> String {
     defaults().open_diff
 }
 
@@ -213,8 +213,26 @@ pub fn save_theme(path: &Path, name: &str) -> Result<()> {
 /// Replaces the `key:` line, or adds one, and leaves every other line as it was, so the
 /// user's comments survive. `value` is written as given; quote it with `quoted` when needed.
 pub fn save_setting(path: &Path, key: &str, value: &str) -> Result<()> {
+    write_setting(path, key, Some(value))
+}
+
+/// Takes the `key:` line out, so revu goes back to the key's default.
+pub fn remove_setting(path: &Path, key: &str) -> Result<()> {
+    write_setting(path, key, None)
+}
+
+/// The editor as a one-line value: `{command: "...", wait: false}`.
+pub fn editor_value(editor: &EditorConfig) -> String {
+    format!(
+        "{{command: {}, wait: {}}}",
+        quoted(&editor.command),
+        editor.wait
+    )
+}
+
+fn write_setting(path: &Path, key: &str, value: Option<&str>) -> Result<()> {
     let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let setting = format!("{key}: {value}");
+    let setting = value.map(|value| format!("{key}: {value}"));
     let prefix = format!("{key}:");
     let mut lines: Vec<&str> = text.lines().collect();
     match lines.iter().position(|line| line.starts_with(&prefix)) {
@@ -225,9 +243,9 @@ pub fn save_setting(path: &Path, key: &str, value: &str) -> Result<()> {
                 .iter()
                 .take_while(|line| line.starts_with([' ', '\t', '-']))
                 .count();
-            lines.splice(index..=index + block, [setting.as_str()]);
+            lines.splice(index..=index + block, setting.as_deref());
         }
-        None => lines.push(&setting),
+        None => lines.extend(setting.as_deref()),
     }
     let text = lines.join("\n") + "\n";
     parse(&text).context("the config would no longer parse")?;
@@ -522,6 +540,27 @@ mod tests {
         assert!(text.starts_with("# keep me\n"));
         assert_eq!(text.matches("workspace_dir:").count(), 1);
         assert_eq!(parse(&text).unwrap().workspace_dirs, ["~/My \"Work\""]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_editor_saves_on_one_line_and_removing_it_keeps_the_rest() {
+        let dir = std::env::temp_dir().join(format!("revu-editor-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.yaml");
+        fs::write(&path, "# keep me\neditor:\n  command: vim\ntheme: nord\n").unwrap();
+        let editor = EditorConfig {
+            command: "zed \"{file}\":{line}".to_string(),
+            wait: false,
+        };
+        save_setting(&path, "editor", &editor_value(&editor)).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(parse(&text).unwrap().editor, Some(editor));
+        assert!(!text.contains("command: vim"), "the old block goes: {text}");
+        remove_setting(&path, "editor").unwrap();
+        remove_setting(&path, "open_diff").unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(text, "# keep me\ntheme: nord\n");
         fs::remove_dir_all(dir).unwrap();
     }
 

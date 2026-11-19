@@ -14,7 +14,7 @@ use crate::line_diff::{DiffRow, RowKind};
 use crate::markdown::TextRow;
 use crate::repo::{GrepHit, LocalRepo, MAX_GREP_HITS};
 
-use crate::config::{GroupConfig, ViewPrefs};
+use crate::config::{EditorConfig, GroupConfig, ViewPrefs};
 use crate::model::{
     ChangedFile, Group, HunkLine, Lifecycle, MergeMethod, MergeRequest, PrActivity, PrDetail,
     PrRef, PrSummary, Side, Verdict, ViewedState, parse_pr_ref,
@@ -83,6 +83,10 @@ pub enum Action {
     /// Save how many days back the inbox looks, and reload it.
     /// None looks back without a limit.
     SetUpdatedWithin(Option<u32>),
+    /// Save the editor o runs; None goes back to $VISUAL or $EDITOR.
+    SetEditor(Option<EditorConfig>),
+    /// Save the command d runs; None goes back to the built-in one.
+    SetOpenDiff(Option<String>),
     /// Put text on the system clipboard.
     Copy(String),
     /// Send a review, or submit the pending one, with a verdict.
@@ -1957,6 +1961,8 @@ pub enum PromptKind {
     Workspace,
     FindInDiff,
     UpdatedWithin,
+    Editor,
+    OpenDiff,
     /// Asks before deleting your pending review and its line comments.
     ConfirmDiscard {
         pr: PrRef,
@@ -2504,9 +2510,19 @@ pub enum Setting {
     Theme,
     Workspace,
     UpdatedWithin,
+    Editor,
+    EditorWait,
+    OpenDiff,
 }
 
-pub const SETTINGS: [Setting; 3] = [Setting::Theme, Setting::Workspace, Setting::UpdatedWithin];
+pub const SETTINGS: [Setting; 6] = [
+    Setting::Theme,
+    Setting::Workspace,
+    Setting::UpdatedWithin,
+    Setting::Editor,
+    Setting::EditorWait,
+    Setting::OpenDiff,
+];
 
 impl Setting {
     pub fn label(self) -> &'static str {
@@ -2514,6 +2530,9 @@ impl Setting {
             Setting::Theme => "Theme",
             Setting::Workspace => "Workspace folders",
             Setting::UpdatedWithin => "Updated within",
+            Setting::Editor => "Editor",
+            Setting::EditorWait => "Wait for editor",
+            Setting::OpenDiff => "Open diff (d)",
         }
     }
 }
@@ -2609,6 +2628,10 @@ pub struct App {
     pub renderer_names: Vec<String>,
     /// The editor o offers, for the menu to name it.
     pub editor_name: String,
+    /// The config's editor key, for the settings panel.
+    pub editor_config: Option<EditorConfig>,
+    /// The command d runs, for the settings panel.
+    pub open_diff: String,
     /// The view toggles a newly opened PR starts with; they follow the open PR.
     pub prefs: ViewPrefs,
 }
@@ -2663,6 +2686,8 @@ impl App {
                 None,
                 &crate::editor_command::shell_editor(),
             ),
+            editor_config: None,
+            open_diff: crate::config::default_open_diff(),
             prefs: ViewPrefs::default(),
         }
     }
@@ -3285,7 +3310,7 @@ impl App {
             }
             KeyCode::Enter => {
                 self.settings_menu = None;
-                self.edit_setting(SETTINGS[selected]);
+                return self.edit_setting(SETTINGS[selected]);
             }
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char(',') => self.settings_menu = None,
             _ => {}
@@ -3293,8 +3318,8 @@ impl App {
         None
     }
 
-    /// Opens the theme menu, or a box filled with the current value.
-    fn edit_setting(&mut self, setting: Setting) {
+    /// Opens the theme menu, or a box filled with the current value; a yes or no flips.
+    fn edit_setting(&mut self, setting: Setting) -> Option<Action> {
         match setting {
             Setting::Theme => {
                 let names = crate::theme::THEME_NAMES;
@@ -3311,7 +3336,34 @@ impl App {
                 let current = self.updated_within_days.map(|days| days.to_string());
                 self.ask(PromptKind::UpdatedWithin, &current.unwrap_or_default());
             }
+            Setting::Editor => {
+                let current = self
+                    .editor_config
+                    .as_ref()
+                    .map(|editor| editor.command.clone());
+                self.ask(PromptKind::Editor, &current.unwrap_or_default());
+            }
+            Setting::EditorWait => match &self.editor_config {
+                Some(editor) => {
+                    return Some(Action::SetEditor(Some(EditorConfig {
+                        wait: !editor.wait,
+                        ..editor.clone()
+                    })));
+                }
+                None => {
+                    self.error = Some(format!(
+                        "revu knows how {} runs; set an Editor command to choose",
+                        self.editor_name
+                    ));
+                }
+            },
+            Setting::OpenDiff => {
+                let current = (self.open_diff != crate::config::default_open_diff())
+                    .then(|| self.open_diff.clone());
+                self.ask(PromptKind::OpenDiff, &current.unwrap_or_default());
+            }
         }
+        None
     }
 
     /// The settings panel's value for a row.
@@ -3324,7 +3376,45 @@ impl App {
                 Some(days) => format!("{days} days"),
                 None => "no limit".to_string(),
             },
+            Setting::Editor => match &self.editor_config {
+                Some(editor) => editor.command.clone(),
+                None => format!("{} (from $VISUAL or $EDITOR)", self.editor_name),
+            },
+            Setting::EditorWait => {
+                let wait = match &self.editor_config {
+                    Some(editor) => editor.wait,
+                    None => !crate::editor_command::opens_a_window(&self.editor_name),
+                };
+                match (wait, self.editor_config.is_some()) {
+                    (true, true) => "yes".to_string(),
+                    (false, true) => "no".to_string(),
+                    (true, false) => "yes (a terminal editor)".to_string(),
+                    (false, false) => "no (has its own window)".to_string(),
+                }
+            }
+            Setting::OpenDiff if self.open_diff == crate::config::default_open_diff() => {
+                "built-in (delta, else less)".to_string()
+            }
+            Setting::OpenDiff => self.open_diff.clone(),
         }
+    }
+
+    /// An empty command goes back to the shell's editor. A new command waits unless revu
+    /// knows it opens a window; Wait for editor changes that.
+    fn submit_editor(&mut self, text: &str) -> Option<Action> {
+        let command = text.trim();
+        if command.is_empty() {
+            return Some(Action::SetEditor(None));
+        }
+        if !command.contains("{file}") {
+            let error = "the command needs {file}, such as zed {file}:{line}".to_string();
+            self.set_prompt_error(PromptKind::Editor, text, error);
+            return None;
+        }
+        Some(Action::SetEditor(Some(EditorConfig {
+            command: command.to_string(),
+            wait: !crate::editor_command::opens_a_window(command),
+        })))
     }
 
     fn submit_updated_within(&mut self, text: &str) -> Option<Action> {
@@ -3421,6 +3511,13 @@ impl App {
                 self.in_view(|view| view.find_definition(&prompt.text))
             }
             PromptKind::UpdatedWithin => self.submit_updated_within(&prompt.text),
+            PromptKind::Editor => self.submit_editor(&prompt.text),
+            PromptKind::OpenDiff => {
+                let command = prompt.text.trim();
+                Some(Action::SetOpenDiff(
+                    (!command.is_empty()).then(|| command.to_string()),
+                ))
+            }
             PromptKind::ConfirmDiscard { pr, pending_review } => prompt
                 .text
                 .trim()
@@ -4826,7 +4923,8 @@ mod tests {
         app.handle_key(key(KeyCode::Esc));
         assert!(app.prompt.is_none(), "esc keeps the folder");
         app.handle_key(key(KeyCode::Char(',')));
-        app.handle_key(key(KeyCode::Char('k')));
+        app.handle_key(key(KeyCode::Char('j')));
+        app.handle_key(key(KeyCode::Char('j')));
         app.handle_key(key(KeyCode::Enter));
         app.prompt.as_mut().unwrap().text = "soon".to_string();
         assert!(app.handle_key(key(KeyCode::Enter)).is_none());
@@ -4835,13 +4933,99 @@ mod tests {
         let action = app.handle_key(key(KeyCode::Enter));
         assert!(matches!(action, Some(Action::SetUpdatedWithin(Some(14)))));
         app.handle_key(key(KeyCode::Char(',')));
-        app.handle_key(key(KeyCode::Char('k')));
+        app.handle_key(key(KeyCode::Char('j')));
+        app.handle_key(key(KeyCode::Char('j')));
         app.handle_key(key(KeyCode::Enter));
         app.prompt.as_mut().unwrap().text = " ".to_string();
         let action = app.handle_key(key(KeyCode::Enter));
         assert!(
             matches!(action, Some(Action::SetUpdatedWithin(None))),
             "empty is no limit"
+        );
+    }
+
+    /// , then Enter on a settings row.
+    fn edit_setting_row(app: &mut App, setting: Setting) -> Option<Action> {
+        app.handle_key(key(KeyCode::Char(',')));
+        let row = SETTINGS.iter().position(|row| *row == setting).unwrap();
+        for _ in 0..row {
+            app.handle_key(key(KeyCode::Char('j')));
+        }
+        app.handle_key(key(KeyCode::Enter))
+    }
+
+    #[test]
+    fn settings_set_the_editor_and_flip_its_wait() {
+        let mut app = App::new();
+        app.editor_name = "hx".to_string();
+        assert_eq!(
+            app.setting_value(Setting::Editor),
+            "hx (from $VISUAL or $EDITOR)"
+        );
+        assert_eq!(
+            app.setting_value(Setting::EditorWait),
+            "yes (a terminal editor)"
+        );
+        assert!(edit_setting_row(&mut app, Setting::EditorWait).is_none());
+        assert!(
+            app.error
+                .as_ref()
+                .unwrap()
+                .contains("set an Editor command")
+        );
+
+        edit_setting_row(&mut app, Setting::Editor);
+        app.prompt.as_mut().unwrap().text = "zed".to_string();
+        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
+        assert!(app.prompt.as_ref().unwrap().error.is_some(), "no {{file}}");
+        app.prompt.as_mut().unwrap().text = "zed {file}:{line}".to_string();
+        let Some(Action::SetEditor(Some(editor))) = app.handle_key(key(KeyCode::Enter)) else {
+            panic!("expected the editor saved");
+        };
+        assert!(!editor.wait, "zed has its own window");
+
+        app.editor_config = Some(editor);
+        let Some(Action::SetEditor(Some(flipped))) =
+            edit_setting_row(&mut app, Setting::EditorWait)
+        else {
+            panic!("expected wait flipped");
+        };
+        assert!(flipped.wait);
+
+        edit_setting_row(&mut app, Setting::Editor);
+        assert_eq!(app.prompt.as_ref().unwrap().text, "zed {file}:{line}");
+        app.prompt.as_mut().unwrap().text.clear();
+        let action = app.handle_key(key(KeyCode::Enter));
+        assert!(
+            matches!(action, Some(Action::SetEditor(None))),
+            "{action:?}"
+        );
+    }
+
+    #[test]
+    fn settings_set_the_open_diff_command_or_go_back_to_the_built_in_one() {
+        let mut app = App::new();
+        assert_eq!(
+            app.setting_value(Setting::OpenDiff),
+            "built-in (delta, else less)"
+        );
+        edit_setting_row(&mut app, Setting::OpenDiff);
+        assert_eq!(
+            app.prompt.as_ref().unwrap().text,
+            "",
+            "the built-in one is not shown to edit"
+        );
+        app.prompt.as_mut().unwrap().text = "gh pr diff {number} -R {repo}".to_string();
+        let action = app.handle_key(key(KeyCode::Enter));
+        assert!(
+            matches!(action, Some(Action::SetOpenDiff(Some(ref command))) if command == "gh pr diff {number} -R {repo}"),
+            "{action:?}"
+        );
+        edit_setting_row(&mut app, Setting::OpenDiff);
+        let action = app.handle_key(key(KeyCode::Enter));
+        assert!(
+            matches!(action, Some(Action::SetOpenDiff(None))),
+            "{action:?}"
         );
     }
 

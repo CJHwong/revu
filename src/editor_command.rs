@@ -38,6 +38,11 @@ fn line_argument(program: &str) -> LineArgument {
     }
 }
 
+/// True for an editor with its own window, which revu starts beside itself.
+pub fn opens_a_window(command: &str) -> bool {
+    line_argument(&program_name(command)) != LineArgument::Plus
+}
+
 /// The editor the shell would pick: $VISUAL, then $EDITOR, then vi.
 pub fn shell_editor() -> String {
     ["VISUAL", "EDITOR"]
