@@ -554,10 +554,6 @@ fn perform(
             let value = editor.as_ref().map(config::editor_value);
             save_and_reload(app, session, "editor", value);
         }
-        Action::SetOpenDiff(command) => {
-            let value = command.as_deref().map(config::quoted);
-            save_and_reload(app, session, "open_diff", value);
-        }
         Action::Copy(text) => copy_to_clipboard(app, &text),
         Action::SubmitReview {
             pr,
@@ -1020,14 +1016,13 @@ fn show_config(app: &mut App, config: &config::Config) {
     app.editor_name =
         editor_command::editor_name(config.editor.as_ref(), &editor_command::shell_editor());
     app.editor_config = config.editor.clone();
-    app.open_diff = config.open_diff.clone();
     check_renderers(config, app);
     app.workspace_dirs = config.workspace_dirs.clone();
     app.updated_within_days = config.updated_within_days;
 }
 
 /// Saves a key the settings panel changed, then loads the config again without
-/// fetching the inbox, since neither the editor nor d changes it.
+/// fetching the inbox, which the key does not change.
 fn save_and_reload(app: &mut App, session: &mut Session, key: &str, value: Option<String>) {
     let saved = match &value {
         Some(value) => config::save_setting(&session.config_path, key, value),

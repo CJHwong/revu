@@ -9,9 +9,9 @@ use ratatui::widgets::{
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::{
-    App, Click, ClickTarget, ComposeKind, Composer, DetailView, DiffOutput, LabelMenu, MergeItem,
-    MergeMenu, OpenMenu, Overlay, OverviewLayout, Prompt, PromptKind, RepoState, Row, SETTINGS,
-    SaveNote, Screen, Tab,
+    App, Click, ClickTarget, ComposeKind, Composer, DetailView, DiffOutput, EditorChoice,
+    EditorMenu, LabelMenu, MergeItem, MergeMenu, OpenMenu, Overlay, OverviewLayout, Prompt,
+    PromptKind, RepoState, Row, SETTINGS, SaveNote, Screen, Tab,
 };
 use crate::editor::Editor;
 use crate::file_tree::FileRow;
@@ -87,6 +87,9 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: &Theme, now: DateTime<Utc
     }
     if let Some(menu) = &app.open_menu {
         render_open_menu(frame, menu, paint);
+    }
+    if let Some(menu) = &app.editor_menu {
+        render_editor_menu(frame, menu, paint);
     }
     if let Some(selected) = app.theme_menu {
         render_theme_menu(frame, selected, app.theme_name, paint);
@@ -2908,13 +2911,8 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
                 .to_string(),
         ),
         PromptKind::Editor => (
-            " Editor ".to_string(),
-            "the command o runs. {file} is the file's path, {line} the line, {dir} the clone. empty uses $VISUAL or $EDITOR. enter saves, esc keeps it"
-                .to_string(),
-        ),
-        PromptKind::OpenDiff => (
-            " Open diff command ".to_string(),
-            "the shell command d runs. {repo}, {number} and {url} are replaced. empty goes back to the built-in one. enter saves, esc keeps it"
+            " Editor command ".to_string(),
+            "such as myeditor {file}:{line}. {file} is the file, {line} the line, {dir} the clone. empty uses your shell's editor. enter saves, esc keeps it"
                 .to_string(),
         ),
         PromptKind::UpdatedWithin => (
@@ -3484,6 +3482,47 @@ fn render_menu_box(frame: &mut Frame, title: String, lines: Vec<Line<'static>>, 
             .wrap(ratatui::widgets::Wrap { trim: false }),
         box_area,
     );
+}
+
+/// The editor list from settings, drawn like the theme list.
+fn render_editor_menu(frame: &mut Frame, menu: &EditorMenu, paint: Paint) {
+    let theme = paint.theme;
+    let lines: Vec<Line> = menu
+        .choices
+        .iter()
+        .enumerate()
+        .map(|(index, choice)| {
+            let name = match choice {
+                EditorChoice::Shell => format!("From your shell: {}", menu.shell),
+                EditorChoice::Known { label, .. } => label.to_string(),
+                EditorChoice::Custom => "Custom command…".to_string(),
+            };
+            let mark = if index == menu.current { "●" } else { " " };
+            let line = Line::from(paint.span(format!("  {mark} {name} "), theme.foreground));
+            match index == menu.selected {
+                true => line.style(Style::new().bg(theme.selection)),
+                false => line,
+            }
+        })
+        .collect();
+    let area = frame.area();
+    let width = 40.min(area.width);
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let box_area = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    };
+    let block = Block::new()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme.heading))
+        .title(paint.bold(" Editor ", theme.heading))
+        .title_bottom(paint.span(" j/k move, enter picks, esc ", theme.muted))
+        .style(Style::new().bg(theme.background).fg(theme.foreground));
+    frame.render_widget(Clear, box_area);
+    frame.render_widget(Paragraph::new(lines).block(block), box_area);
 }
 
 fn render_theme_menu(frame: &mut Frame, selected: usize, current: &str, paint: Paint) {

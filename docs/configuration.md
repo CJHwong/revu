@@ -83,7 +83,7 @@ When the saved renderer is not installed, revu shows `word` instead and keeps th
 
 ### open_diff
 
-The shell command that `d` runs. `{repo}`, `{number}` and `{url}` are replaced. The default shows `gh pr diff {number} -R {repo}` in delta, or in `less` when delta is not installed. Settings (`,`) changes it too; an empty value there goes back to the default.
+The shell command that `d` runs. `{repo}`, `{number}` and `{url}` are replaced. The default shows `gh pr diff {number} -R {repo}` in delta, or in `less` when delta is not installed.
 
 ### editor
 
@@ -106,7 +106,7 @@ editor:
 
 `{dir}` is the clone, `{file}` the file's full path, `{line}` the line. The paths are quoted for the shell. `wait: true`, the default, hands the terminal to the editor until it exits. `wait: false` starts it beside revu, for an editor with its own window.
 
-Settings (`,`) sets the command too, on one line, and picks `wait` from the editor's name; Wait for editor flips it. An empty command removes the key, so `$VISUAL` applies again.
+Settings (`,`) sets it from a list: your shell's editor, which removes the key, the editors from the table that are installed, and Custom command. A custom command gets `wait` from the editor's name; change it here if that guess is wrong.
 
 ## view.yaml
 

@@ -85,8 +85,6 @@ pub enum Action {
     SetUpdatedWithin(Option<u32>),
     /// Save the editor o runs; None goes back to $VISUAL or $EDITOR.
     SetEditor(Option<EditorConfig>),
-    /// Save the command d runs; None goes back to the built-in one.
-    SetOpenDiff(Option<String>),
     /// Put text on the system clipboard.
     Copy(String),
     /// Send a review, or submit the pending one, with a verdict.
@@ -1962,7 +1960,6 @@ pub enum PromptKind {
     FindInDiff,
     UpdatedWithin,
     Editor,
-    OpenDiff,
     /// Asks before deleting your pending review and its line comments.
     ConfirmDiscard {
         pr: PrRef,
@@ -2511,18 +2508,78 @@ pub enum Setting {
     Workspace,
     UpdatedWithin,
     Editor,
-    EditorWait,
-    OpenDiff,
 }
 
-pub const SETTINGS: [Setting; 6] = [
+pub const SETTINGS: [Setting; 4] = [
     Setting::Theme,
     Setting::Workspace,
     Setting::UpdatedWithin,
     Setting::Editor,
-    Setting::EditorWait,
-    Setting::OpenDiff,
 ];
+
+/// A row of the editor list in settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorChoice {
+    /// No editor key: $VISUAL, then $EDITOR, then vi.
+    Shell,
+    Known {
+        label: &'static str,
+        program: &'static str,
+    },
+    /// A command the user types.
+    Custom,
+}
+
+/// The editor list: the shell's editor, the known editors on PATH, then a custom command.
+#[derive(Debug)]
+pub struct EditorMenu {
+    /// The shell's editor, which the first row names.
+    pub shell: String,
+    pub choices: Vec<EditorChoice>,
+    /// The choice the config has now, marked in the list.
+    pub current: usize,
+    pub selected: usize,
+}
+
+impl EditorMenu {
+    pub fn new(
+        shell_program: &str,
+        config: Option<&EditorConfig>,
+        installed: impl Fn(&str) -> bool,
+    ) -> Self {
+        let known = crate::editor_command::KNOWN_EDITORS
+            .iter()
+            .filter(|(_, program)| *program != shell_program && installed(program))
+            .map(|&(label, program)| EditorChoice::Known { label, program });
+        let choices: Vec<EditorChoice> = std::iter::once(EditorChoice::Shell)
+            .chain(known)
+            .chain(std::iter::once(EditorChoice::Custom))
+            .collect();
+        let wanted = match config {
+            None => EditorChoice::Shell,
+            Some(config) => choices
+                .iter()
+                .copied()
+                .find(|choice| match choice {
+                    EditorChoice::Known { program, .. } => {
+                        crate::editor_command::config_for(program) == *config
+                    }
+                    _ => false,
+                })
+                .unwrap_or(EditorChoice::Custom),
+        };
+        let current = choices
+            .iter()
+            .position(|choice| *choice == wanted)
+            .unwrap_or(0);
+        Self {
+            shell: shell_program.to_string(),
+            choices,
+            current,
+            selected: current,
+        }
+    }
+}
 
 impl Setting {
     pub fn label(self) -> &'static str {
@@ -2531,8 +2588,6 @@ impl Setting {
             Setting::Workspace => "Workspace folders",
             Setting::UpdatedWithin => "Updated within",
             Setting::Editor => "Editor",
-            Setting::EditorWait => "Wait for editor",
-            Setting::OpenDiff => "Open diff (d)",
         }
     }
 }
@@ -2630,8 +2685,8 @@ pub struct App {
     pub editor_name: String,
     /// The config's editor key, for the settings panel.
     pub editor_config: Option<EditorConfig>,
-    /// The command d runs, for the settings panel.
-    pub open_diff: String,
+    /// The editor list from settings, while it is open.
+    pub editor_menu: Option<EditorMenu>,
     /// The view toggles a newly opened PR starts with; they follow the open PR.
     pub prefs: ViewPrefs,
 }
@@ -2687,7 +2742,7 @@ impl App {
                 &crate::editor_command::shell_editor(),
             ),
             editor_config: None,
-            open_diff: crate::config::default_open_diff(),
+            editor_menu: None,
             prefs: ViewPrefs::default(),
         }
     }
@@ -3277,6 +3332,9 @@ impl App {
         if self.theme_menu.is_some() {
             return self.theme_menu_key(key.code);
         }
+        if self.editor_menu.is_some() {
+            return self.editor_menu_key(key.code);
+        }
         if self.settings_menu.is_some() {
             return self.settings_key(key.code);
         }
@@ -3337,31 +3395,48 @@ impl App {
                 self.ask(PromptKind::UpdatedWithin, &current.unwrap_or_default());
             }
             Setting::Editor => {
-                let current = self
-                    .editor_config
-                    .as_ref()
-                    .map(|editor| editor.command.clone());
-                self.ask(PromptKind::Editor, &current.unwrap_or_default());
+                let shell = crate::editor_command::editor_name(
+                    None,
+                    &crate::editor_command::shell_editor(),
+                );
+                self.editor_menu = Some(EditorMenu::new(
+                    &shell,
+                    self.editor_config.as_ref(),
+                    crate::repo::on_path,
+                ));
             }
-            Setting::EditorWait => match &self.editor_config {
-                Some(editor) => {
-                    return Some(Action::SetEditor(Some(EditorConfig {
-                        wait: !editor.wait,
-                        ..editor.clone()
-                    })));
-                }
-                None => {
-                    self.error = Some(format!(
-                        "revu knows how {} runs; set an Editor command to choose",
-                        self.editor_name
-                    ));
-                }
-            },
-            Setting::OpenDiff => {
-                let current = (self.open_diff != crate::config::default_open_diff())
-                    .then(|| self.open_diff.clone());
-                self.ask(PromptKind::OpenDiff, &current.unwrap_or_default());
+        }
+        None
+    }
+
+    /// The editor list: j/k move, Enter saves the pick or asks for a custom command.
+    fn editor_menu_key(&mut self, key: KeyCode) -> Option<Action> {
+        let menu = self.editor_menu.as_mut()?;
+        let count = menu.choices.len();
+        match key {
+            KeyCode::Char('j') | KeyCode::Down => menu.selected = (menu.selected + 1) % count,
+            KeyCode::Char('k') | KeyCode::Up => menu.selected = (menu.selected + count - 1) % count,
+            KeyCode::Esc | KeyCode::Char('q') => self.editor_menu = None,
+            KeyCode::Enter => {
+                let choice = menu.choices[menu.selected];
+                self.editor_menu = None;
+                return match choice {
+                    EditorChoice::Shell => Some(Action::SetEditor(None)),
+                    EditorChoice::Known { program, .. } => Some(Action::SetEditor(Some(
+                        crate::editor_command::config_for(program),
+                    ))),
+                    EditorChoice::Custom => {
+                        let current = self
+                            .editor_config
+                            .as_ref()
+                            .filter(|editor| crate::editor_command::known_label(editor).is_none())
+                            .map(|editor| editor.command.clone());
+                        self.ask(PromptKind::Editor, &current.unwrap_or_default());
+                        None
+                    }
+                };
             }
+            _ => {}
         }
         None
     }
@@ -3377,30 +3452,15 @@ impl App {
                 None => "no limit".to_string(),
             },
             Setting::Editor => match &self.editor_config {
-                Some(editor) => editor.command.clone(),
-                None => format!("{} (from $VISUAL or $EDITOR)", self.editor_name),
+                None => format!("{} (from your shell)", self.editor_name),
+                Some(editor) => crate::editor_command::known_label(editor)
+                    .map_or_else(|| editor.command.clone(), str::to_string),
             },
-            Setting::EditorWait => {
-                let wait = match &self.editor_config {
-                    Some(editor) => editor.wait,
-                    None => !crate::editor_command::opens_a_window(&self.editor_name),
-                };
-                match (wait, self.editor_config.is_some()) {
-                    (true, true) => "yes".to_string(),
-                    (false, true) => "no".to_string(),
-                    (true, false) => "yes (a terminal editor)".to_string(),
-                    (false, false) => "no (has its own window)".to_string(),
-                }
-            }
-            Setting::OpenDiff if self.open_diff == crate::config::default_open_diff() => {
-                "built-in (delta, else less)".to_string()
-            }
-            Setting::OpenDiff => self.open_diff.clone(),
         }
     }
 
     /// An empty command goes back to the shell's editor. A new command waits unless revu
-    /// knows it opens a window; Wait for editor changes that.
+    /// knows it opens a window; `wait` in config.yaml changes that.
     fn submit_editor(&mut self, text: &str) -> Option<Action> {
         let command = text.trim();
         if command.is_empty() {
@@ -3512,12 +3572,6 @@ impl App {
             }
             PromptKind::UpdatedWithin => self.submit_updated_within(&prompt.text),
             PromptKind::Editor => self.submit_editor(&prompt.text),
-            PromptKind::OpenDiff => {
-                let command = prompt.text.trim();
-                Some(Action::SetOpenDiff(
-                    (!command.is_empty()).then(|| command.to_string()),
-                ))
-            }
             PromptKind::ConfirmDiscard { pr, pending_review } => prompt
                 .text
                 .trim()
@@ -4955,78 +5009,80 @@ mod tests {
     }
 
     #[test]
-    fn settings_set_the_editor_and_flip_its_wait() {
+    fn the_editor_list_offers_the_shell_editor_the_installed_ones_and_a_custom_command() {
+        let installed = |program: &str| ["zed", "hx", "nvim"].contains(&program);
+        let menu = EditorMenu::new("hx", None, installed);
+        let labels: Vec<String> = menu
+            .choices
+            .iter()
+            .map(|choice| match choice {
+                EditorChoice::Shell => "shell".to_string(),
+                EditorChoice::Known { label, .. } => label.to_string(),
+                EditorChoice::Custom => "custom".to_string(),
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            ["shell", "Zed", "Neovim", "custom"],
+            "hx is the shell's"
+        );
+        assert_eq!(menu.current, 0);
+        let zed = crate::editor_command::config_for("zed");
+        let menu = EditorMenu::new("hx", Some(&zed), installed);
+        assert_eq!((menu.current, menu.shell.as_str()), (1, "hx"));
+        let other = EditorConfig {
+            command: "zed -n {file}".to_string(),
+            wait: false,
+        };
+        assert_eq!(EditorMenu::new("hx", Some(&other), installed).current, 3);
+    }
+
+    #[test]
+    fn settings_save_the_picked_editor_or_ask_for_a_command() {
         let mut app = App::new();
         app.editor_name = "hx".to_string();
-        assert_eq!(
-            app.setting_value(Setting::Editor),
-            "hx (from $VISUAL or $EDITOR)"
-        );
-        assert_eq!(
-            app.setting_value(Setting::EditorWait),
-            "yes (a terminal editor)"
-        );
-        assert!(edit_setting_row(&mut app, Setting::EditorWait).is_none());
-        assert!(
-            app.error
-                .as_ref()
-                .unwrap()
-                .contains("set an Editor command")
-        );
-
+        assert_eq!(app.setting_value(Setting::Editor), "hx (from your shell)");
         edit_setting_row(&mut app, Setting::Editor);
-        app.prompt.as_mut().unwrap().text = "zed".to_string();
-        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
-        assert!(app.prompt.as_ref().unwrap().error.is_some(), "no {{file}}");
-        app.prompt.as_mut().unwrap().text = "zed {file}:{line}".to_string();
+        let menu = app.editor_menu.as_mut().expect("the editor list");
+        menu.choices = vec![
+            EditorChoice::Shell,
+            EditorChoice::Known {
+                label: "Zed",
+                program: "zed",
+            },
+            EditorChoice::Custom,
+        ];
+        menu.selected = 0;
+        app.handle_key(key(KeyCode::Char('j')));
         let Some(Action::SetEditor(Some(editor))) = app.handle_key(key(KeyCode::Enter)) else {
-            panic!("expected the editor saved");
+            panic!("expected Zed saved");
         };
-        assert!(!editor.wait, "zed has its own window");
-
+        assert_eq!(editor, crate::editor_command::config_for("zed"));
         app.editor_config = Some(editor);
-        let Some(Action::SetEditor(Some(flipped))) =
-            edit_setting_row(&mut app, Setting::EditorWait)
-        else {
-            panic!("expected wait flipped");
-        };
-        assert!(flipped.wait);
+        assert_eq!(app.setting_value(Setting::Editor), "Zed");
 
         edit_setting_row(&mut app, Setting::Editor);
-        assert_eq!(app.prompt.as_ref().unwrap().text, "zed {file}:{line}");
-        app.prompt.as_mut().unwrap().text.clear();
+        app.editor_menu.as_mut().unwrap().selected = 0;
         let action = app.handle_key(key(KeyCode::Enter));
         assert!(
             matches!(action, Some(Action::SetEditor(None))),
             "{action:?}"
         );
-    }
 
-    #[test]
-    fn settings_set_the_open_diff_command_or_go_back_to_the_built_in_one() {
-        let mut app = App::new();
-        assert_eq!(
-            app.setting_value(Setting::OpenDiff),
-            "built-in (delta, else less)"
-        );
-        edit_setting_row(&mut app, Setting::OpenDiff);
-        assert_eq!(
-            app.prompt.as_ref().unwrap().text,
-            "",
-            "the built-in one is not shown to edit"
-        );
-        app.prompt.as_mut().unwrap().text = "gh pr diff {number} -R {repo}".to_string();
-        let action = app.handle_key(key(KeyCode::Enter));
-        assert!(
-            matches!(action, Some(Action::SetOpenDiff(Some(ref command))) if command == "gh pr diff {number} -R {repo}"),
-            "{action:?}"
-        );
-        edit_setting_row(&mut app, Setting::OpenDiff);
-        let action = app.handle_key(key(KeyCode::Enter));
-        assert!(
-            matches!(action, Some(Action::SetOpenDiff(None))),
-            "{action:?}"
-        );
+        edit_setting_row(&mut app, Setting::Editor);
+        let menu = app.editor_menu.as_mut().unwrap();
+        menu.selected = menu.choices.len() - 1;
+        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
+        let prompt = app.prompt.as_mut().expect("the custom command box");
+        assert_eq!(prompt.text, "", "a known editor is not a custom command");
+        prompt.text = "zed".to_string();
+        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
+        assert!(app.prompt.as_ref().unwrap().error.is_some(), "no {{file}}");
+        app.prompt.as_mut().unwrap().text = "myedit {file}".to_string();
+        let Some(Action::SetEditor(Some(custom))) = app.handle_key(key(KeyCode::Enter)) else {
+            panic!("expected the custom command saved");
+        };
+        assert!(custom.wait, "an unknown editor runs in the terminal");
     }
 
     #[test]

@@ -152,7 +152,7 @@ pub fn default_renderers() -> Vec<Renderer> {
     defaults().diff_renderers
 }
 
-pub fn default_open_diff() -> String {
+fn default_open_diff() -> String {
     defaults().open_diff
 }
 

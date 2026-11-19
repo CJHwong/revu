@@ -43,6 +43,52 @@ pub fn opens_a_window(command: &str) -> bool {
     line_argument(&program_name(command)) != LineArgument::Plus
 }
 
+/// The editors the settings list offers when they are on PATH: the name people know
+/// them by, and the program.
+pub const KNOWN_EDITORS: [(&str, &str); 18] = [
+    ("VS Code", "code"),
+    ("Cursor", "cursor"),
+    ("Windsurf", "windsurf"),
+    ("VSCodium", "codium"),
+    ("Zed", "zed"),
+    ("Sublime Text", "subl"),
+    ("IntelliJ IDEA", "idea"),
+    ("PyCharm", "pycharm"),
+    ("GoLand", "goland"),
+    ("WebStorm", "webstorm"),
+    ("RustRover", "rustrover"),
+    ("CLion", "clion"),
+    ("Neovim", "nvim"),
+    ("Vim", "vim"),
+    ("Helix", "hx"),
+    ("Emacs", "emacs"),
+    ("Nano", "nano"),
+    ("Micro", "micro"),
+];
+
+/// The editor key that runs `program` the way revu runs it from $VISUAL.
+pub fn config_for(program: &str) -> EditorConfig {
+    let argument = line_argument(program);
+    let command = match argument {
+        LineArgument::Plus => format!("{program} +{{line}} {{file}}"),
+        LineArgument::Goto => format!("{program} {{dir}} -g {{file}}:{{line}}"),
+        LineArgument::Colon => format!("{program} {{dir}} {{file}}:{{line}}"),
+        LineArgument::LineFlag => format!("{program} {{dir}} --line {{line}} {{file}}"),
+    };
+    EditorConfig {
+        command,
+        wait: argument == LineArgument::Plus,
+    }
+}
+
+/// The known editor a config key runs, when it is one of them as `config_for` writes it.
+pub fn known_label(editor: &EditorConfig) -> Option<&'static str> {
+    KNOWN_EDITORS
+        .iter()
+        .find(|(_, program)| config_for(program) == *editor)
+        .map(|(label, _)| *label)
+}
+
 /// The editor the shell would pick: $VISUAL, then $EDITOR, then vi.
 pub fn shell_editor() -> String {
     ["VISUAL", "EDITOR"]
@@ -134,6 +180,24 @@ mod tests {
             open("/Applications/PyCharm.app/Contents/MacOS/pycharm").shell,
             "/Applications/PyCharm.app/Contents/MacOS/pycharm '/w/repo' --line 12 '/w/repo/src/a b.rs'"
         );
+    }
+
+    #[test]
+    fn a_known_editor_saves_the_command_revu_would_run() {
+        let zed = config_for("zed");
+        assert_eq!(
+            (zed.command.as_str(), zed.wait),
+            ("zed {dir} {file}:{line}", false)
+        );
+        assert!(config_for("nvim").wait);
+        assert_eq!(known_label(&zed), Some("Zed"));
+        let custom = EditorConfig {
+            command: "zed {file}".to_string(),
+            wait: false,
+        };
+        assert_eq!(known_label(&custom), None);
+        let ran = editor_command(Some(&zed), "vim", Path::new("/w"), "a.rs", 4);
+        assert_eq!(ran.shell, "zed '/w' '/w/a.rs':4");
     }
 
     #[test]
