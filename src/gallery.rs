@@ -164,11 +164,7 @@ pub fn sends_token(url: &str) -> bool {
 /// worker thread.
 pub fn load(item: &Visual, picker: &Picker, fit: Size) -> Result<Shown, String> {
     let image = match item {
-        Visual::Image(url) => {
-            let bytes = fetch(url)?;
-            image::load_from_memory(&bytes)
-                .map_err(|error| format!("revu cannot show this image ({error})"))?
-        }
+        Visual::Image(url) => decode(&fetch(url)?, pixels(picker, fit))?,
         Visual::Diagram(source) => draw_diagram(source, pixels(picker, fit))?,
     };
     let image = scale_to(image, picker, fit);
@@ -211,29 +207,54 @@ fn pixels(picker: &Picker, fit: Size) -> (u32, u32) {
     )
 }
 
+/// Decodes a downloaded image. An SVG has no pixels of its own, so it is painted to
+/// fit `space`.
+fn decode(bytes: &[u8], space: (u32, u32)) -> Result<DynamicImage, String> {
+    match image::load_from_memory(bytes) {
+        Ok(image) => Ok(image),
+        Err(_) if looks_like_svg(bytes) => resvg::usvg::Tree::from_data(bytes, &svg_options())
+            .map_err(|error| error.to_string())
+            .and_then(|tree| paint(&tree, space))
+            .map_err(|error| format!("revu cannot show this image ({error})")),
+        Err(error) => Err(format!("revu cannot show this image ({error})")),
+    }
+}
+
+fn looks_like_svg(bytes: &[u8]) -> bool {
+    let start = String::from_utf8_lossy(&bytes[..bytes.len().min(1024)]).to_ascii_lowercase();
+    start.contains("<svg")
+}
+
 /// Lays out a mermaid diagram and paints it on white, as large as fits `space` pixels.
 pub fn draw_diagram(source: &str, space: (u32, u32)) -> Result<DynamicImage, String> {
     let svg = mermaid_rs_renderer::render(source)
         .map_err(|error| format!("revu cannot draw this diagram ({error})"))?;
-    let tree = resvg::usvg::Tree::from_str(&svg, &svg_options())
-        .map_err(|error| format!("revu cannot draw this diagram ({error})"))?;
+    resvg::usvg::Tree::from_str(&svg, &svg_options())
+        .map_err(|error| error.to_string())
+        .and_then(|tree| paint(&tree, space))
+        .map_err(|error| format!("revu cannot draw this diagram ({error})"))
+}
+
+/// Paints an SVG on white, as large as fits `space` pixels.
+fn paint(tree: &resvg::usvg::Tree, space: (u32, u32)) -> Result<DynamicImage, String> {
     let size = tree.size();
     let scale = (space.0 as f32 / size.width())
         .min(space.1 as f32 / size.height())
         .max(0.01);
     let width = (size.width() * scale).ceil().max(1.0) as u32;
     let height = (size.height() * scale).ceil().max(1.0) as u32;
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
-        .ok_or("revu cannot draw this diagram (it has no size)")?;
+    let mut pixmap =
+        resvg::tiny_skia::Pixmap::new(width, height).ok_or("it has no size".to_string())?;
     pixmap.fill(resvg::tiny_skia::Color::WHITE);
     let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
-    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    resvg::render(tree, transform, &mut pixmap.as_mut());
     let image = image::RgbaImage::from_raw(width, height, pixmap.take())
-        .ok_or("revu cannot draw this diagram (wrong pixel count)")?;
+        .ok_or("wrong pixel count".to_string())?;
     Ok(DynamicImage::ImageRgba8(image))
 }
 
-/// The system's fonts, read once, for the diagram's text.
+/// The system's fonts, read once, for the SVG's text. A link to an image file is dropped,
+/// so an SVG from the web cannot pull in a file from this disk; embedded data stays.
 fn svg_options() -> resvg::usvg::Options<'static> {
     static FONTS: OnceLock<std::sync::Arc<resvg::usvg::fontdb::Database>> = OnceLock::new();
     let fonts = FONTS.get_or_init(|| {
@@ -243,6 +264,10 @@ fn svg_options() -> resvg::usvg::Options<'static> {
     });
     resvg::usvg::Options {
         fontdb: fonts.clone(),
+        image_href_resolver: resvg::usvg::ImageHrefResolver {
+            resolve_string: Box::new(|_, _| None),
+            ..resvg::usvg::ImageHrefResolver::default()
+        },
         ..resvg::usvg::Options::default()
     }
 }
@@ -353,6 +378,25 @@ mod tests {
             (image.width, image.height),
             (158, 45),
             "inside the border, above the key line"
+        );
+    }
+
+    #[test]
+    fn an_svg_image_is_painted_and_other_bytes_are_refused() {
+        let svg = br#"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="red"/></svg>"#;
+        let drawn = decode(svg, (200, 200)).unwrap();
+        assert_eq!((drawn.width(), drawn.height()), (200, 100));
+        let error = decode(b"not an image", (200, 200)).unwrap_err();
+        assert!(error.starts_with("revu cannot show this image"), "{error}");
+    }
+
+    #[test]
+    fn an_svg_cannot_pull_in_a_local_file() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10"><image width="10" height="10" xlink:href="/etc/hosts"/></svg>"#;
+        let tree = resvg::usvg::Tree::from_data(svg, &svg_options()).unwrap();
+        assert!(
+            !tree.root().has_children(),
+            "the link to a local file is dropped"
         );
     }
 
