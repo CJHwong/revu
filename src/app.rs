@@ -52,6 +52,8 @@ pub enum Action {
         changed: Vec<String>,
     },
     RunDiff(PrRef),
+    /// Fetch an image for the gallery.
+    LoadImage(String),
     /// The words of the PR's changed lines, for the find prompt to complete.
     FindWords {
         pr: PrRef,
@@ -358,6 +360,8 @@ fn step(key: KeyCode) -> Option<i16> {
 pub struct OverviewLayout {
     pub width: usize,
     pub rows: Vec<TextRow>,
+    /// Every image the Overview shows, in order, for the gallery.
+    pub images: Vec<String>,
 }
 
 pub struct DetailView {
@@ -2699,6 +2703,10 @@ pub struct App {
     pub editor_menu: Option<EditorMenu>,
     /// The view toggles a newly opened PR starts with; they follow the open PR.
     pub prefs: ViewPrefs,
+    /// The image gallery, while it is open.
+    pub gallery: Option<crate::gallery::Gallery>,
+    /// How this terminal draws images, found when the first image loads.
+    pub picker: Option<ratatui_image::picker::Picker>,
 }
 
 /// Ctrl+L everywhere; Cmd+L only where the terminal reports the Super modifier.
@@ -2754,6 +2762,8 @@ impl App {
             editor_config: None,
             editor_menu: None,
             prefs: ViewPrefs::default(),
+            gallery: None,
+            picker: None,
         }
     }
 
@@ -3292,6 +3302,16 @@ impl App {
         };
         let target = hit(&view.clicks)?;
         let result = view.click(target, row);
+        let on_image = view.tab == Tab::Overview
+            && matches!(target.click, Click::Page { .. })
+            && view
+                .overview
+                .as_ref()
+                .and_then(|layout| layout.rows.get(view.cursor))
+                .is_some_and(|row| row.image.is_some());
+        if on_image {
+            return self.open_gallery();
+        }
         self.report(result)
     }
 
@@ -3312,6 +3332,9 @@ impl App {
         }
         if self.composer.is_some() {
             return self.composer_key(key);
+        }
+        if self.gallery.is_some() {
+            return self.gallery_key(key.code);
         }
         if self.label_menu.is_some() {
             return self.label_menu_key(key.code);
@@ -4200,6 +4223,19 @@ impl App {
         if view.line_mode.is_some() {
             return self.line_mode_key(key);
         }
+        let on_image = view
+            .overview
+            .as_ref()
+            .and_then(|layout| layout.rows.get(view.cursor))
+            .is_some_and(|row| row.image.is_some());
+        let gallery_key = match key {
+            KeyCode::Char('i') => true,
+            KeyCode::Enter => on_image,
+            _ => false,
+        };
+        if view.tab == Tab::Overview && gallery_key {
+            return self.open_gallery();
+        }
         match key {
             KeyCode::Char('S') if view.tab == Tab::Files => {
                 let result = view.start_line_mode();
@@ -4331,6 +4367,68 @@ impl App {
             _ => {}
         }
         None
+    }
+
+    /// Opens the gallery at the image on the cursor row, else at the first image on
+    /// screen, else at the PR's first image.
+    fn open_gallery(&mut self) -> Option<Action> {
+        let Screen::Detail(view) = &self.screen else {
+            return None;
+        };
+        let layout = view.overview.as_ref()?;
+        let rows = &layout.rows;
+        let start = rows
+            .get(view.cursor)
+            .and_then(|row| row.image.as_deref())
+            .or_else(|| {
+                rows.iter()
+                    .skip(view.scroll)
+                    .take(view.page)
+                    .find_map(|row| row.image.as_deref())
+            });
+        let gallery = crate::gallery::Gallery::open(layout.images.clone(), start);
+        if gallery.is_none() {
+            self.error = Some("this pull request shows no image".to_string());
+        }
+        self.gallery = gallery;
+        self.gallery_load()
+    }
+
+    fn gallery_load(&mut self) -> Option<Action> {
+        self.gallery.as_mut()?.start_load().map(Action::LoadImage)
+    }
+
+    fn gallery_key(&mut self, key: KeyCode) -> Option<Action> {
+        let gallery = self.gallery.as_mut()?;
+        match key {
+            KeyCode::Esc | KeyCode::Char('q') => self.gallery = None,
+            KeyCode::Char('h') | KeyCode::Left => {
+                gallery.step(false);
+                return self.gallery_load();
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                gallery.step(true);
+                return self.gallery_load();
+            }
+            KeyCode::Char('o') => return Some(Action::OpenBrowser(gallery.current().to_string())),
+            _ => {}
+        }
+        None
+    }
+
+    /// A fetched image arrived. It is dropped when its gallery has closed.
+    pub fn set_image(&mut self, url: String, result: Result<crate::gallery::Shown, String>) {
+        let Some(gallery) = self.gallery.as_mut() else {
+            return;
+        };
+        if !gallery.loaded.contains_key(&url) {
+            return;
+        }
+        let loaded = match result {
+            Ok(shown) => crate::gallery::Loaded::Ready(shown),
+            Err(error) => crate::gallery::Loaded::Failed(error),
+        };
+        gallery.loaded.insert(url, loaded);
     }
 
     /// Starts the PR over on the same tab. The file list and the clone are looked up
@@ -4765,7 +4863,11 @@ mod tests {
             rows[anchor] = TextRow::anchor(ratatui::text::Line::from("card"));
         }
         view.tab = Tab::Overview;
-        view.overview = Some(OverviewLayout { width: 60, rows });
+        view.overview = Some(OverviewLayout {
+            width: 60,
+            rows,
+            images: Vec::new(),
+        });
         view.page = 30;
         let mut cursors = Vec::new();
         for _ in 0..4 {
@@ -4797,7 +4899,11 @@ mod tests {
             rows[*anchor] = TextRow::anchor(ratatui::text::Line::from("card"));
         }
         view.tab = Tab::Overview;
-        view.overview = Some(OverviewLayout { width: 60, rows });
+        view.overview = Some(OverviewLayout {
+            width: 60,
+            rows,
+            images: Vec::new(),
+        });
         view.page = 30;
     }
 
@@ -4892,6 +4998,7 @@ mod tests {
             rows: (0..200)
                 .map(|_| TextRow::plain(ratatui::text::Line::from("text")))
                 .collect(),
+            images: Vec::new(),
         });
         detail.page = 30;
         app.handle_key(key(KeyCode::Char('j')));
@@ -4971,6 +5078,7 @@ mod tests {
         view_mut(&mut app).overview = Some(OverviewLayout {
             width: 60,
             rows: Vec::new(),
+            images: Vec::new(),
         });
         app.forget_colors();
         assert!(
@@ -6854,6 +6962,74 @@ mod tests {
         app.handle_key(key(KeyCode::Char('V')));
         assert_eq!(view(&app).visible_files(), [1]);
         assert_eq!(view(&app).selected_file(), Some(1));
+    }
+
+    #[test]
+    fn the_gallery_opens_at_the_image_row_and_pages_through_the_pr() {
+        let (mut app, _) = files_tab(Vec::new());
+        let view = view_mut(&mut app);
+        view.tab = Tab::Overview;
+        let mut rows: Vec<TextRow> = (0..3)
+            .map(|_| TextRow::plain(ratatui::text::Line::from("text")))
+            .collect();
+        rows[1].image = Some("https://a/2.png".to_string());
+        view.overview = Some(OverviewLayout {
+            width: 60,
+            rows,
+            images: vec!["https://a/1.png".to_string(), "https://a/2.png".to_string()],
+        });
+        view.cursor = 1;
+
+        let load = app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(load, Some(Action::LoadImage(url)) if url == "https://a/2.png"));
+        assert_eq!(app.gallery.as_ref().unwrap().at, 1);
+        assert!(
+            app.handle_key(key(KeyCode::Char('l'))).is_none(),
+            "no image after the last"
+        );
+        let back = app.handle_key(key(KeyCode::Char('h')));
+        assert!(matches!(back, Some(Action::LoadImage(url)) if url == "https://a/1.png"));
+        let open = app.handle_key(key(KeyCode::Char('o')));
+        assert!(matches!(open, Some(Action::OpenBrowser(url)) if url == "https://a/1.png"));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.gallery.is_none());
+        assert!(
+            matches!(app.screen, Screen::Detail(_)),
+            "esc leaves the PR open"
+        );
+
+        let view = view_mut(&mut app);
+        view.cursor = 0;
+        view.scroll = 0;
+        view.page = 3;
+        let on_screen = app.handle_key(key(KeyCode::Char('i')));
+        assert!(
+            matches!(on_screen, Some(Action::LoadImage(url)) if url == "https://a/2.png"),
+            "i off an image row opens at the first image on screen"
+        );
+        app.handle_key(key(KeyCode::Esc));
+
+        let view = view_mut(&mut app);
+        view.scroll = 2;
+        view.page = 1;
+        let first = app.handle_key(key(KeyCode::Char('i')));
+        assert!(
+            matches!(first, Some(Action::LoadImage(url)) if url == "https://a/1.png"),
+            "with no image on screen, i opens at the PR's first image"
+        );
+        app.handle_key(key(KeyCode::Esc));
+
+        let view = view_mut(&mut app);
+        view.scroll = 0;
+        view.clicks = vec![ClickTarget {
+            area: ratatui::layout::Rect::new(0, 0, 60, 3),
+            click: Click::Page { first: 0 },
+        }];
+        let clicked = app.handle_click(5, 1);
+        assert!(
+            matches!(clicked, Some(Action::LoadImage(url)) if url == "https://a/2.png"),
+            "a click on an image row opens the gallery at it"
+        );
     }
 
     fn view_mut(app: &mut App) -> &mut DetailView {

@@ -48,6 +48,13 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 | `]` / `[` | Next or previous card or folded block |
 | `f` / `F` / `n` | Filter the comments (All, Unresolved, Mine), flip oldest or newest first, hide bots. Mine shows only your own words, with the threads you replied in open. |
 | `e` | Labels: type to filter, `↑`/`↓` move, `Space` ticks, `Enter` applies the changes to GitHub. |
+| `i` | Images: every image in the pull request, the description first, then the comments in the list's order. A click on an `[image: ...]` line, or `Enter` with the cursor on it, opens the gallery at that image. Otherwise `i` starts at the first image on screen. See [Images](#images). |
+
+## Images
+
+The gallery shows one image at a time over the whole screen. `h` / `l` (or `←` / `→`) go to the previous or next image, `o` opens the current one in the browser, and `Esc` or `q` closes it.
+
+Ghostty and kitty show the real image through the kitty graphics protocol, and iTerm2 and WezTerm through iTerm2's. revu tells them apart by `TERM` and `TERM_PROGRAM`. Every other terminal, and any terminal inside tmux, shows the image in colored half blocks. revu downloads images with `curl`, and sends your `gh` token only to GitHub's own hosts, so attachments on private repositories load. It shows PNG, JPEG, GIF and WebP; for an SVG, `o` opens it in the browser.
 
 ## Files changed
 
@@ -125,7 +132,7 @@ Copying uses OSC 52 and `pbcopy`. Inside tmux, OSC 52 needs `set -g set-clipboar
 
 ## Mouse
 
-A click works like the keys on what it hits: it opens a pull request in the inbox, switches a tab, selects a file, commit or check, folds a folder, and opens or closes a card, thread or folded block on the Overview, or a review thread in select lines.
+A click works like the keys on what it hits: it opens a pull request in the inbox, switches a tab, selects a file, commit or check, folds a folder, opens or closes a card, thread or folded block on the Overview, opens the gallery at an image, or a review thread in select lines.
 
 The wheel scrolls the pane under the pointer: the diff or the list beside it. Over the Files changed list, it scrolls the list and leaves the selected file and its diff alone; `j` or `k` brings the list back to the selection. On the Overview, the wheel moves like `j` and `k`.
 

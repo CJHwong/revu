@@ -6,7 +6,7 @@ Your GitHub pull requests, reviewed in the terminal. revu collects the pull requ
 
 ## Install
 
-revu runs on macOS and Linux. It needs the GitHub CLI (`gh`), logged in, and git.
+revu runs on macOS and Linux. It needs the GitHub CLI (`gh`), logged in, git, and `curl` to show images.
 
 ```bash
 curl -fsSL https://cjhwong.github.io/revu/install.sh | sh

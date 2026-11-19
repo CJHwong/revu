@@ -19,6 +19,8 @@ pub enum Block {
     Line {
         spans: Spans,
         indent: usize,
+        /// The first image on the line, for the gallery to open at.
+        image: Option<String>,
     },
     Blank,
     Rule,
@@ -50,6 +52,8 @@ pub struct TextRow {
     pub anchor: bool,
     /// What Enter or a click on this row does instead of folding.
     pub action: Option<RowAction>,
+    /// The image on this row's line, which Enter shows in the gallery.
+    pub image: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +71,7 @@ impl TextRow {
             fold: None,
             anchor: false,
             action: None,
+            image: None,
         }
     }
 
@@ -76,6 +81,7 @@ impl TextRow {
             fold: None,
             anchor: true,
             action: None,
+            image: None,
         }
     }
 
@@ -139,13 +145,22 @@ pub fn numbered_fold(scope: FoldId, place: usize) -> FoldId {
 }
 
 pub fn parse(markdown: &str, theme: &Theme) -> Vec<Block> {
+    group_sections(build(markdown, theme).finish())
+}
+
+/// The images the text shows as `[image: ...]`, in order. The gallery pages through them.
+pub fn images(markdown: &str, theme: &Theme) -> Vec<String> {
+    build(markdown, theme).images
+}
+
+fn build<'t>(markdown: &str, theme: &'t Theme) -> Builder<'t> {
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let mut builder = Builder::new(theme);
     for event in Parser::new_ext(markdown, options) {
         builder.event(event);
     }
-    group_sections(builder.finish())
+    builder
 }
 
 /// Moves the blocks after each heading into its section. A deeper heading nests inside;
@@ -212,9 +227,14 @@ fn layout_block(
     rows: &mut Vec<TextRow>,
 ) {
     match block {
-        Block::Line { spans, indent } => {
-            rows.extend(wrap(spans, width, *indent).into_iter().map(TextRow::plain))
-        }
+        Block::Line {
+            spans,
+            indent,
+            image,
+        } => rows.extend(wrap(spans, width, *indent).into_iter().map(|line| TextRow {
+            image: image.clone(),
+            ..TextRow::plain(line)
+        })),
         Block::Blank => rows.push(TextRow::blank()),
         Block::Rule => rows.push(TextRow::plain(Line::styled(
             "─".repeat(width),
@@ -270,6 +290,7 @@ fn layout_section(
         fold: Some(id),
         anchor: true,
         action: None,
+        image: None,
     });
     if open {
         rows.extend(body_rows);
@@ -296,6 +317,7 @@ fn layout_details(
         fold: Some(id),
         anchor: true,
         action: None,
+        image: None,
     });
     if open {
         let rail = Span::styled("│ ", Style::new().fg(theme.fold));
@@ -575,6 +597,10 @@ struct Builder<'t> {
     table: Option<TableState>,
     cell: Option<Spans>,
     summary: Option<Spans>,
+    /// Every image shown so far, in order.
+    images: Vec<String>,
+    /// The first image on the line being built.
+    line_image: Option<String>,
 }
 
 impl<'t> Builder<'t> {
@@ -593,6 +619,8 @@ impl<'t> Builder<'t> {
             table: None,
             cell: None,
             summary: None,
+            images: Vec::new(),
+            line_image: None,
         }
     }
 
@@ -689,7 +717,8 @@ impl<'t> Builder<'t> {
                     .fg(self.theme.accent)
                     .add_modifier(Modifier::UNDERLINED),
             ),
-            Tag::Image { .. } => {
+            Tag::Image { dest_url, .. } => {
+                self.add_image(dest_url.to_string());
                 self.styles.push(Style::new().fg(self.theme.muted));
                 self.push("[image: ".to_string(), self.style());
             }
@@ -836,6 +865,15 @@ impl<'t> Builder<'t> {
         }
     }
 
+    /// Notes an image as its marker is drawn. In a summary or a table cell it joins the
+    /// gallery, but no row opens at it.
+    fn add_image(&mut self, url: String) {
+        if self.summary.is_none() && self.cell.is_none() && self.line_image.is_none() {
+            self.line_image = Some(url.clone());
+        }
+        self.images.push(url);
+    }
+
     fn flush(&mut self) {
         if !self.line.is_empty() {
             self.emit();
@@ -858,7 +896,12 @@ impl<'t> Builder<'t> {
         }
         let indent = spans.iter().map(|span| span.content.width()).sum();
         spans.append(&mut self.line);
-        self.add(Block::Line { spans, indent });
+        let image = self.line_image.take();
+        self.add(Block::Line {
+            spans,
+            indent,
+            image,
+        });
     }
 
     /// Turns the heading line just emitted into an empty section; `group_sections` fills
@@ -961,6 +1004,9 @@ impl<'t> Builder<'t> {
                 // An image without alt text is an icon; it carries no words to show.
                 let alt = attribute(attributes, "alt").unwrap_or_default();
                 if !alt.trim().is_empty() {
+                    if let Some(source) = attribute(attributes, "src") {
+                        self.add_image(source);
+                    }
                     self.push(format!("[image: {alt}]"), Style::new().fg(self.theme.muted));
                 }
             }
@@ -1201,6 +1247,32 @@ mod tests {
         ));
         assert_eq!(rows[..2], ["☑ Keep it small", "☐ Add docs"]);
         assert_eq!(rows[3..5], ["1. one", "2. two"]);
+    }
+
+    #[test]
+    fn images_lists_what_the_text_shows_in_order() {
+        let theme = theme::by_name("dracula").unwrap();
+        let markdown = "![one](https://a/1.png)\n\n<img src=\"https://a/icon.svg\">\n\n<details><summary>more</summary>\n\n<img alt=\"two\" src=\"https://a/2.png\">\n\n</details>";
+        assert_eq!(
+            images(markdown, &theme),
+            ["https://a/1.png", "https://a/2.png"],
+            "an image with no alt is an icon the text skips, so the gallery skips it too"
+        );
+    }
+
+    #[test]
+    fn every_row_of_a_wrapped_image_line_carries_its_url() {
+        let rows = render(
+            "see ![a long screenshot name](https://a/1.png) here",
+            20,
+            &[],
+        );
+        assert!(rows.len() > 1);
+        assert!(
+            rows.iter()
+                .all(|row| row.image.as_deref() == Some("https://a/1.png"))
+        );
+        assert_eq!(render("plain", 20, &[])[0].image, None);
     }
 
     /// GitHub shows a single newline in a description or comment as a line break.
