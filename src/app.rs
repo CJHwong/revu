@@ -4826,6 +4826,9 @@ mod tests {
             review: ReviewState::Awaiting,
             checks: None,
             comments: 0,
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
         }
     }
 

@@ -98,6 +98,9 @@ pub struct PrSummary {
     pub review: ReviewState,
     pub checks: Option<CheckSummary>,
     pub comments: u64,
+    pub additions: u64,
+    pub deletions: u64,
+    pub changed_files: u64,
 }
 
 impl PrSummary {
@@ -596,6 +599,12 @@ struct RawRow {
     author: Option<Login>,
     repository: RepoRef,
     commits: Nodes<CommitNode>,
+    #[serde(default)]
+    additions: u64,
+    #[serde(default)]
+    deletions: u64,
+    #[serde(default)]
+    changed_files: u64,
 }
 
 #[derive(Deserialize)]
@@ -618,9 +627,6 @@ struct RawDetail {
     commit_count: RawCount,
     body: String,
     created_at: DateTime<Utc>,
-    additions: u64,
-    deletions: u64,
-    changed_files: u64,
     base_ref_name: String,
     head_ref_name: String,
     labels: Nodes<RawLabel>,
@@ -976,14 +982,14 @@ pub fn parse_detail(pull_request: &Value) -> Result<PrDetail> {
         base_oid: raw.base_ref_oid,
         head_oid: raw.head_ref_oid,
         commit_count: raw.commit_count.total_count,
+        additions: raw.row.additions,
+        deletions: raw.row.deletions,
+        changed_files: raw.row.changed_files,
         summary: summary_from(raw.row),
         body: raw.body,
         created_at: raw.created_at,
         base: raw.base_ref_name,
         head: raw.head_ref_name,
-        additions: raw.additions,
-        deletions: raw.deletions,
-        changed_files: raw.changed_files,
         labels: labels
             .map(|label| Label {
                 name: label.name,
@@ -1100,6 +1106,9 @@ fn summary_from(raw: RawRow) -> PrSummary {
         review: review_state(raw.review_decision.as_deref()),
         checks,
         comments: raw.total_comments_count.unwrap_or(0),
+        additions: raw.additions,
+        deletions: raw.deletions,
+        changed_files: raw.changed_files,
     }
 }
 
@@ -1668,6 +1677,7 @@ pub mod tests {
             "author": { "login": "octo" },
             "repository": { "nameWithOwner": "acme/app" },
             "commits": commits,
+            "additions": 12, "deletions": 3, "changedFiles": 2,
         })
     }
 
@@ -1698,6 +1708,7 @@ pub mod tests {
         assert_eq!(pr.number, 7);
         assert_eq!(pr.review, ReviewState::Approved);
         assert_eq!(pr.comments, 104);
+        assert_eq!((pr.additions, pr.deletions, pr.changed_files), (12, 3, 2));
         // 3 passing check runs plus 1 passing status context, out of 5.
         assert_eq!(
             pr.checks,
