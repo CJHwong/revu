@@ -46,8 +46,10 @@ fn record_rate_limit(
 const PAGE_SIZE: u32 = 100;
 
 const ROW_FIELDS: &str = "number title url isDraft updatedAt reviewDecision totalCommentsCount \
-    additions deletions changedFiles headRefOid viewerDidAuthor mergeable \
-    viewerLatestReview { state submittedAt } viewerLatestReviewRequest { requestedReviewer { __typename } } author { login } repository { nameWithOwner }";
+    additions deletions changedFiles headRefOid viewerDidAuthor mergeable mergeStateStatus \
+    viewerLatestReview { state commit { oid } } \
+    latestOpinionatedReviews(first: 20) { nodes { author { login } state viewerDidAuthor commit { oid } } } \
+    viewerLatestReviewRequest { requestedReviewer { __typename } } author { login } repository { nameWithOwner }";
 
 const ROLLUP_COUNTS: &str = "totalCount \
     checkRunCountsByState { state count } \
@@ -71,7 +73,7 @@ pub fn group_document() -> String {
     format!(
         "query($q: String!) {{ search(query: $q, type: ISSUE, first: {PAGE_SIZE}) {{ issueCount nodes {{ \
          ... on PullRequest {{ {ROW_FIELDS} \
-         commits(last: 1) {{ nodes {{ commit {{ committedDate statusCheckRollup {{ state contexts(first: 0) {{ {ROLLUP_COUNTS} }} }} }} }} }} }} }} }} }}"
+         commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 0) {{ {ROLLUP_COUNTS} }} }} }} }} }} }} }} }} }}"
     )
 }
 
@@ -83,15 +85,14 @@ pub fn detail_document() -> String {
         "query({PR_VARIABLES}) {{ \
          repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ \
          {ROW_FIELDS} id baseRefOid body createdAt baseRefName headRefName \
-         commits(last: 1) {{ nodes {{ commit {{ committedDate statusCheckRollup {{ state contexts(first: 0) {{ {ROLLUP_COUNTS} }} }} }} }} }} \
+         commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 0) {{ {ROLLUP_COUNTS} }} }} }} }} }} \
          commitCount: commits {{ totalCount }} \
          labels(first: 20) {{ nodes {{ name color }} }} \
          assignees(first: 10) {{ nodes {{ login }} }} \
          reviewRequests(first: 20) {{ nodes {{ asCodeOwner requestedReviewer {{ \
            ... on User {{ login }} ... on Bot {{ login }} ... on Mannequin {{ login }} ... on Team {{ name }} }} }} }} \
-         latestOpinionatedReviews(first: 20) {{ nodes {{ author {{ login }} state }} }} \
          latestReviews(first: 30) {{ nodes {{ author {{ login }} state onBehalfOf(first: 5) {{ nodes {{ name }} }} }} }} \
-         mergeStateStatus milestone {{ title }} state mergedAt closedAt mergedBy {{ login }} \
+         milestone {{ title }} state mergedAt closedAt mergedBy {{ login }} \
          closingIssuesReferences(first: 10) {{ nodes {{ number title url }} }} \
          viewerCanMergeAsAdmin viewerCanEnableAutoMerge viewerCanDisableAutoMerge \
          autoMergeRequest {{ mergeMethod }} \

@@ -2820,6 +2820,9 @@ pub struct App {
     pub picker: Option<ratatui_image::picker::Picker>,
     /// Each PR's head and comment count when you last left it.
     pub seen: crate::seen::Seen,
+    /// PRs you wrote to, whose next inbox row counts as seen: you may leave before the
+    /// reload that shows your own comment.
+    wrote: HashSet<PrRef>,
     /// The inbox shows only PRs whose repo or author contains this, ignoring case.
     pub inbox_filter: String,
     /// The inbox is wide enough for the preview pane, as of the last draw.
@@ -2833,6 +2836,16 @@ const PREVIEW_DELAY: std::time::Duration = std::time::Duration::from_millis(300)
 
 /// A preview's fetched detail, or why the fetch failed.
 pub type Preview = Result<Box<PrDetail>, String>;
+
+/// A preview matches its inbox row. The head, the checks and the merge state can change
+/// without moving `updated_at`: a push to the base branch, or a check that finishes.
+fn current(detail: &PrDetail, row: &PrSummary) -> bool {
+    let preview = &detail.summary;
+    preview.updated_at >= row.updated_at
+        && preview.head_oid == row.head_oid
+        && preview.checks == row.checks
+        && preview.merge_state == row.merge_state
+}
 
 /// The preview pane's details, one fetch per PR.
 #[derive(Default)]
@@ -2857,7 +2870,7 @@ impl Previews {
         }
         match self.details.get(&reference) {
             None => true,
-            Some(Ok(detail)) => detail.summary.updated_at < row.updated_at,
+            Some(Ok(detail)) => !current(detail, row),
             Some(Err(_)) => false,
         }
     }
@@ -2865,9 +2878,7 @@ impl Previews {
     /// The PR's preview when it is as new as the inbox row.
     fn fresh(&self, row: &PrSummary) -> Option<PrDetail> {
         match self.details.get(&row.reference()) {
-            Some(Ok(detail)) if detail.summary.updated_at >= row.updated_at => {
-                Some((**detail).clone())
-            }
+            Some(Ok(detail)) if current(detail, row) => Some((**detail).clone()),
             _ => None,
         }
     }
@@ -2935,6 +2946,7 @@ impl App {
             gallery: None,
             picker: None,
             seen: crate::seen::Seen::default(),
+            wrote: HashSet::new(),
             inbox_filter: String::new(),
             preview_shown: false,
             previews: Previews::default(),
@@ -3307,6 +3319,11 @@ impl App {
             Ok(mut group) => {
                 // Keep the fold state the user chose.
                 group.collapsed = self.groups[index].collapsed;
+                for row in &group.prs {
+                    if self.wrote.remove(&row.reference()) {
+                        self.seen.record(row);
+                    }
+                }
                 self.groups[index] = group;
             }
             Err(error) => {
@@ -4467,6 +4484,9 @@ impl App {
             self.reload_after_write = Some(pr.clone());
         }
         if result.is_ok() {
+            self.wrote.insert(pr.clone());
+        }
+        if result.is_ok() {
             self.saved = note.map(|note| note.done.to_string());
         }
         let Some(composer) = self.composer.as_mut().filter(|composer| &composer.pr == pr) else {
@@ -5025,6 +5045,7 @@ mod tests {
             head_oid: String::new(),
             turn: None,
             conflicts: false,
+            merge_state: String::new(),
         }
     }
 
@@ -5136,6 +5157,37 @@ mod tests {
             !app.take_preloaded(&reference),
             "a stale preview is not used"
         );
+    }
+
+    #[test]
+    fn a_preview_is_stale_when_the_merge_state_head_or_checks_move() {
+        let mut detail = crate::model::tests::sample_detail();
+        detail.summary.merge_state = "CLEAN".to_string();
+        let row = detail.summary.clone();
+        assert!(row.checks.is_some(), "a fixture with checks");
+        let mut previews = Previews::default();
+        previews
+            .details
+            .insert(row.reference(), Ok(Box::new(detail)));
+        assert!(previews.fresh(&row).is_some());
+        let changes = [
+            PrSummary {
+                merge_state: "BEHIND".to_string(),
+                ..row.clone()
+            },
+            PrSummary {
+                head_oid: "pushed".to_string(),
+                ..row.clone()
+            },
+            PrSummary {
+                checks: None,
+                ..row.clone()
+            },
+        ];
+        for changed in changes {
+            assert!(previews.fresh(&changed).is_none(), "{changed:?}");
+            assert!(previews.needs_fetch(&changed));
+        }
     }
 
     #[test]
@@ -5274,6 +5326,48 @@ mod tests {
             ..row.clone()
         };
         assert!(app.seen.is_new(&pushed));
+    }
+
+    #[test]
+    fn your_comment_is_not_news_when_you_leave_before_the_reload() {
+        let detail = crate::model::tests::sample_detail();
+        let mut app = app_with(vec![group("A", &[detail.summary.number], false)]);
+        let reference = detail.summary.reference();
+        app.groups[0].prs[0] = detail.summary.clone();
+        app.list_state.select(Some(1));
+        app.handle_key(key(KeyCode::Enter));
+        app.set_detail(&reference, Ok(detail.clone()));
+        // You comment, then leave before the PR loads again.
+        app.set_written(&reference, Ok(()));
+        app.handle_key(key(KeyCode::Char('h')));
+
+        let configs = [GroupConfig {
+            title: "A".to_string(),
+            query: String::new(),
+            collapsed: false,
+        }];
+        let commented = PrSummary {
+            comments: detail.summary.comments + 1,
+            ..detail.summary.clone()
+        };
+        let fetched = |app: &mut App, row: &PrSummary| {
+            let generation = app.start_inbox(&configs);
+            let mut fresh = group("A", &[row.number], false);
+            fresh.prs[0] = row.clone();
+            app.set_group(generation, 0, Ok(fresh), Utc::now());
+        };
+        fetched(&mut app, &commented);
+        assert!(!app.seen.is_new(&app.groups[0].prs[0]), "your own comment");
+
+        let replied = PrSummary {
+            comments: commented.comments + 1,
+            ..commented.clone()
+        };
+        fetched(&mut app, &replied);
+        assert!(
+            app.seen.is_new(&app.groups[0].prs[0]),
+            "a reply after that is news"
+        );
     }
 
     #[test]

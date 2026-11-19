@@ -112,6 +112,7 @@ mod tests {
             head_oid: head.into(),
             turn: None,
             conflicts: false,
+            merge_state: String::new(),
         }
     }
 
