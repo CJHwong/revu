@@ -380,6 +380,8 @@ pub struct DetailView {
     /// The latest load of the detail and activity. A result from an earlier load, which
     /// can finish after a later one, is dropped.
     pub load: u64,
+    /// The detail came from the inbox preview, so the first load skips fetching it.
+    preloaded: bool,
     /// The inbox row the PR was opened from, which draws the header until the detail
     /// arrives. None for a PR opened by link.
     pub summary: Option<PrSummary>,
@@ -509,6 +511,7 @@ impl DetailView {
         Self {
             pr,
             load: 0,
+            preloaded: false,
             summary: None,
             detail: None,
             activity: None,
@@ -2853,6 +2856,16 @@ impl Previews {
         }
     }
 
+    /// The PR's preview when it is as new as the inbox row.
+    fn fresh(&self, row: &PrSummary) -> Option<PrDetail> {
+        match self.details.get(&row.reference()) {
+            Some(Ok(detail)) if detail.summary.updated_at >= row.updated_at => {
+                Some((**detail).clone())
+            }
+            _ => None,
+        }
+    }
+
     /// A refresh retries the PRs whose preview failed.
     pub fn forget_failures(&mut self) {
         self.details.retain(|_, result| result.is_ok());
@@ -4491,9 +4504,21 @@ impl App {
         if let Some(summary) = &summary {
             self.seen.record(summary);
         }
+        let preview = summary.as_ref().and_then(|row| self.previews.fresh(row));
+        view.preloaded = preview.is_some();
         view.summary = summary;
         self.screen = Screen::Detail(Box::new(view));
+        if let Some(detail) = preview {
+            self.set_detail(&pr, Ok(detail));
+        }
         Action::FetchDetail(pr)
+    }
+
+    /// Whether the open PR's detail came from the preview, so its first load fetches
+    /// only the activity. True once per open.
+    pub fn take_preloaded(&mut self, pr: &PrRef) -> bool {
+        self.view_for(pr)
+            .is_some_and(|view| std::mem::take(&mut view.preloaded))
     }
 
     /// Leaving a PR marks it seen as it is now, your own comments included, and puts
@@ -5073,6 +5098,38 @@ mod tests {
         assert!(matches!(app.screen, Screen::Detail(_)));
         app.handle_key(key(KeyCode::Char('h')));
         assert!(matches!(app.screen, Screen::Inbox));
+    }
+
+    #[test]
+    fn opening_a_previewed_pr_uses_the_preview_as_its_detail() {
+        let detail = crate::model::tests::sample_detail();
+        let reference = detail.summary.reference();
+        let mut app = app_with(vec![group("A", &[detail.summary.number], false)]);
+        app.groups[0].prs[0] = detail.summary.clone();
+        app.set_preview(reference.clone(), Ok(Box::new(detail.clone())));
+        app.list_state.select(Some(1));
+        app.handle_key(key(KeyCode::Enter));
+        let Screen::Detail(view) = &app.screen else {
+            panic!("expected detail screen")
+        };
+        assert!(
+            view.detail.as_ref().is_some_and(Result::is_ok),
+            "shown at once"
+        );
+        assert!(
+            app.take_preloaded(&reference),
+            "the first load skips the detail"
+        );
+        assert!(!app.take_preloaded(&reference), "a later load fetches it");
+
+        // A row newer than the preview opens without it.
+        app.handle_key(key(KeyCode::Char('h')));
+        app.groups[0].prs[0].updated_at = detail.summary.updated_at + chrono::Duration::minutes(1);
+        app.handle_key(key(KeyCode::Enter));
+        assert!(
+            !app.take_preloaded(&reference),
+            "a stale preview is not used"
+        );
     }
 
     #[test]

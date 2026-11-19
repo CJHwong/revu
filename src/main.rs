@@ -1219,8 +1219,12 @@ fn start_load(app: &mut App, session: &Session, pr: PrRef) {
     let Some(load) = app.start_load(&pr) else {
         return;
     };
+    let preloaded = app.take_preloaded(&pr);
     start_activity_fetch(session, pr.clone(), load);
-    start_detail_fetch(session, pr, load);
+    // An open from the inbox preview already shows the detail, which costs one call.
+    if !preloaded {
+        start_detail_fetch(session, pr, load);
+    }
 }
 
 fn start_activity_fetch(session: &Session, pr: PrRef, load: u64) {
