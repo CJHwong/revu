@@ -9,9 +9,9 @@ use ratatui::widgets::{
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::{
-    App, Click, ClickTarget, ComposeKind, Composer, DetailView, DiffOutput, EditorChoice,
-    EditorMenu, LabelMenu, MergeItem, MergeMenu, OpenMenu, Overlay, OverviewLayout, Prompt,
-    PromptKind, RepoState, Row, SETTINGS, SaveNote, Screen, Tab,
+    AgentMenu, App, Click, ClickTarget, ComposeKind, Composer, DetailView, DiffOutput,
+    EditorChoice, EditorMenu, LabelMenu, MergeItem, MergeMenu, OpenMenu, Overlay, OverviewLayout,
+    Prompt, PromptKind, RepoState, Row, SETTINGS, SaveNote, Screen, Tab,
 };
 use crate::editor::Editor;
 use crate::file_tree::FileRow;
@@ -105,6 +105,9 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: &Theme, now: DateTime<Utc
     if let Some(composer) = &app.composer {
         render_composer(frame, composer, paint);
     }
+    if let Some(menu) = &app.agent_menu {
+        render_agent_menu(frame, menu, paint);
+    }
     if let (Some(gallery), Some(picker)) = (app.gallery.as_mut(), &app.picker) {
         render_gallery(frame, gallery, picker, paint);
     }
@@ -183,7 +186,13 @@ fn render_composer(frame: &mut Frame, composer: &Composer, paint: Paint) {
     let width = area.width.saturating_sub(4).min(100);
     let (title, header) = composer_header(composer, paint);
     // The box fits the text: at least 3 text rows, growing to three fifths of the screen.
-    let (_, _, text_rows) = editor_lines(&composer.editor, width.saturating_sub(2), paint);
+    let ghost = composer.suggestion();
+    let (_, _, text_rows) = editor_lines(
+        &composer.editor,
+        ghost.as_deref(),
+        width.saturating_sub(2),
+        paint,
+    );
     let wanted = header.len() as u16 + 1 + text_rows.max(3) + 1 + 2;
     let height = wanted.min((area.height * 3 / 5).max(8)).min(area.height);
     let box_area = Rect {
@@ -199,6 +208,10 @@ fn render_composer(frame: &mut Frame, composer: &Composer, paint: Paint) {
         _ if composer.cancel_asked => paint.span(
             " esc again throws the text away; any other key keeps it",
             theme.warning,
+        ),
+        _ if matches!(composer.kind, ComposeKind::Handoff(_)) => paint.span(
+            " ctrl+s picks the agent, tab completes, esc cancel, shift+arrows select, ctrl+c copy",
+            theme.muted,
         ),
         _ => paint.span(
             " ctrl+s send, esc cancel, shift+arrows select, ctrl+a all, ctrl+c copy, ctrl+x cut",
@@ -221,7 +234,8 @@ fn render_composer(frame: &mut Frame, composer: &Composer, paint: Paint) {
     ])
     .areas(inner);
     frame.render_widget(Paragraph::new(header), header_area);
-    let (lines, cursor_row, _) = editor_lines(&composer.editor, text_area.width, paint);
+    let (lines, cursor_row, _) =
+        editor_lines(&composer.editor, ghost.as_deref(), text_area.width, paint);
     let scroll = cursor_row.saturating_sub(text_area.height.saturating_sub(1));
     let text = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
@@ -296,13 +310,51 @@ fn composer_header(composer: &Composer, paint: Paint) -> (String, Vec<Line<'stat
             };
             (title, vec![Line::from(paint.span(note, theme.muted))])
         }
+        ComposeKind::Handoff(context) => {
+            let mut header = vec![Line::from(paint.span(" revu attaches:", theme.muted))];
+            header.extend(
+                context
+                    .summary
+                    .iter()
+                    .map(|part| Line::from(paint.span(format!("   {part}"), theme.muted))),
+            );
+            header.push(Line::from(
+                paint.span(" Write what you want the agent to do:", theme.muted),
+            ));
+            (" Hand off to an agent ".to_string(), header)
+        }
     }
 }
 
-/// The editor's text with the selection and the cursor marked, the row the cursor is
-/// on once wrapped to `width` so the box can scroll to it, and the rows in all.
-fn editor_lines(editor: &Editor, width: u16, paint: Paint) -> (Vec<Line<'static>>, u16, u16) {
+/// The agents a handoff can go to, each with what picking it does.
+fn render_agent_menu(frame: &mut Frame, menu: &AgentMenu, paint: Paint) {
     let theme = paint.theme;
+    let mut lines = Vec::new();
+    for (index, target) in menu.targets.iter().enumerate() {
+        let row = [
+            Line::from(paint.bold(format!(" {}", target.label()), theme.foreground)),
+            Line::from(paint.span(format!("   {}", target.note()), theme.muted)),
+        ];
+        let selected = index == menu.selected;
+        lines.extend(row.into_iter().map(|line| match selected {
+            true => line.style(Style::new().bg(theme.selection)),
+            false => line,
+        }));
+    }
+    render_menu_box(frame, " Hand off to ".to_string(), lines, paint);
+}
+
+/// The editor's text with the selection and the cursor marked, the row the cursor is
+/// on once wrapped to `width` so the box can scroll to it, and the rows in all. `ghost`
+/// is the rest of a completion, drawn dim at the cursor; Tab types it.
+fn editor_lines(
+    editor: &Editor,
+    ghost: Option<&str>,
+    width: u16,
+    paint: Paint,
+) -> (Vec<Line<'static>>, u16, u16) {
+    let theme = paint.theme;
+    let muted = Style::new().fg(theme.muted);
     let selected = Style::new().bg(theme.selection).fg(theme.foreground);
     let cursor = Style::new().fg(theme.background).bg(theme.accent);
     let plain = Style::new().fg(theme.foreground);
@@ -316,12 +368,15 @@ fn editor_lines(editor: &Editor, width: u16, paint: Paint) -> (Vec<Line<'static>
         for (index, character) in text.char_indices() {
             let at = offset + index;
             let style = match selection {
-                _ if at == editor.cursor => cursor,
+                _ if at == editor.cursor && ghost.is_none() => cursor,
                 Some((start, end)) if (start..end).contains(&at) => selected,
                 _ => plain,
             };
             if at == editor.cursor {
                 cursor_row = rows_before + columns / width;
+                if let Some(ghost) = ghost {
+                    columns += push_ghost(&mut spans, ghost, cursor, muted);
+                }
             }
             columns += character.width().unwrap_or(0);
             push_char(&mut spans, character, style);
@@ -329,14 +384,29 @@ fn editor_lines(editor: &Editor, width: u16, paint: Paint) -> (Vec<Line<'static>
         let end = offset + text.len();
         if editor.cursor == end {
             cursor_row = rows_before + columns / width;
-            spans.push(Span::styled(" ", cursor));
-            columns += 1;
+            match ghost {
+                Some(ghost) => columns += push_ghost(&mut spans, ghost, cursor, muted),
+                None => {
+                    spans.push(Span::styled(" ", cursor));
+                    columns += 1;
+                }
+            }
         }
         rows_before += columns.div_ceil(width).max(1);
         lines.push(Line::from(spans));
         offset = end + 1;
     }
     (lines, cursor_row as u16, rows_before as u16)
+}
+
+/// The completion's first letter under the cursor, the rest dim. Returns its width.
+fn push_ghost(spans: &mut Vec<Span<'static>>, ghost: &str, cursor: Style, muted: Style) -> usize {
+    let mut characters = ghost.chars();
+    if let Some(first) = characters.next() {
+        spans.push(Span::styled(first.to_string(), cursor));
+    }
+    spans.push(Span::styled(characters.as_str().to_string(), muted));
+    unicode_width::UnicodeWidthStr::width(ghost)
 }
 
 /// Adds a character to the last span when it has the same style, so a line stays a
@@ -599,6 +669,7 @@ fn detail_hints(view: &DetailView) -> Hints {
             ("D", "definition"),
             ("o", "open"),
             ("R", "review"),
+            ("a", "agent"),
             ("esc", "back to the diff"),
         ];
     }
@@ -611,6 +682,7 @@ fn detail_hints(view: &DetailView) -> Hints {
             ("D", "definition"),
             ("o", "open"),
             ("R", "review"),
+            ("a", "agent"),
             ("w", "wrap"),
             ("esc", "back to the diff"),
         ];
@@ -620,6 +692,7 @@ fn detail_hints(view: &DetailView) -> Hints {
             ("j/k", "comment"),
             ("enter", "fold"),
             ("R", "review"),
+            ("a", "agent"),
             ("e", "labels"),
             ("i", "images"),
             ("f", "filter"),
@@ -651,6 +724,7 @@ fn detail_hints(view: &DetailView) -> Hints {
             ("enter", "full file"),
             ("/", "find"),
             ("R", "review"),
+            ("a", "agent"),
             ("m", "view"),
             ("o", "open"),
             ("t", "tree"),
@@ -726,6 +800,10 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
             (
                 "R",
                 "review: Comment, Approve or Request changes, with your line comments",
+            ),
+            (
+                "a",
+                "hand off to Claude Code or Codex: what you write, with the PR, lines and thread here",
             ),
             ("X", "discard your pending review and its line comments"),
             (

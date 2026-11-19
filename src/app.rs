@@ -93,6 +93,17 @@ pub enum Action {
     },
     /// Put text on the system clipboard.
     Copy(String),
+    /// Look for agents to hand the message to, and list them.
+    PickAgent {
+        message: String,
+        dir: Option<PathBuf>,
+    },
+    /// Hand the message to the agent picked.
+    HandOff {
+        target: crate::handoff::Target,
+        message: String,
+        dir: Option<PathBuf>,
+    },
     /// Send a review, or submit the pending one, with a verdict.
     SubmitReview {
         pr: PrRef,
@@ -2374,6 +2385,8 @@ pub enum ComposeKind {
         author: String,
         place: String,
     },
+    /// A request to a coding agent, with the context revu attaches.
+    Handoff(crate::handoff::Context),
 }
 
 /// The text box for a review or a line comment, and what it sends.
@@ -2394,6 +2407,8 @@ pub struct Composer {
     pub sending: bool,
     /// esc was pressed on text; a second esc throws it away.
     pub cancel_asked: bool,
+    /// The diff's words, which Tab completes the word at the cursor to. Handoff only.
+    pub words: Vec<String>,
 }
 
 impl Composer {
@@ -2409,7 +2424,56 @@ impl Composer {
             confirming: false,
             sending: false,
             cancel_asked: false,
+            words: Vec::new(),
         }
+    }
+
+    /// The box for a request to an agent. It writes nothing to GitHub, so it needs
+    /// no review state.
+    pub fn handoff(pr: PrRef, detail: &PrDetail, context: crate::handoff::Context) -> Self {
+        Composer {
+            pr,
+            pull_request_id: detail.id.clone(),
+            head_oid: detail.head_oid.clone(),
+            pending_review: None,
+            kind: ComposeKind::Handoff(context),
+            editor: Editor::default(),
+            error: None,
+            confirming: false,
+            sending: false,
+            cancel_asked: false,
+            words: Vec::new(),
+        }
+    }
+
+    /// The rest of the word that ends at the cursor, from the diff's words. None when
+    /// the cursor is inside a word or after a space, or the box is not a handoff.
+    pub fn suggestion(&self) -> Option<String> {
+        if !matches!(self.kind, ComposeKind::Handoff(_)) || self.editor.anchor.is_some() {
+            return None;
+        }
+        let (before, after) = self.editor.text.split_at(self.editor.cursor);
+        if after.starts_with(|next: char| !next.is_whitespace()) {
+            return None;
+        }
+        let typed = before.rsplit(char::is_whitespace).next().unwrap_or("");
+        complete(&self.words, typed)
+    }
+
+    /// Tab: replaces the typed start with the whole word, spelled as in the diff.
+    fn accept_suggestion(&mut self) -> bool {
+        if self.suggestion().is_none() {
+            return false;
+        }
+        let before = &self.editor.text[..self.editor.cursor];
+        let typed = before.rsplit(char::is_whitespace).next().unwrap_or("");
+        let Some((word, _)) = matching_word(&self.words, typed) else {
+            return false;
+        };
+        let word = word.to_string();
+        self.editor.anchor = Some(self.editor.cursor - typed.len());
+        self.editor.insert(&word);
+        true
     }
 
     /// Tab: Comment, Approve, Request changes, in turn, unless only Comment applies.
@@ -2443,6 +2507,9 @@ impl Composer {
             } if empty => Err("write a comment, or add line comments first".to_string()),
             ComposeKind::LineComment(_) if empty => Err("write the comment first".to_string()),
             ComposeKind::Reply { .. } if empty => Err("write the reply first".to_string()),
+            ComposeKind::Handoff(_) if empty => {
+                Err("write what you want the agent to do".to_string())
+            }
             _ => Ok(()),
         }
     }
@@ -2474,6 +2541,8 @@ impl Composer {
             ComposeKind::Reply { .. } => {
                 "post this reply on GitHub? y posts it, any other key goes back".to_string()
             }
+            // ctrl+s opens the agent list, which is the confirm step.
+            ComposeKind::Handoff(_) => String::new(),
         }
     }
 
@@ -2508,8 +2577,21 @@ impl Composer {
                 body,
                 pending: pending_review.is_some(),
             },
+            ComposeKind::Handoff(context) => Action::PickAgent {
+                message: crate::handoff::message(context, &body),
+                dir: context.dir.clone(),
+            },
         }
     }
+}
+
+/// The agents a handoff can go to, running sessions first, and the message it sends.
+#[derive(Debug)]
+pub struct AgentMenu {
+    pub targets: Vec<crate::handoff::Target>,
+    pub selected: usize,
+    pub message: String,
+    pub dir: Option<PathBuf>,
 }
 
 /// A row of the settings panel.
@@ -2619,18 +2701,34 @@ pub struct Prompt {
 impl Prompt {
     /// The rest of the first word that starts with the typed text, ignoring case.
     pub fn suggestion(&self) -> Option<String> {
-        let typed = self.text.to_lowercase();
-        if typed.is_empty() || typed.contains(char::is_whitespace) {
+        if self.text.contains(char::is_whitespace) {
             return None;
         }
-        let typed_chars = typed.chars().count();
-        self.words
-            .iter()
-            .find(|word| {
-                word.chars().count() > typed_chars && word.to_lowercase().starts_with(&typed)
-            })
-            .map(|word| word.chars().skip(typed_chars).collect())
+        complete(&self.words, &self.text)
     }
+}
+
+/// The rest of the first word longer than `typed` that starts with it, ignoring case.
+fn complete(words: &[String], typed: &str) -> Option<String> {
+    matching_word(words, typed).map(|(_, rest)| rest.to_string())
+}
+
+/// The first word longer than `typed` that starts with it, ignoring case, and the part
+/// of it after the typed text. The split is found on the word itself, as lowercasing
+/// can change how many characters a letter takes.
+fn matching_word<'a>(words: &'a [String], typed: &str) -> Option<(&'a str, &'a str)> {
+    if typed.is_empty() {
+        return None;
+    }
+    let typed = typed.to_lowercase();
+    words.iter().find_map(|word| {
+        let split = word
+            .char_indices()
+            .map(|(index, _)| index)
+            .skip(1)
+            .find(|&index| word[..index].to_lowercase() == typed)?;
+        Some((word.as_str(), &word[split..]))
+    })
 }
 
 pub struct App {
@@ -2701,6 +2799,8 @@ pub struct App {
     pub editor_config: Option<EditorConfig>,
     /// The editor list from settings, while it is open.
     pub editor_menu: Option<EditorMenu>,
+    /// The agents a handoff can go to, while the list is open.
+    pub agent_menu: Option<AgentMenu>,
     /// The view toggles a newly opened PR starts with; they follow the open PR.
     pub prefs: ViewPrefs,
     /// The image gallery, while it is open.
@@ -2761,6 +2861,7 @@ impl App {
             ),
             editor_config: None,
             editor_menu: None,
+            agent_menu: None,
             prefs: ViewPrefs::default(),
             gallery: None,
             picker: None,
@@ -2906,6 +3007,12 @@ impl App {
             && prompt.kind == PromptKind::FindInDiff
         {
             prompt.words = words.clone();
+        }
+        if let Some(composer) = &mut self.composer
+            && composer.pr == *pr
+            && matches!(composer.kind, ComposeKind::Handoff(_))
+        {
+            composer.words = words.clone();
         }
         if let Some(view) = self.view_for(pr) {
             view.find_words = Some(words);
@@ -3277,7 +3384,7 @@ impl App {
     /// A left click at a screen cell. It does what the keys would do on that item: open a
     /// pull request, switch a tab, select a row, or open or close a fold.
     pub fn handle_click(&mut self, column: u16, row: u16) -> Option<Action> {
-        if self.prompt.is_some() {
+        if self.prompt.is_some() || self.agent_menu.is_some() {
             return None;
         }
         if self.show_help {
@@ -3329,6 +3436,10 @@ impl App {
                 }
                 _ => None,
             };
+        }
+        // The agent list opens over the handoff box, so it takes keys first.
+        if self.agent_menu.is_some() {
+            return self.agent_menu_key(key.code);
         }
         if self.composer.is_some() {
             return self.composer_key(key);
@@ -3551,6 +3662,10 @@ impl App {
 
     /// A paste goes into the open box, or opens the link box when none is open.
     pub fn handle_paste(&mut self, text: &str) {
+        // The list holds the message built before it opened; a paste would not reach it.
+        if self.agent_menu.is_some() {
+            return;
+        }
         if let Some(composer) = self.composer.as_mut() {
             composer.editor.insert(text);
             return;
@@ -3667,7 +3782,9 @@ impl App {
             return None;
         }
         if key.code == KeyCode::Tab {
-            composer.next_verdict();
+            if !composer.accept_suggestion() {
+                composer.next_verdict();
+            }
             return None;
         }
         let outcome = composer.editor.key(key);
@@ -3678,6 +3795,9 @@ impl App {
             Outcome::Copy(text) => Some(Action::Copy(text)),
             Outcome::Submit => {
                 match composer.check() {
+                    Ok(()) if matches!(composer.kind, ComposeKind::Handoff(_)) => {
+                        return Some(composer.action());
+                    }
                     Ok(()) => composer.confirming = true,
                     Err(error) => composer.error = Some(error),
                 }
@@ -3737,6 +3857,10 @@ impl App {
                 let result = self.open_review();
                 self.error = result.err();
             }
+            KeyCode::Char('a') => {
+                let result = self.open_handoff();
+                return self.report(result);
+            }
             KeyCode::Char('D') => {
                 let result = view.line_names_request().map(Some);
                 return self.report(result);
@@ -3786,6 +3910,86 @@ impl App {
         };
         self.composer = Some(Composer::new(view.pr.clone(), detail, activity, kind));
         Ok(())
+    }
+
+    /// a: a box for a request to a coding agent. In select lines it attaches the marked
+    /// lines and the thread on the cursor's line; in Files changed, the selected file.
+    fn open_handoff(&mut self) -> Result<Option<Action>, String> {
+        let Screen::Detail(view) = &mut self.screen else {
+            return Ok(None);
+        };
+        // The find prompt's words, loaded once per PR; Tab completes from them.
+        let words_request = match view.find_words {
+            Some(_) => None,
+            None => view.words_request(),
+        };
+        let view = &*view;
+        let detail = view
+            .loaded()
+            .ok_or("wait for the PR to load before handing it off")?;
+        let mut spot = crate::handoff::Spot::default();
+        match &view.line_mode {
+            Some(mode) => {
+                if let Some(Ok(rows)) = &mode.rows {
+                    let (first, last) = mode.marked();
+                    if let Some(picked) = rows.get(first..=last) {
+                        spot.lines = Some((
+                            crate::line_diff::place(&mode.path, picked),
+                            crate::line_diff::snippet(&mode.path, picked),
+                        ));
+                    }
+                }
+                spot.thread = view.thread_here().ok();
+            }
+            None if view.tab == Tab::Files => spot.file = view.selected_row_path(),
+            None => {}
+        }
+        let checkout = match &view.repo {
+            RepoState::Ready(repo) => Some(repo),
+            _ => None,
+        };
+        let elsewhere = checkout
+            .and_then(|repo| crate::repo::checked_out_elsewhere(&repo.dir, &detail.head_oid));
+        let checkout = checkout.map(|repo| crate::handoff::Checkout {
+            dir: &repo.dir,
+            elsewhere: elsewhere.as_deref(),
+        });
+        let context = crate::handoff::context(&view.pr, detail, checkout, spot);
+        let mut composer = Composer::handoff(view.pr.clone(), detail, context);
+        composer.words = view.find_words.clone().unwrap_or_default();
+        self.composer = Some(composer);
+        Ok(words_request)
+    }
+
+    /// The agent list: j/k move, Enter hands the message off, esc goes back to the box.
+    fn agent_menu_key(&mut self, key: KeyCode) -> Option<Action> {
+        let menu = self.agent_menu.as_mut()?;
+        let count = menu.targets.len().max(1);
+        match key {
+            KeyCode::Char('j') | KeyCode::Down => menu.selected = (menu.selected + 1) % count,
+            KeyCode::Char('k') | KeyCode::Up => menu.selected = (menu.selected + count - 1) % count,
+            KeyCode::Esc | KeyCode::Char('q') => self.agent_menu = None,
+            KeyCode::Enter => {
+                let menu = self.agent_menu.take()?;
+                let target = menu.targets.get(menu.selected)?.clone();
+                return Some(Action::HandOff {
+                    target,
+                    message: menu.message,
+                    dir: menu.dir,
+                });
+            }
+            _ => {}
+        }
+        None
+    }
+
+    /// The handoff reached its agent, or failed and went to the clipboard instead.
+    pub fn handed_off(&mut self, result: Result<String, String>) {
+        self.composer = None;
+        match result {
+            Ok(note) => self.saved = Some(note),
+            Err(error) => self.error = Some(error),
+        }
     }
 
     /// Enter in select lines: a box for the line, or the range V marked.
@@ -4244,6 +4448,10 @@ impl App {
             KeyCode::Char('R') => {
                 let result = self.open_review();
                 self.error = result.err();
+            }
+            KeyCode::Char('a') => {
+                let result = self.open_handoff();
+                return self.report(result);
             }
             KeyCode::Char('X') => {
                 let result = self.ask_discard();
@@ -5395,6 +5603,116 @@ mod tests {
 
     fn ctrl(character: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn a_handoff_asks_for_text_then_lists_agents_then_sends_the_pick() {
+        use crate::handoff::{Context, Target};
+        let mut app = App::new();
+        let detail = crate::model::tests::sample_detail();
+        let context = Context {
+            summary: vec!["acme/app#1 Title".to_string()],
+            text: "I'm reviewing a pull request in revu.\n".to_string(),
+            dir: Some(PathBuf::from("/src/app")),
+        };
+        let pr = PrRef {
+            repo: "acme/app".to_string(),
+            number: 1,
+        };
+        app.composer = Some(Composer::handoff(pr, &detail, context));
+
+        assert!(app.handle_key(ctrl('s')).is_none());
+        let error = app
+            .composer
+            .as_ref()
+            .and_then(|composer| composer.error.clone());
+        assert_eq!(
+            error.as_deref(),
+            Some("write what you want the agent to do")
+        );
+
+        app.handle_key(key(KeyCode::Char('h')));
+        app.handle_key(key(KeyCode::Char('i')));
+        let Some(Action::PickAgent { message, dir }) = app.handle_key(ctrl('s')) else {
+            panic!("ctrl+s should ask for the agent list");
+        };
+        assert!(message.ends_with("My request:\nhi\n"));
+        assert_eq!(dir, Some(PathBuf::from("/src/app")));
+
+        app.agent_menu = Some(AgentMenu {
+            targets: vec![Target::NewClaude, Target::Clipboard],
+            selected: 0,
+            message: message.clone(),
+            dir,
+        });
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.agent_menu.is_none(), "esc closes the list");
+        assert!(app.composer.is_some(), "and keeps the text");
+
+        app.agent_menu = Some(AgentMenu {
+            targets: vec![Target::NewClaude, Target::Clipboard],
+            selected: 0,
+            message,
+            dir: None,
+        });
+        app.handle_key(key(KeyCode::Char('j')));
+        let Some(Action::HandOff { target, .. }) = app.handle_key(key(KeyCode::Enter)) else {
+            panic!("Enter should hand off");
+        };
+        assert_eq!(target, Target::Clipboard);
+        app.handed_off(Ok("copied".to_string()));
+        assert!(app.composer.is_none());
+        assert_eq!(app.saved.as_deref(), Some("copied"));
+    }
+
+    #[test]
+    fn tab_in_a_handoff_completes_the_word_before_the_cursor() {
+        let detail = crate::model::tests::sample_detail();
+        let context = crate::handoff::Context {
+            summary: Vec::new(),
+            text: String::new(),
+            dir: None,
+        };
+        let pr = PrRef {
+            repo: "acme/app".to_string(),
+            number: 1,
+        };
+        let mut app = App::new();
+        let mut composer = Composer::handoff(pr, &detail, context);
+        composer.words = ["render_composer", "Renderer", "src/ui.rs"]
+            .map(String::from)
+            .to_vec();
+        app.composer = Some(composer);
+        let suggestion = |app: &App| app.composer.as_ref().and_then(Composer::suggestion);
+
+        app.handle_paste("why does rend");
+        assert_eq!(suggestion(&app).as_deref(), Some("er_composer"));
+        app.handle_key(key(KeyCode::Tab));
+        let text = |app: &App| {
+            app.composer
+                .as_ref()
+                .map(|composer| composer.editor.text.clone())
+        };
+        assert_eq!(text(&app).as_deref(), Some("why does render_composer"));
+
+        app.handle_paste(" ");
+        assert_eq!(suggestion(&app), None, "nothing after a space");
+        app.handle_paste("SRC/u");
+        assert_eq!(suggestion(&app).as_deref(), Some("i.rs"), "case is ignored");
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(
+            text(&app).as_deref(),
+            Some("why does render_composer src/ui.rs"),
+            "Tab spells the word as the diff does"
+        );
+        app.handle_paste(" r");
+
+        app.handle_key(key(KeyCode::Left));
+        assert_eq!(suggestion(&app), None, "nothing inside a word");
+
+        let words = vec!["İstanbul".to_string()];
+        assert_eq!(complete(&words, "İ").as_deref(), Some("stanbul"));
+        assert_eq!(complete(&words, "i̇s").as_deref(), Some("tanbul"));
     }
 
     #[test]
