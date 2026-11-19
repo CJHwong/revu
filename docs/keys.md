@@ -19,7 +19,7 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 | `Enter`, `l` | Open the pull request, or fold a group header |
 | `Space` | Fold the current group |
 | `Tab` / `Shift+Tab` | Next or previous group |
-| `/` | Filter: type part of a repo or an author name, and the rows narrow as you type. Each group counts its matching rows. `Enter` keeps the filter; `Esc` clears it. |
+| `/` | Filter: type part of a repo, a `#number`, an author or a title, and the rows narrow as you type. Each group counts its matching rows. `Enter` keeps the filter; `Esc` clears it. |
 | `Esc` | Clear the filter |
 | `r` | Reload the config and fetch again |
 | `o` | Open in the browser |
@@ -78,7 +78,7 @@ In select lines, `D` lists the names on the cursor's line, calls first, in a pro
 | `v` | Toggle Viewed. It syncs to GitHub's Viewed checkbox at once. On a folder, it marks every file under it viewed, or unmarks them all when every one is viewed already. |
 | `V` | Hide viewed files |
 | `]` / `[` | Next or previous unviewed file |
-| `S` | Select lines in the selected file: its plain diff with line numbers. `j`/`k` or the wheel move, `J`/`K` and `Space`/`b` scroll without moving the cursor, to read a long thread, `V` marks a range (on one side only, as GitHub requires), `Enter` writes a comment, `y` copies the line or range, `D` goes to the definition of a name on the line, `t` opens or closes every review thread in the file, `]` / `[` go to the next or previous line with a thread, `r` replies to it, `u` resolves or reopens it, `o` opens it on GitHub or in your editor, `w` wraps long lines or cuts them, as in the diff, `S` or `esc` goes back. The comment joins your pending review on GitHub, which only you see until `R` submits it; a dot marks lines it already covers. |
+| `S` | Select lines in the selected file: its plain diff with line numbers. `j`/`k` or the wheel move, `J`/`K` and `Space`/`b` scroll without moving the cursor, to read a long thread, `V` marks a range (on one side only, as GitHub requires), `Enter` writes a comment, `y` copies the line or range, `D` goes to the definition of a name on the line, `t` opens or closes every review thread in the file, `]` / `[` go to the next or previous line with a thread, `r` replies to it, `u` resolves or reopens it, `o` opens it on GitHub or in your editor, `w` wraps long lines or cuts them, as in the diff, `S`, `esc` or `h` goes back. The comment joins your pending review on GitHub, which only you see until `R` submits it; a dot marks lines it already covers. |
 
 ## Files changed and Commits
 

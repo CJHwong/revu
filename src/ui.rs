@@ -967,7 +967,10 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
             ("enter, l", "open the pull request, or fold a group header"),
             ("space", "fold the current group"),
             ("tab, shift-tab", "next or previous group"),
-            ("/, esc", "filter by repo or author, clear the filter"),
+            (
+                "/, esc",
+                "filter by repo, number, author or title, clear the filter",
+            ),
             ("o, d", "open in the browser, run the open_diff command"),
             ("r, q", "reload the config and refresh, quit"),
         ],
@@ -3299,7 +3302,7 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
         ),
         PromptKind::FilterInbox => (
             " Filter the inbox ".to_string(),
-            "part of a repo or an author name. the rows narrow as you type. enter keeps the filter, esc clears it"
+            "part of a repo, a #number, an author or a title. the rows narrow as you type. enter keeps the filter, esc clears it"
                 .to_string(),
         ),
         PromptKind::FindInDiff => (
