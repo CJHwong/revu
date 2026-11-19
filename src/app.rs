@@ -301,7 +301,7 @@ pub struct OpenMenu {
     pub editor: Result<EditorTarget, String>,
     /// The editor's name, for the menu; App fills it in.
     pub editor_name: String,
-    /// 0 for GitHub, 1 for the editor.
+    /// 0 for the editor, 1 for GitHub. It starts on the editor when the editor can open the file.
     pub selected: usize,
 }
 
@@ -3877,11 +3877,11 @@ impl App {
             }
             KeyCode::Esc | KeyCode::Char('q') => self.open_menu = None,
             // The menu shows why the editor cannot open the file; it stays open.
-            KeyCode::Enter if menu.selected == 1 && menu.editor.is_err() => {}
+            KeyCode::Enter if menu.selected == 0 && menu.editor.is_err() => {}
             KeyCode::Enter => {
                 let menu = self.open_menu.take()?;
                 return match (menu.selected, menu.editor) {
-                    (1, Ok(target)) => Some(Action::OpenEditor(target)),
+                    (0, Ok(target)) => Some(Action::OpenEditor(target)),
                     _ => Some(Action::OpenBrowser(menu.github)),
                 };
             }
@@ -4000,8 +4000,10 @@ impl App {
             return match view.open_menu() {
                 Some(menu) => {
                     let editor_name = self.editor_name.clone();
+                    let selected = if menu.editor.is_ok() { 0 } else { 1 };
                     self.open_menu = Some(OpenMenu {
                         editor_name,
+                        selected,
                         ..menu
                     });
                     None
@@ -5168,10 +5170,16 @@ mod tests {
         );
     }
 
-    /// o, then enter on GitHub, the menu's first choice.
+    /// o, then enter on GitHub, the menu's second choice.
     fn open_on_github(app: &mut App) -> Option<Action> {
         assert!(app.handle_key(key(KeyCode::Char('o'))).is_none());
-        assert!(app.open_menu.is_some(), "o on a file asks where to open it");
+        let menu = app
+            .open_menu
+            .as_ref()
+            .expect("o on a file asks where to open it");
+        if menu.selected == 0 {
+            app.handle_key(key(KeyCode::Char('j')));
+        }
         app.handle_key(key(KeyCode::Enter))
     }
 
@@ -5202,7 +5210,6 @@ mod tests {
         let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
         let dir = clone_with(&mut app, &pr, &["a.md"]);
         app.handle_key(key(KeyCode::Char('o')));
-        app.handle_key(key(KeyCode::Char('j')));
         let Some(Action::OpenEditor(target)) = app.handle_key(key(KeyCode::Enter)) else {
             panic!("expected the editor");
         };
@@ -5253,7 +5260,6 @@ mod tests {
             scroll: 0,
         });
         app.handle_key(key(KeyCode::Char('o')));
-        app.handle_key(key(KeyCode::Down));
         let Some(Action::OpenEditor(target)) = app.handle_key(key(KeyCode::Enter)) else {
             panic!("expected the editor");
         };
@@ -5361,7 +5367,6 @@ mod tests {
         );
         assert_eq!(view(&app).overlays.len(), 1, "the file stays open");
         app.handle_key(key(KeyCode::Char('o')));
-        app.handle_key(key(KeyCode::Char('j')));
         let Some(Action::OpenEditor(target)) = app.handle_key(key(KeyCode::Enter)) else {
             panic!("expected the editor");
         };

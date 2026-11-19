@@ -3420,11 +3420,11 @@ fn render_open_menu(frame: &mut Frame, menu: &OpenMenu, paint: Paint) {
         Err(why) => Line::from(paint.span(format!("   {why}"), theme.danger)),
     };
     let items = [
+        ("Editor", editor_note),
         (
             "GitHub",
             Line::from(paint.span(format!("   {}", menu.github_note), theme.muted)),
         ),
-        ("Editor", editor_note),
     ];
     let mut lines = Vec::new();
     for (index, (title, note)) in items.into_iter().enumerate() {
