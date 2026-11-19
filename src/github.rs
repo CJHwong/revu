@@ -46,7 +46,8 @@ fn record_rate_limit(
 const PAGE_SIZE: u32 = 100;
 
 const ROW_FIELDS: &str = "number title url isDraft updatedAt reviewDecision totalCommentsCount \
-    additions deletions changedFiles headRefOid author { login } repository { nameWithOwner }";
+    additions deletions changedFiles headRefOid viewerDidAuthor mergeable \
+    viewerLatestReview { state submittedAt } viewerLatestReviewRequest { requestedReviewer { __typename } } author { login } repository { nameWithOwner }";
 
 const ROLLUP_COUNTS: &str = "totalCount \
     checkRunCountsByState { state count } \
@@ -70,7 +71,7 @@ pub fn group_document() -> String {
     format!(
         "query($q: String!) {{ search(query: $q, type: ISSUE, first: {PAGE_SIZE}) {{ issueCount nodes {{ \
          ... on PullRequest {{ {ROW_FIELDS} \
-         commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 0) {{ {ROLLUP_COUNTS} }} }} }} }} }} }} }} }} }}"
+         commits(last: 1) {{ nodes {{ commit {{ committedDate statusCheckRollup {{ state contexts(first: 0) {{ {ROLLUP_COUNTS} }} }} }} }} }} }} }} }} }}"
     )
 }
 
@@ -81,8 +82,8 @@ pub fn detail_document() -> String {
     format!(
         "query({PR_VARIABLES}) {{ \
          repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ \
-         {ROW_FIELDS} id viewerDidAuthor baseRefOid body createdAt baseRefName headRefName \
-         commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 0) {{ {ROLLUP_COUNTS} }} }} }} }} }} \
+         {ROW_FIELDS} id baseRefOid body createdAt baseRefName headRefName \
+         commits(last: 1) {{ nodes {{ commit {{ committedDate statusCheckRollup {{ state contexts(first: 0) {{ {ROLLUP_COUNTS} }} }} }} }} }} \
          commitCount: commits {{ totalCount }} \
          labels(first: 20) {{ nodes {{ name color }} }} \
          assignees(first: 10) {{ nodes {{ login }} }} \

@@ -110,6 +110,8 @@ mod tests {
             deletions: 0,
             changed_files: 0,
             head_oid: head.into(),
+            turn: None,
+            conflicts: false,
         }
     }
 

@@ -4854,6 +4854,8 @@ mod tests {
             deletions: 0,
             changed_files: 0,
             head_oid: String::new(),
+            turn: None,
+            conflicts: false,
         }
     }
 

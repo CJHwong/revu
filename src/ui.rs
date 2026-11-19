@@ -22,7 +22,7 @@ use crate::markdown::Visual;
 use crate::model::{
     ChangedFile, CheckLine, CheckState, CheckSummary, CommitLine, Group, Label, Lifecycle,
     MergeMethod, MergeRequest, PrActivity, PrDetail, PrRef, PrSummary, RateLimit, ReviewState,
-    Reviewer, Side, SinceCounts, ThreadLine, Verdict, ViewedState,
+    Reviewer, Side, SinceCounts, ThreadLine, Turn, Verdict, ViewedState,
 };
 use crate::theme::{ON_STATE, PrState, Theme};
 use crate::{markdown, overview};
@@ -570,7 +570,31 @@ fn pr_item(
         secondary,
     )];
     second.extend(size_spans(pr, secondary, paint));
-    ListItem::new(Text::from(vec![Line::from(first), Line::from(second)]))
+    let mut second = Line::from(second);
+    let labels = turn_spans(pr, secondary, paint);
+    if !labels.is_empty() {
+        // The labels start under the badges, so they line up from row to row.
+        let gap = (4 + title_width + 1).saturating_sub(second.width()).max(3);
+        second.spans.push(Span::raw(" ".repeat(gap)));
+        second.spans.extend(labels);
+    }
+    ListItem::new(Text::from(vec![Line::from(first), second]))
+}
+
+fn turn_spans(pr: &PrSummary, secondary: Color, paint: Paint) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    match pr.turn {
+        Some(Turn::Yours) => spans.push(paint.bold("Your turn", paint.theme.accent)),
+        Some(Turn::Authors) => spans.push(paint.span("Author's turn", secondary)),
+        None => {}
+    }
+    if pr.conflicts {
+        if !spans.is_empty() {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(paint.span("Conflicts", paint.theme.danger));
+    }
+    spans
 }
 
 /// The diff size in the form the PR header uses, so a small review stands out.
@@ -4361,6 +4385,8 @@ mod tests {
             deletions: 0,
             changed_files: 0,
             head_oid: String::new(),
+            turn: None,
+            conflicts: false,
         }
     }
 
@@ -4382,6 +4408,27 @@ mod tests {
         };
         assert_eq!(size(7), "   +120 -34, 7 files");
         assert_eq!(size(1), "   +120 -34, 1 file");
+    }
+
+    #[test]
+    fn an_inbox_row_names_whose_turn_it_is_and_a_conflict() {
+        let theme = theme::by_name("dracula").unwrap();
+        let paint = Paint {
+            theme: &theme,
+            now: Utc::now(),
+        };
+        let labels = |turn: Option<Turn>, conflicts: bool| {
+            let pr = PrSummary {
+                turn,
+                conflicts,
+                ..summary()
+            };
+            Line::from(turn_spans(&pr, theme.muted, paint)).to_string()
+        };
+        assert_eq!(labels(None, false), "");
+        assert_eq!(labels(Some(Turn::Yours), true), "Your turn  Conflicts");
+        assert_eq!(labels(Some(Turn::Authors), false), "Author's turn");
+        assert_eq!(labels(None, true), "Conflicts");
     }
 
     #[test]
