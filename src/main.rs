@@ -550,9 +550,14 @@ fn perform(
         Action::SetWorkspace(text) => set_workspace(app, session, text),
         Action::SetTheme(name) => set_theme(app, session, name),
         Action::SetUpdatedWithin(days) => set_updated_within(app, session, days),
-        Action::SetEditor(editor) => {
+        Action::SetEditor { editor, open } => {
             let value = editor.as_ref().map(config::editor_value);
-            save_and_reload(app, session, "editor", value);
+            if save_and_reload(app, session, "editor", value) {
+                remember_editor_picked(app, session);
+                if let Some(target) = open {
+                    open_editor(terminal, app, session, &target)?;
+                }
+            }
         }
         Action::Copy(text) => copy_to_clipboard(app, &text),
         Action::SubmitReview {
@@ -1023,7 +1028,7 @@ fn show_config(app: &mut App, config: &config::Config) {
 
 /// Saves a key the settings panel changed, then loads the config again without
 /// fetching the inbox, which the key does not change.
-fn save_and_reload(app: &mut App, session: &mut Session, key: &str, value: Option<String>) {
+fn save_and_reload(app: &mut App, session: &mut Session, key: &str, value: Option<String>) -> bool {
     let saved = match &value {
         Some(value) => config::save_setting(&session.config_path, key, value),
         None => config::remove_setting(&session.config_path, key),
@@ -1033,8 +1038,28 @@ fn save_and_reload(app: &mut App, session: &mut Session, key: &str, value: Optio
         Ok(config) => {
             show_config(app, &config);
             session.config = config;
+            true
         }
-        Err(error) => app.error = Some(format!("not saved: {error:#}")),
+        Err(error) => {
+            app.error = Some(format!("not saved: {error:#}"));
+            false
+        }
+    }
+}
+
+/// Writes to view.yaml that the user picked an editor, so o stops asking.
+fn remember_editor_picked(app: &mut App, session: &Session) {
+    if app.prefs.editor_picked {
+        return;
+    }
+    app.prefs.editor_picked = true;
+    let path = config::prefs_path(&session.config_path);
+    let saved = config::load_prefs(&path).and_then(|mut prefs| {
+        prefs.editor_picked = true;
+        config::save_prefs(&path, &prefs)
+    });
+    if let Err(error) = saved {
+        app.error = Some(format!("editor choice not remembered: {error:#}"));
     }
 }
 

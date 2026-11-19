@@ -2910,7 +2910,7 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
             "the folders that hold your clones, with commas between. new clones go in the first. enter saves, esc cancels"
                 .to_string(),
         ),
-        PromptKind::Editor => (
+        PromptKind::Editor { .. } => (
             " Editor command ".to_string(),
             "such as myeditor {file}:{line}. {file} is the file, {line} the line, {dir} the clone. empty uses your shell's editor. enter saves, esc keeps it"
                 .to_string(),
@@ -3487,7 +3487,7 @@ fn render_menu_box(frame: &mut Frame, title: String, lines: Vec<Line<'static>>, 
 /// The editor list from settings, drawn like the theme list.
 fn render_editor_menu(frame: &mut Frame, menu: &EditorMenu, paint: Paint) {
     let theme = paint.theme;
-    let lines: Vec<Line> = menu
+    let mut lines: Vec<Line> = menu
         .choices
         .iter()
         .enumerate()
@@ -3505,6 +3505,18 @@ fn render_editor_menu(frame: &mut Frame, menu: &EditorMenu, paint: Paint) {
             }
         })
         .collect();
+    // Asked from o the first time: say the pick is kept, and where to change it.
+    let title = match &menu.open {
+        Some(target) => {
+            lines.push(Line::default());
+            lines.push(Line::from(
+                paint.span("  revu remembers this. , changes it", theme.muted),
+            ));
+            let name = target.path.rsplit('/').next().unwrap_or(&target.path);
+            format!(" Open {name} with ")
+        }
+        None => " Editor ".to_string(),
+    };
     let area = frame.area();
     let width = 40.min(area.width);
     let height = (lines.len() as u16 + 2).min(area.height);
@@ -3518,7 +3530,7 @@ fn render_editor_menu(frame: &mut Frame, menu: &EditorMenu, paint: Paint) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(theme.heading))
-        .title(paint.bold(" Editor ", theme.heading))
+        .title(paint.bold(title, theme.heading))
         .title_bottom(paint.span(" j/k move, enter picks, esc ", theme.muted))
         .style(Style::new().bg(theme.background).fg(theme.foreground));
     frame.render_widget(Clear, box_area);

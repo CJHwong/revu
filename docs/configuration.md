@@ -119,3 +119,4 @@ Settings (`,`) sets it from a list: your shell's editor, which removes the key, 
 | `tree_view` | `t` | The file list as a folder tree |
 | `hide_viewed` | `V` | Hide viewed files |
 | `file_list_hidden` | `z` | Hide the file list |
+| `editor_picked` | `o` | You picked an editor the first time `o` opened one, so `o` no longer asks |

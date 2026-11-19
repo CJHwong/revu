@@ -83,8 +83,12 @@ pub enum Action {
     /// Save how many days back the inbox looks, and reload it.
     /// None looks back without a limit.
     SetUpdatedWithin(Option<u32>),
-    /// Save the editor o runs; None goes back to $VISUAL or $EDITOR.
-    SetEditor(Option<EditorConfig>),
+    /// Save the editor o runs, None for $VISUAL or $EDITOR, then open `open` in it: the
+    /// file o was opening when it asked for the editor the first time.
+    SetEditor {
+        editor: Option<EditorConfig>,
+        open: Option<EditorTarget>,
+    },
     /// Put text on the system clipboard.
     Copy(String),
     /// Send a review, or submit the pending one, with a verdict.
@@ -1959,7 +1963,10 @@ pub enum PromptKind {
     Workspace,
     FindInDiff,
     UpdatedWithin,
-    Editor,
+    /// A custom editor command; `open` as in `Action::SetEditor`.
+    Editor {
+        open: Option<EditorTarget>,
+    },
     /// Asks before deleting your pending review and its line comments.
     ConfirmDiscard {
         pr: PrRef,
@@ -2535,6 +2542,8 @@ pub enum EditorChoice {
 pub struct EditorMenu {
     /// The shell's editor, which the first row names.
     pub shell: String,
+    /// The file to open once the user picks, when o asked for the editor.
+    pub open: Option<EditorTarget>,
     pub choices: Vec<EditorChoice>,
     /// The choice the config has now, marked in the list.
     pub current: usize,
@@ -2574,6 +2583,7 @@ impl EditorMenu {
             .unwrap_or(0);
         Self {
             shell: shell_program.to_string(),
+            open: None,
             choices,
             current,
             selected: current,
@@ -2774,6 +2784,7 @@ impl App {
             tree_view: view.tree_view,
             hide_viewed: view.hide_viewed,
             file_list_hidden: view.file_list_hidden,
+            editor_picked: self.prefs.editor_picked,
         };
         if prefs == self.prefs {
             return false;
@@ -3394,19 +3405,16 @@ impl App {
                 let current = self.updated_within_days.map(|days| days.to_string());
                 self.ask(PromptKind::UpdatedWithin, &current.unwrap_or_default());
             }
-            Setting::Editor => {
-                let shell = crate::editor_command::editor_name(
-                    None,
-                    &crate::editor_command::shell_editor(),
-                );
-                self.editor_menu = Some(EditorMenu::new(
-                    &shell,
-                    self.editor_config.as_ref(),
-                    crate::repo::on_path,
-                ));
-            }
+            Setting::Editor => self.editor_menu = Some(self.editor_list()),
         }
         None
+    }
+
+    /// The editor list on this machine, on the editor the config has now.
+    fn editor_list(&self) -> EditorMenu {
+        let shell =
+            crate::editor_command::editor_name(None, &crate::editor_command::shell_editor());
+        EditorMenu::new(&shell, self.editor_config.as_ref(), crate::repo::on_path)
     }
 
     /// The editor list: j/k move, Enter saves the pick or asks for a custom command.
@@ -3419,19 +3427,21 @@ impl App {
             KeyCode::Esc | KeyCode::Char('q') => self.editor_menu = None,
             KeyCode::Enter => {
                 let choice = menu.choices[menu.selected];
+                let open = menu.open.take();
                 self.editor_menu = None;
                 return match choice {
-                    EditorChoice::Shell => Some(Action::SetEditor(None)),
-                    EditorChoice::Known { program, .. } => Some(Action::SetEditor(Some(
-                        crate::editor_command::config_for(program),
-                    ))),
+                    EditorChoice::Shell => Some(Action::SetEditor { editor: None, open }),
+                    EditorChoice::Known { program, .. } => Some(Action::SetEditor {
+                        editor: Some(crate::editor_command::config_for(program)),
+                        open,
+                    }),
                     EditorChoice::Custom => {
                         let current = self
                             .editor_config
                             .as_ref()
                             .filter(|editor| crate::editor_command::known_label(editor).is_none())
                             .map(|editor| editor.command.clone());
-                        self.ask(PromptKind::Editor, &current.unwrap_or_default());
+                        self.ask(PromptKind::Editor { open }, &current.unwrap_or_default());
                         None
                     }
                 };
@@ -3461,20 +3471,24 @@ impl App {
 
     /// An empty command goes back to the shell's editor. A new command waits unless revu
     /// knows it opens a window; `wait` in config.yaml changes that.
-    fn submit_editor(&mut self, text: &str) -> Option<Action> {
+    fn submit_editor(&mut self, text: &str, open: Option<EditorTarget>) -> Option<Action> {
         let command = text.trim();
         if command.is_empty() {
-            return Some(Action::SetEditor(None));
+            return Some(Action::SetEditor { editor: None, open });
         }
         if !command.contains("{file}") {
             let error = "the command needs {file}, such as zed {file}:{line}".to_string();
-            self.set_prompt_error(PromptKind::Editor, text, error);
+            self.set_prompt_error(PromptKind::Editor { open }, text, error);
             return None;
         }
-        Some(Action::SetEditor(Some(EditorConfig {
+        let editor = EditorConfig {
             command: command.to_string(),
             wait: !crate::editor_command::opens_a_window(command),
-        })))
+        };
+        Some(Action::SetEditor {
+            editor: Some(editor),
+            open,
+        })
     }
 
     fn submit_updated_within(&mut self, text: &str) -> Option<Action> {
@@ -3571,7 +3585,7 @@ impl App {
                 self.in_view(|view| view.find_definition(&prompt.text))
             }
             PromptKind::UpdatedWithin => self.submit_updated_within(&prompt.text),
-            PromptKind::Editor => self.submit_editor(&prompt.text),
+            PromptKind::Editor { open } => self.submit_editor(&prompt.text, open),
             PromptKind::ConfirmDiscard { pr, pending_review } => prompt
                 .text
                 .trim()
@@ -4032,6 +4046,15 @@ impl App {
             KeyCode::Enter => {
                 let menu = self.open_menu.take()?;
                 return match (menu.selected, menu.editor) {
+                    (0, Ok(target))
+                        if self.editor_config.is_none() && !self.prefs.editor_picked =>
+                    {
+                        self.editor_menu = Some(EditorMenu {
+                            open: Some(target),
+                            ..self.editor_list()
+                        });
+                        None
+                    }
                     (0, Ok(target)) => Some(Action::OpenEditor(target)),
                     _ => Some(Action::OpenBrowser(menu.github)),
                 };
@@ -5054,7 +5077,11 @@ mod tests {
         ];
         menu.selected = 0;
         app.handle_key(key(KeyCode::Char('j')));
-        let Some(Action::SetEditor(Some(editor))) = app.handle_key(key(KeyCode::Enter)) else {
+        let Some(Action::SetEditor {
+            editor: Some(editor),
+            ..
+        }) = app.handle_key(key(KeyCode::Enter))
+        else {
             panic!("expected Zed saved");
         };
         assert_eq!(editor, crate::editor_command::config_for("zed"));
@@ -5065,7 +5092,7 @@ mod tests {
         app.editor_menu.as_mut().unwrap().selected = 0;
         let action = app.handle_key(key(KeyCode::Enter));
         assert!(
-            matches!(action, Some(Action::SetEditor(None))),
+            matches!(action, Some(Action::SetEditor { editor: None, .. })),
             "{action:?}"
         );
 
@@ -5079,7 +5106,11 @@ mod tests {
         assert!(app.handle_key(key(KeyCode::Enter)).is_none());
         assert!(app.prompt.as_ref().unwrap().error.is_some(), "no {{file}}");
         app.prompt.as_mut().unwrap().text = "myedit {file}".to_string();
-        let Some(Action::SetEditor(Some(custom))) = app.handle_key(key(KeyCode::Enter)) else {
+        let Some(Action::SetEditor {
+            editor: Some(custom),
+            ..
+        }) = app.handle_key(key(KeyCode::Enter))
+        else {
             panic!("expected the custom command saved");
         };
         assert!(custom.wait, "an unknown editor runs in the terminal");
@@ -5423,8 +5454,10 @@ mod tests {
         app.handle_key(key(KeyCode::Enter))
     }
 
-    /// A clone folder holding `paths`, so the editor has a file to open.
+    /// A clone folder holding `paths`, so the editor has a file to open. The user has
+    /// picked an editor before, so o opens it without asking.
     fn clone_with(app: &mut App, pr: &PrRef, paths: &[&str]) -> PathBuf {
+        app.prefs.editor_picked = true;
         let dir = std::env::temp_dir().join(format!(
             "revu-open-{}-{}",
             std::process::id(),
@@ -5462,6 +5495,46 @@ mod tests {
             .expect("the first change, between base and head");
         assert_eq!(head, "head999");
         assert!(app.open_menu.is_none());
+    }
+
+    #[test]
+    fn the_first_editor_open_asks_which_editor_then_opens_the_file_in_it() {
+        let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
+        clone_with(&mut app, &pr, &["a.md"]);
+        app.prefs.editor_picked = false;
+        app.handle_key(key(KeyCode::Char('o')));
+        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
+        let menu = app.editor_menu.as_mut().expect("the editor list");
+        assert_eq!(
+            menu.open.as_ref().map(|target| target.path.as_str()),
+            Some("a.md")
+        );
+        menu.choices = vec![
+            EditorChoice::Shell,
+            EditorChoice::Known {
+                label: "Zed",
+                program: "zed",
+            },
+            EditorChoice::Custom,
+        ];
+        app.handle_key(key(KeyCode::Char('j')));
+        let Some(Action::SetEditor {
+            editor: Some(editor),
+            open: Some(target),
+        }) = app.handle_key(key(KeyCode::Enter))
+        else {
+            panic!("expected Zed saved and the file opened");
+        };
+        assert_eq!(
+            (editor.command.as_str(), target.path.as_str()),
+            ("zed {dir} {file}:{line}", "a.md")
+        );
+
+        // Once picked, o opens the editor at once.
+        app.prefs.editor_picked = true;
+        app.handle_key(key(KeyCode::Char('o')));
+        let action = app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(action, Some(Action::OpenEditor(_))), "{action:?}");
     }
 
     #[test]

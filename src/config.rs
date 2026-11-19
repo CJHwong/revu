@@ -265,6 +265,8 @@ pub struct ViewPrefs {
     pub tree_view: bool,
     pub hide_viewed: bool,
     pub file_list_hidden: bool,
+    /// The user picked an editor the first time o opened one, so o does not ask again.
+    pub editor_picked: bool,
 }
 
 impl Default for ViewPrefs {
@@ -277,6 +279,7 @@ impl Default for ViewPrefs {
             tree_view: true,
             hide_viewed: false,
             file_list_hidden: false,
+            editor_picked: false,
         }
     }
 }
@@ -320,6 +323,11 @@ pub fn changed_prefs(on_disk: &ViewPrefs, before: &ViewPrefs, after: &ViewPrefs)
             &on_disk.file_list_hidden,
             &before.file_list_hidden,
             &after.file_list_hidden,
+        ),
+        editor_picked: pick(
+            &on_disk.editor_picked,
+            &before.editor_picked,
+            &after.editor_picked,
         ),
     }
 }
