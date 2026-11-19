@@ -85,6 +85,27 @@ When the saved renderer is not installed, revu shows `word` instead and keeps th
 
 The shell command that `d` runs. `{repo}`, `{number}` and `{url}` are replaced. The default shows `gh pr diff {number} -R {repo}` in delta, or in `less` when delta is not installed.
 
+### editor
+
+The editor that `o` opens a file in, at a line. Without this key, revu runs `$VISUAL`, else `$EDITOR`, else `vi`, and passes the line the way the editor takes it:
+
+| Editor | Command | revu |
+|---|---|---|
+| VS Code, Cursor, Windsurf, VSCodium (`code`, `cursor`, `windsurf`, `codium`) | `code <clone> -g <file>:<line>` | stays on screen |
+| Zed, Sublime Text (`zed`, `subl`) | `zed <clone> <file>:<line>` | stays on screen |
+| JetBrains IDEs (`idea`, `pycharm`, `goland`, `webstorm`, `clion`, `rubymine`, `phpstorm`, `rustrover`) | `pycharm <clone> --line <line> <file>` | stays on screen |
+| Any other, such as vim, nvim, helix, nano, emacs, micro | `vim +<line> <file>` | waits until you quit the editor |
+
+An editor with its own window gets the clone too, so it opens the file inside the project. For any other editor, set the command:
+
+```yaml
+editor:
+  command: myeditor --goto {file}:{line} {dir}
+  wait: false
+```
+
+`{dir}` is the clone, `{file}` the file's full path, `{line}` the line. The paths are quoted for the shell. `wait: true`, the default, hands the terminal to the editor until it exits. `wait: false` starts it beside revu, for an editor with its own window.
+
 ## view.yaml
 
 | Field | Key | Meaning |

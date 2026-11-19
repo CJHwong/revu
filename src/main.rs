@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod editor;
+mod editor_command;
 mod file_tree;
 mod find;
 mod github;
@@ -30,7 +31,7 @@ use ratatui::DefaultTerminal;
 use ratatui::text::Text;
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -77,6 +78,8 @@ enum Message {
         path: String,
         outline: Option<syntax::Outline>,
     },
+    /// An editor started beside revu exited with an error.
+    EditorFailed(String),
     /// A write to GitHub finished: a review, a line comment, or a discard.
     Written {
         pr: PrRef,
@@ -202,6 +205,10 @@ fn main() -> Result<()> {
     };
     let mut app = App::new();
     app.renderer_names = renderer_names(&session.config);
+    app.editor_name = editor_command::editor_name(
+        session.config.editor.as_ref(),
+        &editor_command::shell_editor(),
+    );
     check_renderers(&session.config, &mut app);
     app.workspace_dirs = session.config.workspace_dirs.clone();
     app.updated_within_days = session.config.updated_within_days;
@@ -377,6 +384,7 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
             }
             Message::Files { pr, result } => app.set_files(&pr, result),
             Message::Written { pr, result } => app.set_written(&pr, result),
+            Message::EditorFailed(message) => app.error = Some(message),
             Message::LineDiff { pr, path, result } => app.set_line_rows(&pr, &path, result),
             Message::Outline {
                 pr,
@@ -1009,6 +1017,10 @@ fn refresh(app: &mut App, session: &mut Session) {
     match config::load_or_init(&session.config_path) {
         Ok(config) => {
             app.renderer_names = renderer_names(&config);
+            app.editor_name = editor_command::editor_name(
+                config.editor.as_ref(),
+                &editor_command::shell_editor(),
+            );
             check_renderers(&config, app);
             if config.theme != session.config.theme {
                 use_syntax_theme(app, &config.theme);
@@ -1268,30 +1280,37 @@ fn send_outline(sender: &mpsc::Sender<Message>, job: &DiffJob, commit: &str, pat
     });
 }
 
-/// Runs $VISUAL or $EDITOR, else vi, on a file in the clone with `+LINE`, which vim,
-/// nvim, nano, emacs and micro take. Without a known line, it opens at the first change.
+/// Opens a file in the clone at the line asked for, else at the file's first change. A
+/// terminal editor gets the screen until it exits; one with its own window starts beside
+/// revu, and the footer says so.
 fn open_editor(
     terminal: &mut DefaultTerminal,
     app: &mut App,
     session: &Session,
     target: &EditorTarget,
 ) -> Result<()> {
-    let line = target.line.or_else(|| first_change(target));
-    let mut command = Command::new("sh");
-    // Unquoted, so an editor with flags, such as "code -w", splits into its words.
-    command
+    let line = target.line.or_else(|| first_change(target)).unwrap_or(1);
+    let command = editor_command::editor_command(
+        session.config.editor.as_ref(),
+        &editor_command::shell_editor(),
+        &target.dir,
+        &target.path,
+        line,
+    );
+    let mut process = Command::new("sh");
+    process
         .arg("-c")
-        .arg(r#"${VISUAL:-${EDITOR:-vi}} "$@""#)
-        .arg("sh")
+        .arg(&command.shell)
         .current_dir(&target.dir);
-    if let Some(line) = line {
-        command.arg(format!("+{line}"));
+    if !command.wait {
+        start_beside(process, &command.name, session.sender.clone());
+        app.saved = Some(opened_note(&command.name, target, line));
+        return Ok(());
     }
-    command.arg(&target.path);
     let failure = suspended(terminal, session, || {
-        let failure = match command.status() {
+        let failure = match process.status() {
             Ok(status) if status.success() => None,
-            Ok(status) => Some(format!("{} exited with {status}", app::editor_name())),
+            Ok(status) => Some(format!("{} exited with {status}", command.name)),
             Err(error) => Some(format!("the editor did not start: {error}")),
         };
         if let Some(message) = &failure {
@@ -1301,6 +1320,36 @@ fn open_editor(
     })?;
     app.error = failure;
     Ok(())
+}
+
+/// Starts an editor that has its own window, and reports it if it fails.
+fn start_beside(mut process: Command, name: &str, sender: Sender<Message>) {
+    process
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let name = name.to_string();
+    thread::spawn(move || {
+        let failure = match process.output() {
+            Ok(output) if output.status.success() => return,
+            Ok(output) => format!(
+                "{name} exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            Err(error) => format!("{name} did not start: {error}"),
+        };
+        let _ = sender.send(Message::EditorFailed(failure));
+    });
+}
+
+/// The footer after an editor opened beside revu, warning when the clone is not at the PR.
+fn opened_note(name: &str, target: &EditorTarget, line: u64) -> String {
+    let opened = format!("opened {} at line {line} in {name}", target.path);
+    match &target.elsewhere {
+        Some(elsewhere) => format!("{opened}, but the clone is on {elsewhere}, not the PR's head"),
+        None => opened,
+    }
 }
 
 /// The new file's line of the first added line in the PR, else of its first line shown.

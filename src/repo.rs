@@ -457,6 +457,24 @@ pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+/// What the clone has checked out when it is not `commit`: its branch, else the short
+/// commit. None when it is `commit`, or when git cannot tell.
+pub fn checked_out_elsewhere(dir: &Path, commit: &str) -> Option<String> {
+    let head = git(dir, &["rev-parse", "HEAD"])
+        .ok()
+        .filter(|output| output.status.success())?;
+    let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    if head == commit || head.len() < 7 {
+        return None;
+    }
+    let branch = git(dir, &["symbolic-ref", "--short", "-q", "HEAD"]).ok()?;
+    let branch = String::from_utf8_lossy(&branch.stdout).trim().to_string();
+    Some(match branch.is_empty() {
+        true => head[..7].to_string(),
+        false => branch,
+    })
+}
+
 /// Replaces each `{name}` with its value. Values must already be quoted for the shell.
 pub fn fill_template(template: &str, values: &[(&str, String)]) -> String {
     values
@@ -983,6 +1001,51 @@ mod tests {
             show_file(dir, head, "Cargo.toml")
                 .unwrap()
                 .contains("[package]")
+        );
+    }
+
+    #[test]
+    fn the_clone_says_which_branch_it_is_on_when_not_at_the_pr() {
+        let dir = std::env::temp_dir().join(format!("revu-elsewhere-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| {
+            let output = git(&dir, args).unwrap();
+            ensure_success(&output, "git").unwrap();
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        run(&["init", "-q", "-b", "main"]);
+        let commit = [
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+        ];
+        for message in ["one", "two"] {
+            run(&[
+                &commit[..],
+                &["commit", "-q", "--allow-empty", "-m", message],
+            ]
+            .concat());
+        }
+        let head = run(&["rev-parse", "HEAD"]);
+        let older = run(&["rev-parse", "HEAD~1"]);
+        assert_eq!(checked_out_elsewhere(&dir, &head), None);
+        assert_eq!(
+            checked_out_elsewhere(&dir, &older),
+            Some("main".to_string())
+        );
+        run(&["checkout", "-q", "--detach", &older]);
+        assert_eq!(
+            checked_out_elsewhere(&dir, &head),
+            Some(older[..7].to_string())
+        );
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(
+            checked_out_elsewhere(&dir, &head),
+            None,
+            "no clone, no warning"
         );
     }
 

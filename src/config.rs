@@ -24,6 +24,14 @@ theme: dracula
 # workspace_dir: ~/Workspace
 # workspace_dir: [~/Workspace, ~/Workspace/side_projects]
 
+# The editor o opens a file in. Without this, revu runs $VISUAL or $EDITOR, and knows
+# how vim, helix, VS Code, Cursor, Zed, Sublime Text and the JetBrains IDEs take a line.
+# {dir} is the clone, {file} the file's full path, {line} the line. wait: false keeps
+# revu on screen, for an editor with its own window.
+# editor:
+#   command: code {dir} -g {file}:{line}
+#   wait: false
+
 # Everything below is revu's built-in defaults, shown commented out. While a key
 # stays commented, revu uses its current default, so a new release can improve it.
 # To set your own, uncomment the key and edit it; it then replaces that default.
@@ -106,6 +114,23 @@ pub struct Config {
     pub workspace_dirs: Vec<String>,
     #[serde(default = "default_renderers")]
     pub diff_renderers: Vec<Renderer>,
+    /// Without it, o runs $VISUAL or $EDITOR.
+    #[serde(default)]
+    pub editor: Option<EditorConfig>,
+}
+
+/// The command o runs to open a file at a line.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct EditorConfig {
+    /// `{dir}`, `{file}` and `{line}` are replaced, the paths quoted for the shell.
+    pub command: String,
+    /// Wait for the editor to exit, as for a terminal editor. False starts it beside revu.
+    #[serde(default = "wait_for_the_editor")]
+    pub wait: bool,
+}
+
+fn wait_for_the_editor() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -498,6 +523,21 @@ mod tests {
         assert_eq!(text.matches("workspace_dir:").count(), 1);
         assert_eq!(parse(&text).unwrap().workspace_dirs, ["~/My \"Work\""]);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_editor_is_optional_and_waits_unless_told_not_to() {
+        assert_eq!(parse("open_diff: x\n").unwrap().editor, None);
+        let config = parse("editor:\n  command: zed {file}:{line}\n").unwrap();
+        assert_eq!(
+            config.editor,
+            Some(EditorConfig {
+                command: "zed {file}:{line}".to_string(),
+                wait: true,
+            })
+        );
+        let config = parse("editor: {command: zed, wait: false}\n").unwrap();
+        assert!(!config.editor.unwrap().wait);
     }
 
     #[test]

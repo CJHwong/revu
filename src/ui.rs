@@ -3405,17 +3405,24 @@ fn render_open_menu(frame: &mut Frame, menu: &OpenMenu, paint: Paint) {
                 Some(line) => format!("line {line}"),
                 None => "its first change".to_string(),
             };
-            paint.span(
+            let mut spans = vec![paint.span(
                 format!("   {} on your clone's copy, at {at}", menu.editor_name),
                 theme.muted,
-            )
+            )];
+            if let Some(elsewhere) = &target.elsewhere {
+                spans.push(paint.span(
+                    format!(". The clone is on {elsewhere}, not the PR's head"),
+                    theme.warning,
+                ));
+            }
+            Line::from(spans)
         }
-        Err(why) => paint.span(format!("   {why}"), theme.danger),
+        Err(why) => Line::from(paint.span(format!("   {why}"), theme.danger)),
     };
     let items = [
         (
             "GitHub",
-            paint.span(format!("   {}", menu.github_note), theme.muted),
+            Line::from(paint.span(format!("   {}", menu.github_note), theme.muted)),
         ),
         ("Editor", editor_note),
     ];
@@ -3423,7 +3430,7 @@ fn render_open_menu(frame: &mut Frame, menu: &OpenMenu, paint: Paint) {
     for (index, (title, note)) in items.into_iter().enumerate() {
         let row = [
             Line::from(paint.bold(format!(" {title}"), theme.foreground)),
-            Line::from(note),
+            note,
         ];
         let selected = index == menu.selected;
         lines.extend(row.into_iter().map(|line| match selected {

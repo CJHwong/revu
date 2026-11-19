@@ -299,7 +299,7 @@ pub struct OpenMenu {
     pub github_note: String,
     /// The clone's copy, or why the editor cannot open it.
     pub editor: Result<EditorTarget, String>,
-    /// The editor's command, for the menu to name it.
+    /// The editor's name, for the menu; App fills it in.
     pub editor_name: String,
     /// 0 for GitHub, 1 for the editor.
     pub selected: usize,
@@ -313,15 +313,8 @@ pub struct EditorTarget {
     pub line: Option<u64>,
     /// Without a line, the editor opens at the file's first change between these commits.
     pub changes: Option<(String, String)>,
-}
-
-/// The editor the shell would pick: $VISUAL, then $EDITOR, then vi.
-pub fn editor_name() -> String {
-    ["VISUAL", "EDITOR"]
-        .iter()
-        .filter_map(|name| std::env::var(name).ok())
-        .find(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "vi".to_string())
+    /// The branch or commit the clone has checked out, when it is not the PR's head.
+    pub elsewhere: Option<String>,
 }
 
 /// A path for a GitHub URL, with the characters that would end or break it escaped.
@@ -720,7 +713,7 @@ impl DetailView {
                 ),
                 github_note: format!("the file at the PR head, line {line}"),
                 editor: self.editor_target(path, Some(*line as u64)),
-                editor_name: editor_name(),
+                editor_name: String::new(),
                 selected: 0,
             });
         }
@@ -743,7 +736,7 @@ impl DetailView {
             github: self.files_link(),
             github_note: "the file in the PR's Files changed".to_string(),
             editor: self.editor_target(&path, line),
-            editor_name: editor_name(),
+            editor_name: String::new(),
             file: path,
             selected: 0,
         })
@@ -759,17 +752,19 @@ impl DetailView {
                 "not in your clone's checkout; check out the PR branch to edit it".to_string(),
             );
         }
+        let detail = self.loaded();
         let changes = match line {
             Some(_) => None,
-            None => self
-                .loaded()
-                .map(|detail| (detail.base_oid.clone(), detail.head_oid.clone())),
+            None => detail.map(|detail| (detail.base_oid.clone(), detail.head_oid.clone())),
         };
+        let elsewhere = detail
+            .and_then(|detail| crate::repo::checked_out_elsewhere(&repo.dir, &detail.head_oid));
         Ok(EditorTarget {
             dir: repo.dir.clone(),
             path: path.to_string(),
             line,
             changes,
+            elsewhere,
         })
     }
 
@@ -2612,6 +2607,8 @@ pub struct App {
     inbox_generation: u64,
     /// Names of the configured diff renderers, in order; `m` cycles through them.
     pub renderer_names: Vec<String>,
+    /// The editor o offers, for the menu to name it.
+    pub editor_name: String,
     /// The view toggles a newly opened PR starts with; they follow the open PR.
     pub prefs: ViewPrefs,
 }
@@ -2662,6 +2659,10 @@ impl App {
             group_loading: Vec::new(),
             inbox_generation: 0,
             renderer_names: Vec::new(),
+            editor_name: crate::editor_command::editor_name(
+                None,
+                &crate::editor_command::shell_editor(),
+            ),
             prefs: ViewPrefs::default(),
         }
     }
@@ -3998,7 +3999,11 @@ impl App {
         if key == KeyCode::Char('o') {
             return match view.open_menu() {
                 Some(menu) => {
-                    self.open_menu = Some(menu);
+                    let editor_name = self.editor_name.clone();
+                    self.open_menu = Some(OpenMenu {
+                        editor_name,
+                        ..menu
+                    });
                     None
                 }
                 None => Some(Action::OpenBrowser(view.link())),
