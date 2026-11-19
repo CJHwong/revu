@@ -1,7 +1,7 @@
 //! Renders GitHub-flavored Markdown, plus the HTML GitHub allows in descriptions and
 //! comments, into terminal lines. A `<details>` block becomes a fold the user opens.
 
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::collections::HashSet;
@@ -12,6 +12,13 @@ use crate::theme::Theme;
 
 type Spans = Vec<Span<'static>>;
 
+/// What the gallery shows: an image by its URL, or a mermaid diagram by its source.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Visual {
+    Image(String),
+    Diagram(String),
+}
+
 /// Width-independent content. `layout` wraps it to a width.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Block {
@@ -20,7 +27,7 @@ pub enum Block {
         spans: Spans,
         indent: usize,
         /// The first image on the line, for the gallery to open at.
-        image: Option<String>,
+        image: Option<Visual>,
     },
     Blank,
     Rule,
@@ -53,7 +60,7 @@ pub struct TextRow {
     /// What Enter or a click on this row does instead of folding.
     pub action: Option<RowAction>,
     /// The image on this row's line, which Enter shows in the gallery.
-    pub image: Option<String>,
+    pub image: Option<Visual>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,8 +155,9 @@ pub fn parse(markdown: &str, theme: &Theme) -> Vec<Block> {
     group_sections(build(markdown, theme).finish())
 }
 
-/// The images the text shows as `[image: ...]`, in order. The gallery pages through them.
-pub fn images(markdown: &str, theme: &Theme) -> Vec<String> {
+/// The images the text shows as `[image: ...]` and its mermaid diagrams, in order. The
+/// gallery pages through them.
+pub fn images(markdown: &str, theme: &Theme) -> Vec<Visual> {
     build(markdown, theme).images
 }
 
@@ -598,9 +606,11 @@ struct Builder<'t> {
     cell: Option<Spans>,
     summary: Option<Spans>,
     /// Every image shown so far, in order.
-    images: Vec<String>,
+    images: Vec<Visual>,
     /// The first image on the line being built.
-    line_image: Option<String>,
+    line_image: Option<Visual>,
+    /// The source of the mermaid block being read. It is drawn when the block ends.
+    diagram: Option<String>,
 }
 
 impl<'t> Builder<'t> {
@@ -621,6 +631,7 @@ impl<'t> Builder<'t> {
             summary: None,
             images: Vec::new(),
             line_image: None,
+            diagram: None,
         }
     }
 
@@ -700,9 +711,12 @@ impl<'t> Builder<'t> {
                 self.flush();
                 self.quote_depth += 1;
             }
-            Tag::CodeBlock(_) => {
+            Tag::CodeBlock(kind) => {
                 self.flush();
                 self.code_block = true;
+                if matches!(kind, CodeBlockKind::Fenced(language) if language.trim() == "mermaid") {
+                    self.diagram = Some(String::new());
+                }
             }
             Tag::List(start) => {
                 self.flush();
@@ -747,6 +761,9 @@ impl<'t> Builder<'t> {
             }
             TagEnd::CodeBlock => {
                 self.code_block = false;
+                if let Some(source) = self.diagram.take() {
+                    self.diagram_lines(source);
+                }
                 self.end_block();
             }
             TagEnd::List(_) => {
@@ -835,6 +852,10 @@ impl<'t> Builder<'t> {
     }
 
     fn code_lines(&mut self, text: &str) {
+        if let Some(source) = &mut self.diagram {
+            source.push_str(text);
+            return;
+        }
         for line in text.trim_end_matches('\n').split('\n') {
             self.line.push(Span::raw("  "));
             self.line
@@ -865,13 +886,34 @@ impl<'t> Builder<'t> {
         }
     }
 
+    /// A mermaid block: a marker line, then its source. Every line of it opens the
+    /// gallery at the diagram.
+    fn diagram_lines(&mut self, source: String) {
+        let diagram = Visual::Diagram(source.clone());
+        self.images.push(diagram.clone());
+        self.line_image = Some(diagram.clone());
+        self.push(
+            "[diagram: mermaid]".to_string(),
+            Style::new().fg(self.theme.muted),
+        );
+        self.emit();
+        for line in source.trim_end_matches('\n').split('\n') {
+            self.line_image = Some(diagram.clone());
+            self.line.push(Span::raw("  "));
+            self.line
+                .push(Span::styled(line.to_string(), self.code_style()));
+            self.emit();
+        }
+    }
+
     /// Notes an image as its marker is drawn. In a summary or a table cell it joins the
     /// gallery, but no row opens at it.
     fn add_image(&mut self, url: String) {
+        let image = Visual::Image(url);
         if self.summary.is_none() && self.cell.is_none() && self.line_image.is_none() {
-            self.line_image = Some(url.clone());
+            self.line_image = Some(image.clone());
         }
-        self.images.push(url);
+        self.images.push(image);
     }
 
     fn flush(&mut self) {
@@ -1255,8 +1297,46 @@ mod tests {
         let markdown = "![one](https://a/1.png)\n\n<img src=\"https://a/icon.svg\">\n\n<details><summary>more</summary>\n\n<img alt=\"two\" src=\"https://a/2.png\">\n\n</details>";
         assert_eq!(
             images(markdown, &theme),
-            ["https://a/1.png", "https://a/2.png"],
+            [
+                Visual::Image("https://a/1.png".to_string()),
+                Visual::Image("https://a/2.png".to_string())
+            ],
             "an image with no alt is an icon the text skips, so the gallery skips it too"
+        );
+    }
+
+    #[test]
+    fn a_mermaid_block_joins_the_gallery_as_a_diagram() {
+        let theme = theme::by_name("dracula").unwrap();
+        let markdown = "![one](https://a/1.png)\n\n```mermaid\ngraph TD\n  A --> B\n```\n\n```rust\nfn main() {}\n```";
+        let diagram = Visual::Diagram("graph TD\n  A --> B\n".to_string());
+        assert_eq!(
+            images(markdown, &theme),
+            [
+                Visual::Image("https://a/1.png".to_string()),
+                diagram.clone()
+            ],
+            "a code block in another language is not a diagram"
+        );
+        let rows = render(markdown, 40, &[]);
+        let marked: Vec<String> = rows
+            .iter()
+            .filter(|row| row.image.as_ref() == Some(&diagram))
+            .map(|row| {
+                row.line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            marked
+                .iter()
+                .map(|line| line.trim_end())
+                .collect::<Vec<_>>(),
+            ["[diagram: mermaid]", "  graph TD", "    A --> B"],
+            "every row of the block opens the gallery at it"
         );
     }
 
@@ -1270,7 +1350,7 @@ mod tests {
         assert!(rows.len() > 1);
         assert!(
             rows.iter()
-                .all(|row| row.image.as_deref() == Some("https://a/1.png"))
+                .all(|row| row.image == Some(Visual::Image("https://a/1.png".to_string())))
         );
         assert_eq!(render("plain", 20, &[])[0].image, None);
     }

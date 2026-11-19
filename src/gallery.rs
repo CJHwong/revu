@@ -1,6 +1,6 @@
-//! The image gallery: a full-screen view of the PR's images, one at a time. The terminal's
-//! graphics protocol draws them (kitty, iTerm2 or sixel); without one they are drawn in
-//! colored half blocks.
+//! The image gallery: a full-screen view of the PR's images and mermaid diagrams, one at a
+//! time. The terminal's graphics protocol draws them (kitty, iTerm2 or sixel); without one
+//! they are drawn in colored half blocks.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -13,14 +13,16 @@ use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::Protocol;
 use ratatui_image::{FontSize, Resize};
 
+use crate::markdown::Visual;
+
 /// The largest image revu downloads.
 const MAX_BYTES: &str = "25M";
 
 pub struct Gallery {
-    pub urls: Vec<String>,
+    pub items: Vec<Visual>,
     pub at: usize,
-    /// Each image seen since the gallery opened, by URL.
-    pub loaded: HashMap<String, Loaded>,
+    /// Each item seen since the gallery opened.
+    pub loaded: HashMap<Visual, Loaded>,
 }
 
 pub enum Loaded {
@@ -38,43 +40,43 @@ pub struct Shown {
 }
 
 impl Gallery {
-    /// Opens at `start` when the list holds it, else at the first image. None when the
-    /// PR shows no image.
-    pub fn open(urls: Vec<String>, start: Option<&str>) -> Option<Gallery> {
-        if urls.is_empty() {
+    /// Opens at `start` when the list holds it, else at the first item. None when the
+    /// PR shows no image or diagram.
+    pub fn open(items: Vec<Visual>, start: Option<&Visual>) -> Option<Gallery> {
+        if items.is_empty() {
             return None;
         }
         let at = start
-            .and_then(|url| urls.iter().position(|each| each == url))
+            .and_then(|start| items.iter().position(|each| each == start))
             .unwrap_or(0);
         Some(Gallery {
-            urls,
+            items,
             at,
             loaded: HashMap::new(),
         })
     }
 
-    pub fn current(&self) -> &str {
-        &self.urls[self.at]
+    pub fn current(&self) -> &Visual {
+        &self.items[self.at]
     }
 
     /// Moves one image on or back. It stops at either end.
     pub fn step(&mut self, forward: bool) {
         self.at = if forward {
-            (self.at + 1).min(self.urls.len() - 1)
+            (self.at + 1).min(self.items.len() - 1)
         } else {
             self.at.saturating_sub(1)
         };
     }
 
-    /// The current image's URL when it still needs a fetch, marked as loading.
-    pub fn start_load(&mut self) -> Option<String> {
-        let url = self.current().to_string();
-        if self.loaded.contains_key(&url) {
+    /// The current item when it still needs loading, marked as loading.
+    pub fn start_load(&mut self) -> Option<Visual> {
+        let item = self.current().clone();
+        if self.loaded.contains_key(&item) {
             return None;
         }
-        self.loaded.insert(url.clone(), Loaded::Loading);
-        Some(url)
+        self.loaded.insert(item.clone(), Loaded::Loading);
+        Some(item)
     }
 }
 
@@ -145,11 +147,17 @@ pub fn sends_token(url: &str) -> bool {
     host == "github.com" || host.ends_with(".githubusercontent.com")
 }
 
-/// Fetches, decodes and encodes one image for `fit` cells. It runs on a worker thread.
-pub fn load(url: &str, picker: &Picker, fit: Size) -> Result<Shown, String> {
-    let bytes = fetch(url)?;
-    let image = image::load_from_memory(&bytes)
-        .map_err(|error| format!("revu cannot show this image ({error})"))?;
+/// Fetches an image, or draws a diagram, and encodes it for `fit` cells. It runs on a
+/// worker thread.
+pub fn load(item: &Visual, picker: &Picker, fit: Size) -> Result<Shown, String> {
+    let image = match item {
+        Visual::Image(url) => {
+            let bytes = fetch(url)?;
+            image::load_from_memory(&bytes)
+                .map_err(|error| format!("revu cannot show this image ({error})"))?
+        }
+        Visual::Diagram(source) => draw_diagram(source, pixels(picker, fit))?,
+    };
     let image = scale_to(image, picker, fit);
     let protocol = encode(&image, picker, fit)?;
     Ok(Shown {
@@ -174,13 +182,56 @@ fn encode(image: &DynamicImage, picker: &Picker, fit: Size) -> Result<Protocol, 
 
 /// Shrinks a large image to the screen's pixels once, so it is not encoded at full size.
 fn scale_to(image: DynamicImage, picker: &Picker, fit: Size) -> DynamicImage {
-    let font = picker.font_size();
-    let width = u32::from(fit.width) * u32::from(font.width);
-    let height = u32::from(fit.height) * u32::from(font.height);
+    let (width, height) = pixels(picker, fit);
     if image.width() <= width && image.height() <= height {
         return image;
     }
     image.thumbnail(width.max(1), height.max(1))
+}
+
+/// The pixels `fit` cells cover.
+fn pixels(picker: &Picker, fit: Size) -> (u32, u32) {
+    let font = picker.font_size();
+    (
+        u32::from(fit.width) * u32::from(font.width),
+        u32::from(fit.height) * u32::from(font.height),
+    )
+}
+
+/// Lays out a mermaid diagram and paints it on white, as large as fits `space` pixels.
+pub fn draw_diagram(source: &str, space: (u32, u32)) -> Result<DynamicImage, String> {
+    let svg = mermaid_rs_renderer::render(source)
+        .map_err(|error| format!("revu cannot draw this diagram ({error})"))?;
+    let tree = resvg::usvg::Tree::from_str(&svg, &svg_options())
+        .map_err(|error| format!("revu cannot draw this diagram ({error})"))?;
+    let size = tree.size();
+    let scale = (space.0 as f32 / size.width())
+        .min(space.1 as f32 / size.height())
+        .max(0.01);
+    let width = (size.width() * scale).ceil().max(1.0) as u32;
+    let height = (size.height() * scale).ceil().max(1.0) as u32;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)
+        .ok_or("revu cannot draw this diagram (it has no size)")?;
+    pixmap.fill(resvg::tiny_skia::Color::WHITE);
+    let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    let image = image::RgbaImage::from_raw(width, height, pixmap.take())
+        .ok_or("revu cannot draw this diagram (wrong pixel count)")?;
+    Ok(DynamicImage::ImageRgba8(image))
+}
+
+/// The system's fonts, read once, for the diagram's text.
+fn svg_options() -> resvg::usvg::Options<'static> {
+    static FONTS: OnceLock<std::sync::Arc<resvg::usvg::fontdb::Database>> = OnceLock::new();
+    let fonts = FONTS.get_or_init(|| {
+        let mut database = resvg::usvg::fontdb::Database::new();
+        database.load_system_fonts();
+        std::sync::Arc::new(database)
+    });
+    resvg::usvg::Options {
+        fontdb: fonts.clone(),
+        ..resvg::usvg::Options::default()
+    }
 }
 
 /// Downloads with curl. The token goes in on stdin, so other processes cannot read it
@@ -240,37 +291,56 @@ fn token() -> Option<String> {
 mod tests {
     use super::*;
 
-    fn urls() -> Vec<String> {
+    fn image(url: &str) -> Visual {
+        Visual::Image(url.to_string())
+    }
+
+    fn items() -> Vec<Visual> {
         ["https://a/1.png", "https://a/2.png", "https://a/3.png"]
-            .map(String::from)
+            .map(image)
             .to_vec()
     }
 
     #[test]
     fn the_gallery_opens_at_the_image_under_the_cursor_else_the_first() {
-        let at = |start| Gallery::open(urls(), start).unwrap().at;
-        assert_eq!(at(Some("https://a/2.png")), 1);
+        let at = |start: Option<Visual>| Gallery::open(items(), start.as_ref()).unwrap().at;
+        assert_eq!(at(Some(image("https://a/2.png"))), 1);
         assert_eq!(at(None), 0);
-        assert_eq!(at(Some("https://elsewhere/x.png")), 0);
+        assert_eq!(at(Some(image("https://elsewhere/x.png"))), 0);
         assert!(Gallery::open(Vec::new(), None).is_none());
     }
 
     #[test]
     fn stepping_stops_at_either_end() {
-        let mut gallery = Gallery::open(urls(), None).unwrap();
+        let mut gallery = Gallery::open(items(), None).unwrap();
         gallery.step(false);
         assert_eq!(gallery.at, 0);
         gallery.step(true);
         gallery.step(true);
         gallery.step(true);
-        assert_eq!(gallery.current(), "https://a/3.png");
+        assert_eq!(gallery.current(), &image("https://a/3.png"));
     }
 
     #[test]
-    fn an_image_is_fetched_once() {
-        let mut gallery = Gallery::open(urls(), None).unwrap();
-        assert_eq!(gallery.start_load().as_deref(), Some("https://a/1.png"));
+    fn an_image_is_loaded_once() {
+        let mut gallery = Gallery::open(items(), None).unwrap();
+        assert_eq!(gallery.start_load(), Some(image("https://a/1.png")));
         assert_eq!(gallery.start_load(), None);
+    }
+
+    #[test]
+    fn a_diagram_is_drawn_to_fit_the_space() {
+        let drawn = draw_diagram("graph TD\n  A[Start] --> B{Done?}\n", (400, 300)).unwrap();
+        assert!(drawn.width() <= 400 && drawn.height() <= 300);
+        assert!(
+            drawn.width() == 400 || drawn.height() == 300,
+            "the diagram grows until one side fills the space"
+        );
+        let error = draw_diagram("this is not mermaid", (400, 300)).unwrap_err();
+        assert!(
+            error.starts_with("revu cannot draw this diagram"),
+            "{error}"
+        );
     }
 
     #[test]

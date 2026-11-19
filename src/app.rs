@@ -52,8 +52,8 @@ pub enum Action {
         changed: Vec<String>,
     },
     RunDiff(PrRef),
-    /// Fetch an image for the gallery.
-    LoadImage(String),
+    /// Fetch an image, or draw a diagram, for the gallery.
+    LoadImage(crate::markdown::Visual),
     /// The words of the PR's changed lines, for the find prompt to complete.
     FindWords {
         pr: PrRef,
@@ -372,7 +372,7 @@ pub struct OverviewLayout {
     pub width: usize,
     pub rows: Vec<TextRow>,
     /// Every image the Overview shows, in order, for the gallery.
-    pub images: Vec<String>,
+    pub images: Vec<crate::markdown::Visual>,
 }
 
 pub struct DetailView {
@@ -4587,16 +4587,16 @@ impl App {
         let rows = &layout.rows;
         let start = rows
             .get(view.cursor)
-            .and_then(|row| row.image.as_deref())
+            .and_then(|row| row.image.as_ref())
             .or_else(|| {
                 rows.iter()
                     .skip(view.scroll)
                     .take(view.page)
-                    .find_map(|row| row.image.as_deref())
+                    .find_map(|row| row.image.as_ref())
             });
         let gallery = crate::gallery::Gallery::open(layout.images.clone(), start);
         if gallery.is_none() {
-            self.error = Some("this pull request shows no image".to_string());
+            self.error = Some("this pull request shows no image or diagram".to_string());
         }
         self.gallery = gallery;
         self.gallery_load()
@@ -4618,25 +4618,33 @@ impl App {
                 gallery.step(true);
                 return self.gallery_load();
             }
-            KeyCode::Char('o') => return Some(Action::OpenBrowser(gallery.current().to_string())),
+            KeyCode::Char('o') => {
+                if let crate::markdown::Visual::Image(url) = gallery.current() {
+                    return Some(Action::OpenBrowser(url.clone()));
+                }
+            }
             _ => {}
         }
         None
     }
 
-    /// A fetched image arrived. It is dropped when its gallery has closed.
-    pub fn set_image(&mut self, url: String, result: Result<crate::gallery::Shown, String>) {
+    /// A loaded image or diagram arrived. It is dropped when its gallery has closed.
+    pub fn set_image(
+        &mut self,
+        item: crate::markdown::Visual,
+        result: Result<crate::gallery::Shown, String>,
+    ) {
         let Some(gallery) = self.gallery.as_mut() else {
             return;
         };
-        if !gallery.loaded.contains_key(&url) {
+        if !gallery.loaded.contains_key(&item) {
             return;
         }
         let loaded = match result {
             Ok(shown) => crate::gallery::Loaded::Ready(shown),
             Err(error) => crate::gallery::Loaded::Failed(error),
         };
-        gallery.loaded.insert(url, loaded);
+        gallery.loaded.insert(item, loaded);
     }
 
     /// Starts the PR over on the same tab. The file list and the clone are looked up
@@ -7284,29 +7292,30 @@ mod tests {
 
     #[test]
     fn the_gallery_opens_at_the_image_row_and_pages_through_the_pr() {
+        let image = |url: &str| crate::markdown::Visual::Image(url.to_string());
         let (mut app, _) = files_tab(Vec::new());
         let view = view_mut(&mut app);
         view.tab = Tab::Overview;
         let mut rows: Vec<TextRow> = (0..3)
             .map(|_| TextRow::plain(ratatui::text::Line::from("text")))
             .collect();
-        rows[1].image = Some("https://a/2.png".to_string());
+        rows[1].image = Some(image("https://a/2.png"));
         view.overview = Some(OverviewLayout {
             width: 60,
             rows,
-            images: vec!["https://a/1.png".to_string(), "https://a/2.png".to_string()],
+            images: vec![image("https://a/1.png"), image("https://a/2.png")],
         });
         view.cursor = 1;
 
         let load = app.handle_key(key(KeyCode::Enter));
-        assert!(matches!(load, Some(Action::LoadImage(url)) if url == "https://a/2.png"));
+        assert!(matches!(load, Some(Action::LoadImage(item)) if item == image("https://a/2.png")));
         assert_eq!(app.gallery.as_ref().unwrap().at, 1);
         assert!(
             app.handle_key(key(KeyCode::Char('l'))).is_none(),
             "no image after the last"
         );
         let back = app.handle_key(key(KeyCode::Char('h')));
-        assert!(matches!(back, Some(Action::LoadImage(url)) if url == "https://a/1.png"));
+        assert!(matches!(back, Some(Action::LoadImage(item)) if item == image("https://a/1.png")));
         let open = app.handle_key(key(KeyCode::Char('o')));
         assert!(matches!(open, Some(Action::OpenBrowser(url)) if url == "https://a/1.png"));
         app.handle_key(key(KeyCode::Esc));
@@ -7322,7 +7331,7 @@ mod tests {
         view.page = 3;
         let on_screen = app.handle_key(key(KeyCode::Char('i')));
         assert!(
-            matches!(on_screen, Some(Action::LoadImage(url)) if url == "https://a/2.png"),
+            matches!(on_screen, Some(Action::LoadImage(item)) if item == image("https://a/2.png")),
             "i off an image row opens at the first image on screen"
         );
         app.handle_key(key(KeyCode::Esc));
@@ -7332,7 +7341,7 @@ mod tests {
         view.page = 1;
         let first = app.handle_key(key(KeyCode::Char('i')));
         assert!(
-            matches!(first, Some(Action::LoadImage(url)) if url == "https://a/1.png"),
+            matches!(first, Some(Action::LoadImage(item)) if item == image("https://a/1.png")),
             "with no image on screen, i opens at the PR's first image"
         );
         app.handle_key(key(KeyCode::Esc));
@@ -7345,7 +7354,7 @@ mod tests {
         }];
         let clicked = app.handle_click(5, 1);
         assert!(
-            matches!(clicked, Some(Action::LoadImage(url)) if url == "https://a/2.png"),
+            matches!(clicked, Some(Action::LoadImage(item)) if item == image("https://a/2.png")),
             "a click on an image row opens the gallery at it"
         );
     }

@@ -560,9 +560,9 @@ fn shown_items(activity: &PrActivity, view: CommentView) -> Vec<Comment> {
     items
 }
 
-/// Every image the Overview shows, in its order: the description, then each comment and
-/// its threads. Images in closed folds count too.
-pub fn images(context: &Context) -> Vec<String> {
+/// Every image and diagram the Overview shows, in its order: the description, then each
+/// comment and its threads. Those in closed folds count too.
+pub fn images(context: &Context) -> Vec<markdown::Visual> {
     let mut urls = markdown::images(&context.detail.body, context.theme);
     let Some(Ok(activity)) = context.activity else {
         return urls;
@@ -826,13 +826,14 @@ mod tests {
             theme: &theme,
             now: detail.created_at,
         };
+        let image = |url: &str| markdown::Visual::Image(url.to_string());
         let oldest = images(&context(CommentView::default()));
         assert_eq!(
             oldest,
             [
-                "https://a/desc.png",
-                "https://a/first.png",
-                "https://a/reply.png"
+                image("https://a/desc.png"),
+                image("https://a/first.png"),
+                image("https://a/reply.png")
             ]
         );
         let newest = images(&context(CommentView {
@@ -842,9 +843,9 @@ mod tests {
         assert_eq!(
             newest,
             [
-                "https://a/desc.png",
-                "https://a/reply.png",
-                "https://a/first.png"
+                image("https://a/desc.png"),
+                image("https://a/reply.png"),
+                image("https://a/first.png")
             ],
             "the gallery follows the list's order"
         );
