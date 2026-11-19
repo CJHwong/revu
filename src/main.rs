@@ -51,7 +51,7 @@ enum Message {
     GhProblem(github::GhProblem),
     /// An image for the gallery, fetched and encoded.
     Image {
-        url: String,
+        item: markdown::Visual,
         result: Result<gallery::Shown, String>,
     },
     /// The repo's labels, for the label menu.
@@ -401,7 +401,7 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
             Message::LineNames { pr, names } => app.set_line_names(&pr, names),
             Message::Definitions { pr, name, result } => app.set_definitions(&pr, name, result),
             Message::Labels { pr, result } => app.set_repo_labels(&pr, result),
-            Message::Image { url, result } => app.set_image(url, result),
+            Message::Image { item, result } => app.set_image(item, result),
             Message::FilesProgress { pr, loaded, total } => {
                 app.set_files_progress(&pr, loaded, total)
             }
@@ -434,15 +434,15 @@ fn load_image(
     terminal: &DefaultTerminal,
     app: &mut App,
     session: &Session,
-    url: String,
+    item: markdown::Visual,
 ) -> Result<()> {
     let screen = terminal.size()?;
     let fit = gallery::image_area(Rect::new(0, 0, screen.width, screen.height)).as_size();
     let picker = app.picker.get_or_insert_with(gallery::picker).clone();
     let sender = session.sender.clone();
     thread::spawn(move || {
-        let result = gallery::load(&url, &picker, fit);
-        let _ = sender.send(Message::Image { url, result });
+        let result = gallery::load(&item, &picker, fit);
+        let _ = sender.send(Message::Image { item, result });
     });
     Ok(())
 }
@@ -459,7 +459,7 @@ fn perform(
         Action::Refresh => refresh(app, session),
         Action::FetchDetail(pr) => start_load(app, session, pr),
         Action::OpenBrowser(url) => open_browser(app, &url),
-        Action::LoadImage(url) => load_image(terminal, app, session, url)?,
+        Action::LoadImage(item) => load_image(terminal, app, session, item)?,
         Action::RunDiff(pr) => run_diff(terminal, app, session, &pr)?,
         Action::OpenEditor(target) => open_editor(terminal, app, session, &target)?,
         Action::LineNames {

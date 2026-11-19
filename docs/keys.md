@@ -49,11 +49,13 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 | `]` / `[` | Next or previous card or folded block |
 | `f` / `F` / `n` | Filter the comments (All, Unresolved, Mine), flip oldest or newest first, hide bots. Mine shows only your own words, with the threads you replied in open. |
 | `e` | Labels: type to filter, `↑`/`↓` move, `Space` ticks, `Enter` applies the changes to GitHub. |
-| `i` | Images: every image in the pull request, the description first, then the comments in the list's order. A click on an `[image: ...]` line, or `Enter` with the cursor on it, opens the gallery at that image. Otherwise `i` starts at the first image on screen. See [Images](#images). |
+| `i` | Images: every image and mermaid diagram in the pull request, the description first, then the comments in the list's order. A click on an `[image: ...]` line or a mermaid block, or `Enter` with the cursor on it, opens the gallery at that image. Otherwise `i` starts at the first image on screen. See [Images](#images). |
 
 ## Images
 
-The gallery shows one image at a time over the whole screen. `h` / `l` (or `←` / `→`) go to the previous or next image, `o` opens the current one in the browser, and `Esc` or `q` closes it.
+The gallery shows one image or diagram at a time over the whole screen. `h` / `l` (or `←` / `→`) go to the previous or next one, `o` opens the current image in the browser, and `Esc` or `q` closes it.
+
+A ` ```mermaid ` block shows as `[diagram: mermaid]` above its source. In the gallery, revu draws it as a picture itself, offline, with no browser or Node.
 
 Ghostty and kitty show the real image through the kitty graphics protocol, and iTerm2 and WezTerm through iTerm2's. revu tells them apart by `TERM` and `TERM_PROGRAM`. Every other terminal, and any terminal inside tmux, shows the image in colored half blocks. revu downloads images with `curl`, and sends your `gh` token only to GitHub's own hosts, so attachments on private repositories load. It shows PNG, JPEG, GIF and WebP; for an SVG, `o` opens it in the browser.
 

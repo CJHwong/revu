@@ -18,6 +18,7 @@ use crate::file_tree::FileRow;
 use crate::gallery::{self, Gallery, Loaded};
 use crate::github::GhProblem;
 use crate::line_diff::{DiffRow, RowKind};
+use crate::markdown::Visual;
 use crate::model::{
     ChangedFile, CheckLine, CheckState, CheckSummary, CommitLine, Group, Label, Lifecycle,
     MergeMethod, MergeRequest, PrActivity, PrDetail, PrRef, PrSummary, RateLimit, ReviewState,
@@ -119,7 +120,11 @@ fn render_gallery(frame: &mut Frame, gallery: &mut Gallery, picker: &Picker, pai
     let theme = paint.theme;
     let screen = frame.area();
     frame.render_widget(Clear, screen);
-    let title = format!(" Image {} of {} ", gallery.at + 1, gallery.urls.len());
+    let kind = match gallery.current() {
+        Visual::Image(_) => "Image",
+        Visual::Diagram(_) => "Diagram",
+    };
+    let title = format!(" {kind} {} of {} ", gallery.at + 1, gallery.items.len());
     let frame_block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(theme.accent))
@@ -132,21 +137,23 @@ fn render_gallery(frame: &mut Frame, gallery: &mut Gallery, picker: &Picker, pai
         width: screen.width.saturating_sub(2),
         height: 1,
     };
-    frame.render_widget(
-        Paragraph::new(paint.span(
-            " h/l previous/next  o open in browser  esc close",
-            theme.muted,
-        )),
-        keys,
-    );
+    let key_hint = match gallery.current() {
+        Visual::Image(_) => " h/l previous/next  o open in browser  esc close",
+        Visual::Diagram(_) => " h/l previous/next  esc close",
+    };
+    frame.render_widget(Paragraph::new(paint.span(key_hint, theme.muted)), keys);
     let area = gallery::image_area(screen);
-    let url = gallery.current().to_string();
-    let message = match gallery.loaded.get_mut(&url) {
-        None | Some(Loaded::Loading) => Some((format!("loading {url}"), theme.warning)),
-        Some(Loaded::Failed(error)) => Some((
-            format!("{error}\n{url}\no opens it in the browser"),
-            theme.danger,
-        )),
+    let item = gallery.current().clone();
+    let (waiting, failed) = match &item {
+        Visual::Image(url) => (
+            format!("loading {url}"),
+            format!("{url}\no opens it in the browser"),
+        ),
+        Visual::Diagram(_) => ("drawing the diagram".to_string(), String::new()),
+    };
+    let message = match gallery.loaded.get_mut(&item) {
+        None | Some(Loaded::Loading) => Some((waiting, theme.warning)),
+        Some(Loaded::Failed(error)) => Some((format!("{error}\n{failed}"), theme.danger)),
         Some(Loaded::Ready(shown)) => draw_image(frame, shown, picker, area)
             .err()
             .map(|error| (error, theme.danger)),
@@ -829,7 +836,7 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "i",
-                "images: every image in the PR, h/l previous/next, o browser, esc closes",
+                "images and mermaid diagrams in the PR, h/l previous/next, o browser, esc closes",
             ),
             ("], [", "next or previous card or folded block"),
             (

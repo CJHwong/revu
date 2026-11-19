@@ -32,3 +32,5 @@ tree-sitter-md = "0.3"
 tree-sitter-toml-ng = "0.7"
 ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+mermaid-rs-renderer = { version = "0.3.1", default-features = false }
+resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
