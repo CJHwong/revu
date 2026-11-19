@@ -468,14 +468,27 @@ fn render_inbox(frame: &mut Frame, app: &mut App, paint: Paint) {
     app.preview_shown = preview_area.is_some();
     let row_width = list_area.width.saturating_sub(2) as usize;
     let selected = app.list_state.selected();
-    let items: Vec<ListItem> = app
-        .rows()
-        .into_iter()
+    let rows = app.rows();
+    let items: Vec<ListItem> = rows
+        .iter()
         .enumerate()
-        .map(|(index, row)| row_item(app, row, row_width, selected == Some(index), paint))
+        .map(|(index, row)| {
+            // Groups sit apart. A PR already ends with a blank line, so a header after
+            // one needs no second.
+            let header = matches!(row, Row::Header(_));
+            let gap_above =
+                header && matches!(rows.get(index.wrapping_sub(1)), Some(Row::Header(_)));
+            let item = RowItem {
+                row: *row,
+                gap_above,
+                selected: selected == Some(index),
+            };
+            row_item(app, item, row_width, paint)
+        })
         .collect();
     let heights: Vec<usize> = items.iter().map(ListItem::height).collect();
-    let list = List::new(items).highlight_style(Style::new().bg(paint.theme.selection));
+    // row_item paints the selection on its text lines, so the blank lines stay blank.
+    let list = List::new(items);
     frame.render_stateful_widget(list, list_area, &mut app.list_state);
     app.inbox_clicks = list_targets(list_area, &heights, app.list_state.offset());
     if let Some(area) = preview_area {
@@ -573,19 +586,43 @@ fn inbox_status(app: &App, paint: Paint) -> Line<'static> {
     Line::from(spans)
 }
 
-fn row_item(app: &App, row: Row, width: usize, selected: bool, paint: Paint) -> ListItem<'static> {
-    match row {
+/// One inbox row, and where it sits.
+#[derive(Clone, Copy)]
+struct RowItem {
+    row: Row,
+    /// A blank line goes above every group header but the first.
+    gap_above: bool,
+    selected: bool,
+}
+
+fn row_item(app: &App, item: RowItem, width: usize, paint: Paint) -> ListItem<'static> {
+    let mut lines = match item.row {
         Row::Header(group_index) => {
             let loading = app.group_loading.get(group_index).copied().unwrap_or(false);
             let group = &app.groups[group_index];
             let matching = (!app.filter().is_empty()).then(|| app.shown_prs(group).count());
-            ListItem::new(header_line(group, matching, loading, paint))
+            vec![header_line(group, matching, loading, paint)]
         }
         Row::Pr(group_index, pr_index) => {
             let pr = &app.groups[group_index].prs[pr_index];
-            pr_item(pr, app.seen.is_new(pr), width, selected, paint)
+            pr_lines(pr, app.seen.is_new(pr), width, item.selected, paint).to_vec()
         }
+    };
+    if item.selected {
+        let selection = Style::new().bg(paint.theme.selection);
+        lines = lines
+            .into_iter()
+            .map(|line| line.patch_style(selection))
+            .collect();
     }
+    if item.gap_above {
+        lines.insert(0, Line::default());
+    }
+    // A blank line after each PR keeps one PR's two lines apart from the next one's.
+    if matches!(item.row, Row::Pr(..)) {
+        lines.push(Line::default());
+    }
+    ListItem::new(Text::from(lines))
 }
 
 /// `matching` is how many rows pass the inbox filter, when one is set.
@@ -626,13 +663,13 @@ fn secondary_color(selected: bool, theme: &Theme) -> Color {
 }
 
 /// `new` marks a PR with commits or comments since you last left it.
-fn pr_item(
+fn pr_lines(
     pr: &PrSummary,
     new: bool,
     width: usize,
     selected: bool,
     paint: Paint,
-) -> ListItem<'static> {
+) -> [Line<'static>; 2] {
     let theme = paint.theme;
     let secondary = secondary_color(selected, theme);
     let badges = Line::from(badge_spans(pr, secondary, paint));
@@ -668,7 +705,7 @@ fn pr_item(
         second.spans.push(Span::raw(" ".repeat(gap)));
         second.spans.extend(labels);
     }
-    ListItem::new(Text::from(vec![Line::from(first), second]))
+    [Line::from(first), second]
 }
 
 fn turn_spans(pr: &PrSummary, secondary: Color, paint: Paint) -> Vec<Span<'static>> {
@@ -4393,6 +4430,63 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(screen.contains("No groups in config.yaml"), "{screen}");
+    }
+
+    #[test]
+    fn inbox_rows_have_room_and_the_selection_skips_the_blank_lines() {
+        let theme = theme::by_name("dracula").unwrap();
+        let mut app = App::new();
+        app.loading = false;
+        let group = |title: &str, collapsed: bool| Group {
+            title: title.into(),
+            total: 1,
+            prs: vec![summary()],
+            collapsed,
+        };
+        app.groups = vec![
+            group("Open", false),
+            group("Folded", true),
+            group("Last", true),
+        ];
+        app.list_state.select(Some(1));
+        let backend = ratatui::backend::TestBackend::new(100, 12);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render(frame, &mut app, &theme, Utc::now()))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let text = |row: u16| {
+            (0..100)
+                .map(|column| buffer[(column, row)].symbol().to_string())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        };
+        let lines: Vec<String> = (1..7).map(text).collect();
+        assert!(lines[0].contains("Open"), "{lines:?}");
+        assert!(
+            lines[1].contains("Fix") && lines[2].contains("acme/api#1"),
+            "{lines:?}"
+        );
+        assert_eq!(lines[3], "", "a blank line after the PR");
+        assert!(
+            lines[4].contains("Folded"),
+            "no second blank after a PR: {lines:?}"
+        );
+        assert_eq!(lines[5], "", "a blank line between folded groups too");
+        let background = |row: u16| buffer[(50, row)].bg;
+        // The list starts on screen row 1, under the top line.
+        assert_eq!(
+            background(2),
+            theme.selection,
+            "the selected PR's first line"
+        );
+        assert_eq!(background(3), theme.selection, "and its second");
+        assert_eq!(
+            background(4),
+            background(6),
+            "the blank line is not selected"
+        );
     }
 
     #[test]
