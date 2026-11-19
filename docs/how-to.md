@@ -63,6 +63,23 @@ To throw away the pending review and its line comments instead, press `X`, then 
 
 On your own pull request, and on one that is merged or closed, the review takes only Comment.
 
+## Hand a spot to a coding agent
+
+1. Put the cursor where the question is. In select lines (`S`), that is a line, a `V` range, or a thread. On any tab, it is the pull request as a whole; on Files changed, also the selected file.
+2. Press `a`. The box lists what revu attaches. Write what you want the agent to do. `Tab` completes the word before the cursor from the diff's words and file names, shown dim ahead of it.
+3. Press `ctrl+s`, pick where it goes with `j`/`k`, and press `Enter`. `Esc` goes back to the box.
+
+The list offers, in order:
+
+- **Claude Code in tmux**: a pane in your clone's folder that runs Claude Code. revu pastes the text into its prompt and takes you to the pane. You press `Enter` there, as a dialog open in the pane would take revu's `Enter` as a yes.
+- **Codex session**: a Codex session started in your clone in the last day. revu queues the text with `codex queue`; the session runs it after its current turn.
+- **New Claude Code session** and **New Codex session**: start in your clone with the text as the prompt. Inside tmux, in a new tmux window. Outside tmux, in a new tab of Ghostty, iTerm2, WezTerm, kitty, GNOME Terminal or Konsole, or a new Terminal window on macOS. In any other terminal, in this one until you quit the agent. kitty needs `allow_remote_control` in its config.
+- **Copy to clipboard**: paste it into any agent.
+
+The agent gets the PR, its base and head, your clone, then the lines in the same Markdown that `y` copies, and the thread, then your request. When the clone is on another branch, it also says how to read the PR's code with `git show` and `git diff`.
+
+If a send fails, revu copies the text to the clipboard and says why. The agent sees the clone's working tree, which is the PR's code only when its branch is checked out; the box says when the clone is on another branch. The first time an agent opens a folder, it may ask whether you trust it.
+
 ## Merge a pull request
 
 1. Press `M` on any tab of the pull request.

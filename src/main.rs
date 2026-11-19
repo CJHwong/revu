@@ -1,3 +1,4 @@
+mod agent_tab;
 mod app;
 mod config;
 mod editor;
@@ -6,6 +7,7 @@ mod file_tree;
 mod find;
 mod gallery;
 mod github;
+mod handoff;
 mod highlight;
 mod line_diff;
 mod markdown;
@@ -589,7 +591,22 @@ fn perform(
                 }
             }
         }
-        Action::Copy(text) => copy_to_clipboard(app, &text),
+        Action::Copy(text) => {
+            copy_to_clipboard(app, &text);
+        }
+        Action::PickAgent { message, dir } => {
+            app.agent_menu = Some(app::AgentMenu {
+                targets: handoff::find_targets(dir.as_deref()),
+                selected: 0,
+                message,
+                dir,
+            });
+        }
+        Action::HandOff {
+            target,
+            message,
+            dir,
+        } => hand_off(terminal, app, session, &target, &message, dir.as_deref())?,
         Action::SubmitReview {
             pr,
             pull_request_id,
@@ -1235,7 +1252,8 @@ fn start_write(
 
 /// OSC 52 asks the terminal to set the clipboard, which also works over ssh; pbcopy
 /// covers a terminal or tmux that ignores it. Neither reports a failure, so both run.
-fn copy_to_clipboard(app: &mut App, text: &str) {
+/// False when neither could start.
+fn copy_to_clipboard(app: &mut App, text: &str) -> bool {
     let mut stdout = std::io::stdout();
     let osc = execute!(
         stdout,
@@ -1252,7 +1270,67 @@ fn copy_to_clipboard(app: &mut App, text: &str) {
         });
     if osc.is_err() && pbcopy.is_err() {
         app.error = Some("could not reach the clipboard".to_string());
+        return false;
     }
+    true
+}
+
+/// Hands the request to the agent picked. When that fails, the text goes to the
+/// clipboard; when the clipboard fails too, the box stays open with the text.
+fn hand_off(
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    session: &Session,
+    target: &handoff::Target,
+    message: &str,
+    dir: Option<&std::path::Path>,
+) -> Result<()> {
+    if *target == handoff::Target::Clipboard {
+        if copy_to_clipboard(app, message) {
+            app.handed_off(Ok("copied the request and its context".to_string()));
+        }
+        return Ok(());
+    }
+    let outcome = match handoff::deliver(target, dir, message) {
+        Ok(handoff::Delivery::Sent(note)) => Ok(note),
+        Ok(handoff::Delivery::RunHere(command)) => run_in_foreground(terminal, session, command)?,
+        Err(error) => Err(error),
+    };
+    match outcome {
+        Ok(note) => app.handed_off(Ok(note)),
+        Err(error) if copy_to_clipboard(app, message) => app.handed_off(Err(format!(
+            "{error}; copied the request to the clipboard instead"
+        ))),
+        Err(error) => {
+            app.error = Some(format!(
+                "{error}, and the clipboard failed; your text is still in the box"
+            ))
+        }
+    }
+    Ok(())
+}
+
+/// Gives the terminal to an agent session until it exits, like a terminal editor.
+fn run_in_foreground(
+    terminal: &mut DefaultTerminal,
+    session: &Session,
+    mut command: Command,
+) -> Result<Result<String, String>> {
+    let failure = suspended(terminal, session, || {
+        let failure = match command.status() {
+            Ok(status) if status.success() => None,
+            Ok(status) => Some(format!("the agent exited with {status}")),
+            Err(error) => Some(format!("the agent did not start: {error}")),
+        };
+        if let Some(message) = &failure {
+            wait_for_enter(message)?;
+        }
+        Ok(failure)
+    })?;
+    Ok(match failure {
+        None => Ok("the agent session ended".to_string()),
+        Some(error) => Err(error),
+    })
 }
 
 fn start_viewed_sync(
