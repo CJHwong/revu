@@ -80,14 +80,27 @@ impl Gallery {
     }
 }
 
-/// Where the image goes inside the full-screen gallery: inside the border, above the
-/// key line.
-pub fn image_area(screen: Rect) -> Rect {
+/// The gallery's box: four fifths of the screen each way, centered, so the PR stays in
+/// view around it.
+pub fn modal_area(screen: Rect) -> Rect {
+    let width = screen.width * 4 / 5;
+    let height = screen.height * 4 / 5;
     Rect {
-        x: screen.x + 1,
-        y: screen.y + 1,
-        width: screen.width.saturating_sub(2),
-        height: screen.height.saturating_sub(3),
+        x: screen.x + (screen.width - width) / 2,
+        y: screen.y + (screen.height - height) / 2,
+        width,
+        height,
+    }
+}
+
+/// Where the image goes in the gallery's box: inside the border, above the key line.
+pub fn image_area(screen: Rect) -> Rect {
+    let modal = modal_area(screen);
+    Rect {
+        x: modal.x + 1,
+        y: modal.y + 1,
+        width: modal.width.saturating_sub(2),
+        height: modal.height.saturating_sub(3),
     }
 }
 
@@ -326,6 +339,21 @@ mod tests {
         let mut gallery = Gallery::open(items(), None).unwrap();
         assert_eq!(gallery.start_load(), Some(image("https://a/1.png")));
         assert_eq!(gallery.start_load(), None);
+    }
+
+    #[test]
+    fn the_gallery_box_leaves_the_view_around_it() {
+        let screen = Rect::new(0, 0, 200, 60);
+        let modal = modal_area(screen);
+        assert_eq!((modal.width, modal.height), (160, 48));
+        assert_eq!((modal.x, modal.y), (20, 6), "centered");
+        let image = image_area(screen);
+        assert!(modal.contains(image.as_position()) && image.bottom() < modal.bottom());
+        assert_eq!(
+            (image.width, image.height),
+            (158, 45),
+            "inside the border, above the key line"
+        );
     }
 
     #[test]
