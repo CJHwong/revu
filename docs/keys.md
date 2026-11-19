@@ -53,7 +53,7 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 
 ## Images
 
-The gallery shows one image or diagram at a time over the whole screen. `h` / `l` (or `←` / `→`) go to the previous or next one, `o` opens the current image in the browser, and `Esc` or `q` closes it.
+The gallery shows one image or diagram at a time, in a box over the pull request. `h` / `l` (or `←` / `→`) go to the previous or next one, `o` opens the current image in the browser, and `Esc` or `q` closes it.
 
 A ` ```mermaid ` block shows as `[diagram: mermaid]` above its source. In the gallery, revu draws it as a picture itself, offline, with no browser or Node.
 

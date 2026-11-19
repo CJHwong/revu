@@ -114,12 +114,13 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: &Theme, now: DateTime<Utc
     }
 }
 
-/// The gallery covers the screen: the image centered, its place in the list on top, and
-/// the keys at the bottom.
+/// The gallery is a box over the PR: the image centered, its place in the list on top,
+/// and the keys at the bottom.
 fn render_gallery(frame: &mut Frame, gallery: &mut Gallery, picker: &Picker, paint: Paint) {
     let theme = paint.theme;
     let screen = frame.area();
-    frame.render_widget(Clear, screen);
+    let modal = gallery::modal_area(screen);
+    frame.render_widget(Clear, modal);
     let kind = match gallery.current() {
         Visual::Image(_) => "Image",
         Visual::Diagram(_) => "Diagram",
@@ -130,11 +131,11 @@ fn render_gallery(frame: &mut Frame, gallery: &mut Gallery, picker: &Picker, pai
         .border_style(Style::new().fg(theme.accent))
         .title(Line::from(paint.bold(title, theme.heading)))
         .style(Style::new().bg(theme.background));
-    frame.render_widget(frame_block, screen);
+    frame.render_widget(frame_block, modal);
     let keys = Rect {
-        x: screen.x + 1,
-        y: screen.bottom().saturating_sub(2),
-        width: screen.width.saturating_sub(2),
+        x: modal.x + 1,
+        y: modal.bottom().saturating_sub(2),
+        width: modal.width.saturating_sub(2),
         height: 1,
     };
     let key_hint = match gallery.current() {

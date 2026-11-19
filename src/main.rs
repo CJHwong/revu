@@ -308,8 +308,8 @@ fn handle_input(
     session: &mut Session,
 ) -> Result<bool> {
     let action = match input {
-        // The gallery covers the screen, so the wheel, clicks and a paste have nothing
-        // to reach.
+        // The gallery holds the keys while it is open, so the wheel, clicks and a paste
+        // do not reach the PR behind it.
         Input::Scroll(..) | Input::Click(..) | Input::Paste(_) if app.gallery.is_some() => None,
         Input::Paste(text) => {
             app.handle_paste(&text);
