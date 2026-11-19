@@ -9,7 +9,7 @@
    ```
    The `release` workflow runs the checks, builds the four binaries and publishes them with `checksums.txt` as a GitHub Release. `install.sh` picks up the new release at once.
 3. Replace the release body, which GitHub generates as a changelog link only, with the notes: `gh release edit vX.Y.Z --notes-file notes.md`.
-4. Update the Homebrew formula by hand. The workflow's `homebrew` job skips it, because the repo has no `HOMEBREW_TAP_TOKEN` secret:
+4. The workflow's `homebrew` job updates the formula in CJHwong/homebrew-tap. It pushes with a deploy key on the tap, whose private half is the `HOMEBREW_TAP_KEY` secret. If that job fails or warns that the key is missing, update the formula by hand:
    ```sh
    gh release download vX.Y.Z -R CJHwong/revu -p checksums.txt
    git clone https://github.com/CJHwong/homebrew-tap.git
