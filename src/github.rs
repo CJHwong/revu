@@ -46,7 +46,7 @@ fn record_rate_limit(
 const PAGE_SIZE: u32 = 100;
 
 const ROW_FIELDS: &str = "number title url isDraft updatedAt reviewDecision totalCommentsCount \
-    additions deletions changedFiles author { login } repository { nameWithOwner }";
+    additions deletions changedFiles headRefOid author { login } repository { nameWithOwner }";
 
 const ROLLUP_COUNTS: &str = "totalCount \
     checkRunCountsByState { state count } \
@@ -81,7 +81,7 @@ pub fn detail_document() -> String {
     format!(
         "query({PR_VARIABLES}) {{ \
          repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ \
-         {ROW_FIELDS} id viewerDidAuthor baseRefOid headRefOid body createdAt baseRefName headRefName \
+         {ROW_FIELDS} id viewerDidAuthor baseRefOid body createdAt baseRefName headRefName \
          commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 0) {{ {ROLLUP_COUNTS} }} }} }} }} }} \
          commitCount: commits {{ totalCount }} \
          labels(first: 20) {{ nodes {{ name color }} }} \
