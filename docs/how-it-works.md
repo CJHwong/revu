@@ -32,6 +32,12 @@ The diffs come from git, not from GitHub's API, so they need the pull request's 
 
 revu never checks out a branch or touches your working tree, the index or `FETCH_HEAD`, so it is safe to run beside an editor or another tool in the same clone.
 
+## The inbox
+
+Each row shows the title, the review state, the checks and the comment count. Its second line shows the repository, the author, the last update and the size of the diff, such as `+120 -34, 7 files`.
+
+A `●` before the title marks a pull request with new commits or new comments since you last left it. revu saves each pull request's head commit and comment count when you open it and again when you go back to the inbox, so your own comments do not mark it. A pull request you have never opened has no mark.
+
 ## The overview
 
 The merge box says whether the pull request can merge, and counts failing and pending checks, unresolved review threads and pending approvals. Skipped checks count neither as passed nor failed.

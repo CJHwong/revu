@@ -499,12 +499,10 @@ fn row_item(app: &App, row: Row, width: usize, selected: bool, paint: Paint) -> 
             let loading = app.group_loading.get(group_index).copied().unwrap_or(false);
             ListItem::new(header_line(&app.groups[group_index], loading, paint))
         }
-        Row::Pr(group_index, pr_index) => pr_item(
-            &app.groups[group_index].prs[pr_index],
-            width,
-            selected,
-            paint,
-        ),
+        Row::Pr(group_index, pr_index) => {
+            let pr = &app.groups[group_index].prs[pr_index];
+            pr_item(pr, app.seen.is_new(pr), width, selected, paint)
+        }
     }
 }
 
@@ -537,7 +535,14 @@ fn secondary_color(selected: bool, theme: &Theme) -> Color {
     }
 }
 
-fn pr_item(pr: &PrSummary, width: usize, selected: bool, paint: Paint) -> ListItem<'static> {
+/// `new` marks a PR with commits or comments since you last left it.
+fn pr_item(
+    pr: &PrSummary,
+    new: bool,
+    width: usize,
+    selected: bool,
+    paint: Paint,
+) -> ListItem<'static> {
     let theme = paint.theme;
     let secondary = secondary_color(selected, theme);
     let badges = Line::from(badge_spans(pr, secondary, paint));
@@ -545,7 +550,11 @@ fn pr_item(pr: &PrSummary, width: usize, selected: bool, paint: Paint) -> ListIt
     let title = pad_to_width(&truncate_to_width(&pr.title, title_width), title_width);
 
     let mut first = vec![
-        Span::from("    "),
+        if new {
+            paint.bold("  ● ", theme.accent)
+        } else {
+            Span::from("    ")
+        },
         paint.bold(title, theme.foreground),
         Span::from(" "),
     ];
@@ -4351,6 +4360,7 @@ mod tests {
             additions: 0,
             deletions: 0,
             changed_files: 0,
+            head_oid: String::new(),
         }
     }
 

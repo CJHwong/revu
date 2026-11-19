@@ -6,6 +6,7 @@
 |---|---|
 | `~/.config/revu/config.yaml` | Your settings. The first run writes it with comments. Press `r` in the inbox to reload it. `$XDG_CONFIG_HOME/revu/config.yaml` when `XDG_CONFIG_HOME` is set. |
 | `~/.config/revu/view.yaml` | The view toggles, written whenever you change one, so the next start brings them back. |
+| `~/.config/revu/seen.yaml` | Each pull request's head commit and comment count when you last left it, for the inbox's `●` mark. Delete it to clear every mark. |
 
 A `rs-github-inbox` folder from before the rename to revu moves to `revu` on the first run.
 

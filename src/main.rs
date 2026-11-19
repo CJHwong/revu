@@ -14,6 +14,7 @@ mod markdown;
 mod model;
 mod overview;
 mod repo;
+mod seen;
 mod sha256;
 mod syntax;
 mod syntax_theme;
@@ -214,19 +215,30 @@ fn main() -> Result<()> {
     };
     let mut app = App::new();
     show_config(&mut app, &session.config);
+    let mut startup_errors = Vec::new();
     match config::load_prefs(&config::prefs_path(&session.config_path)) {
         Ok(prefs) => app.prefs = prefs,
-        Err(error) => app.set_inbox_error(format!("view toggles not loaded: {error:#}")),
+        Err(error) => startup_errors.push(format!("view toggles not loaded: {error:#}")),
+    }
+    match seen::load(&seen::path(&session.config_path)) {
+        Ok(marks) => app.seen = seen::Seen::new(marks),
+        Err(error) => startup_errors.push(format!("new-since marks not loaded: {error:#}")),
     }
     app.theme_name = theme::name_of(&session.config.theme).unwrap_or(app.theme_name);
     use_syntax_theme(&mut app, &session.config.theme);
     start_inbox_fetch(&session, &mut app);
+    // Starting the fetch clears the top line's error, so these go up after it.
+    if !startup_errors.is_empty() {
+        app.error = Some(startup_errors.join("; "));
+    }
 
     let mut terminal = ratatui::init();
     // Query once, in raw mode, before any extra terminal modes are on.
     session.enhanced_keys = supports_keyboard_enhancement().unwrap_or(false);
     enable_input_modes(session.enhanced_keys)?;
     let result = run(&mut terminal, &mut app, &mut session);
+    // A quit in the same batch of keys as leaving a PR skips the loop's save.
+    save_seen(&mut app, &session);
     let restored = disable_input_modes(session.enhanced_keys);
     ratatui::restore();
     result.and(restored)
@@ -281,6 +293,17 @@ fn run(terminal: &mut DefaultTerminal, app: &mut App, session: &mut Session) -> 
             input = next_input(Duration::ZERO)?;
         }
         save_prefs(app, session);
+        save_seen(app, session);
+    }
+}
+
+fn save_seen(app: &mut App, session: &Session) {
+    let changes = app.seen.take_unsaved();
+    if changes.is_empty() {
+        return;
+    }
+    if let Err(error) = seen::save(&seen::path(&session.config_path), changes) {
+        app.error = Some(format!("new-since marks not saved: {error:#}"));
     }
 }
 

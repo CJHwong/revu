@@ -101,6 +101,8 @@ pub struct PrSummary {
     pub additions: u64,
     pub deletions: u64,
     pub changed_files: u64,
+    /// The head commit, so the inbox can tell a push since you last looked.
+    pub head_oid: String,
 }
 
 impl PrSummary {
@@ -605,6 +607,8 @@ struct RawRow {
     deletions: u64,
     #[serde(default)]
     changed_files: u64,
+    #[serde(default)]
+    head_ref_oid: String,
 }
 
 #[derive(Deserialize)]
@@ -623,7 +627,6 @@ struct RawDetail {
     #[serde(default)]
     viewer_did_author: bool,
     base_ref_oid: String,
-    head_ref_oid: String,
     commit_count: RawCount,
     body: String,
     created_at: DateTime<Utc>,
@@ -980,7 +983,7 @@ pub fn parse_detail(pull_request: &Value) -> Result<PrDetail> {
         linked_issues,
         id: raw.id,
         base_oid: raw.base_ref_oid,
-        head_oid: raw.head_ref_oid,
+        head_oid: raw.row.head_ref_oid.clone(),
         commit_count: raw.commit_count.total_count,
         additions: raw.row.additions,
         deletions: raw.row.deletions,
@@ -1109,6 +1112,7 @@ fn summary_from(raw: RawRow) -> PrSummary {
         additions: raw.additions,
         deletions: raw.deletions,
         changed_files: raw.changed_files,
+        head_oid: raw.head_ref_oid,
     }
 }
 

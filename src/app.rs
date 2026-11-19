@@ -2807,6 +2807,8 @@ pub struct App {
     pub gallery: Option<crate::gallery::Gallery>,
     /// How this terminal draws images, found when the first image loads.
     pub picker: Option<ratatui_image::picker::Picker>,
+    /// Each PR's head and comment count when you last left it.
+    pub seen: crate::seen::Seen,
 }
 
 /// Ctrl+L everywhere; Cmd+L only where the terminal reports the Super modifier.
@@ -2865,6 +2867,7 @@ impl App {
             prefs: ViewPrefs::default(),
             gallery: None,
             picker: None,
+            seen: crate::seen::Seen::default(),
         }
     }
 
@@ -4359,9 +4362,33 @@ impl App {
             &self.renderer_names,
             &self.missing_renderers,
         );
+        if let Some(summary) = &summary {
+            self.seen.record(summary);
+        }
         view.summary = summary;
         self.screen = Screen::Detail(Box::new(view));
         Action::FetchDetail(pr)
+    }
+
+    /// Leaving a PR marks it seen as it is now, your own comments included, and puts
+    /// its fresh row in the inbox so the stale one does not read as new.
+    fn back_to_inbox(&mut self) {
+        let fresh = match &self.screen {
+            Screen::Detail(view) => view.loaded().map(|detail| detail.summary.clone()),
+            Screen::Inbox => None,
+        };
+        if let Some(fresh) = fresh {
+            self.seen.record(&fresh);
+            let rows = self
+                .groups
+                .iter_mut()
+                .flat_map(|group| group.prs.iter_mut());
+            for row in rows.filter(|row| row.reference() == fresh.reference()) {
+                *row = fresh.clone();
+            }
+        }
+        self.screen = Screen::Inbox;
+        self.error = None;
     }
 
     fn inbox_key(&mut self, key: KeyCode) -> Option<Action> {
@@ -4492,10 +4519,7 @@ impl App {
             KeyCode::Char('H') if diff_pane => view.shift_diff(false),
             KeyCode::Char('L') if diff_pane => view.shift_diff(true),
             KeyCode::Esc => view.clear_find(),
-            KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Left => {
-                self.screen = Screen::Inbox;
-                self.error = None;
-            }
+            KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Left => self.back_to_inbox(),
             KeyCode::Tab => view.show_tab(view.tab.shifted(1)),
             KeyCode::BackTab => view.show_tab(view.tab.shifted(-1)),
             KeyCode::Char(digit @ '1'..='9') => {
@@ -4829,6 +4853,7 @@ mod tests {
             additions: 0,
             deletions: 0,
             changed_files: 0,
+            head_oid: String::new(),
         }
     }
 
@@ -4908,6 +4933,34 @@ mod tests {
         assert!(matches!(app.screen, Screen::Detail(_)));
         app.handle_key(key(KeyCode::Char('h')));
         assert!(matches!(app.screen, Screen::Inbox));
+    }
+
+    #[test]
+    fn leaving_a_pr_marks_it_seen_with_its_fresh_row() {
+        let mut detail = crate::model::tests::sample_detail();
+        let mut app = app_with(vec![group("A", &[detail.summary.number], false)]);
+        let reference = detail.summary.reference();
+        app.groups[0].prs[0] = PrSummary {
+            comments: 1,
+            head_oid: "old".to_string(),
+            ..detail.summary.clone()
+        };
+        app.list_state.select(Some(1));
+        app.handle_key(key(KeyCode::Enter));
+        // You comment and the PR loads again.
+        detail.summary.comments = 2;
+        detail.summary.head_oid = "old".to_string();
+        app.set_detail(&reference, Ok(detail));
+        app.handle_key(key(KeyCode::Char('h')));
+
+        let row = &app.groups[0].prs[0];
+        assert_eq!(row.comments, 2, "the inbox shows the fresh row");
+        assert!(!app.seen.is_new(row), "your own comment is not news");
+        let pushed = PrSummary {
+            head_oid: "new".to_string(),
+            ..row.clone()
+        };
+        assert!(app.seen.is_new(&pushed));
     }
 
     #[test]
