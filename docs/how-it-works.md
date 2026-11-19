@@ -38,6 +38,14 @@ Each row shows the title, the review state, the checks and the comment count. It
 
 A `●` before the title marks a pull request with new commits or new comments since you last left it. revu saves each pull request's head commit and comment count when you open it and again when you go back to the inbox, so your own comments do not mark it. A pull request you have never opened has no mark.
 
+The second line ends with who the pull request waits on:
+
+| Label | When |
+|---|---|
+| Your turn | Someone asked you by name for a review, or pushed after your last review. A request to one of your teams does not count. On your own pull request: a reviewer requested changes, or it has conflicts. |
+| Author's turn | You requested changes and nothing was pushed since. |
+| Conflicts | GitHub found merge conflicts. GitHub checks this lazily, so a pull request it has not checked yet shows nothing. |
+
 ## The overview
 
 The merge box says whether the pull request can merge, and counts failing and pending checks, unresolved review threads and pending approvals. Skipped checks count neither as passed nor failed.
