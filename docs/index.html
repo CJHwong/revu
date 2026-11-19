@@ -189,13 +189,13 @@
     <div class="grid">
       <div class="card">
         <h3><span class="num">[01]</span>An inbox like GitHub's</h3>
-        <p>Your pull requests in groups, each one a GitHub search you write in the config. Every row shows its review state, checks and comments.</p>
-        <p class="keys"><kbd>j</kbd>/<kbd>k</kbd> move, <kbd>tab</kbd> next group, <kbd>ctrl-l</kbd> open a link</p>
+        <p>Your pull requests in groups, each one a GitHub search you write in the config. Every row shows its review state, checks, comments and diff size, says whose turn it is, flags conflicts, and marks what changed since you last looked. In a wide terminal, a pane previews the selected pull request.</p>
+        <p class="keys"><kbd>j</kbd>/<kbd>k</kbd> move, <kbd>/</kbd> filter by repo or author, <kbd>ctrl-l</kbd> open a link</p>
       </div>
       <div class="card">
         <h3><span class="num">[02]</span>The whole Overview</h3>
-        <p>The description, comments and review threads with the code under each, a merge box, reviewers with their state, and what changed since you last commented.</p>
-        <p class="keys"><kbd>enter</kbd> fold, <kbd>f</kbd> filter, <kbd>n</kbd> hide bots</p>
+        <p>The description, comments and review threads with the code under each, a merge box, reviewers with their state, and what changed since you last commented. Images and mermaid diagrams open in a gallery, drawn in the terminal.</p>
+        <p class="keys"><kbd>enter</kbd> fold, <kbd>f</kbd> filter, <kbd>n</kbd> hide bots, <kbd>i</kbd> images</p>
       </div>
       <div class="card">
         <h3><span class="num">[03]</span>Three diff views</h3>
@@ -209,12 +209,12 @@
       </div>
       <div class="card">
         <h3><span class="num">[05]</span>Review without the browser</h3>
-        <p>Select a line or a range to comment on in your pending review, copy as a Markdown diff, or open on GitHub. Review threads sit under their lines, to read, reply to and resolve. Submit the review as a comment, an approval or a change request. Edit labels, mark files, or whole folders, viewed, and merge, or turn on auto-merge.</p>
-        <p class="keys"><kbd>S</kbd> select lines, <kbd>t</kbd> threads, <kbd>r</kbd> reply, <kbd>u</kbd> resolve, <kbd>R</kbd> review, <kbd>M</kbd> merge</p>
+        <p>Select a line or a range to comment on in your pending review, copy as a Markdown diff, or open on GitHub. Review threads sit under their lines, to read, reply to and resolve. Submit the review as a comment, an approval or a change request. Edit labels, mark files, or whole folders, viewed, and merge, or turn on auto-merge. Hand the PR, its lines and their thread to Claude Code or Codex.</p>
+        <p class="keys"><kbd>S</kbd> select lines, <kbd>t</kbd> threads, <kbd>r</kbd> reply, <kbd>u</kbd> resolve, <kbd>R</kbd> review, <kbd>M</kbd> merge, <kbd>a</kbd> hand off</p>
       </div>
       <div class="card">
         <h3><span class="num">[06]</span>Your clones stay as they are</h3>
-        <p>Diffs come from your local clone. revu fetches a PR's commits into its own refs and never checks out a branch or touches your working tree.</p>
+        <p>Diffs come from your local clone. revu fetches a PR's commits into its own refs and never checks out a branch or touches your working tree. When the clone is on another branch, <kbd>o</kbd> opens a file at the PR's head in a worktree of its own.</p>
         <p class="keys">needs <code>workspace_dir</code> in the config: one folder or a list</p>
       </div>
     </div>
@@ -230,6 +230,7 @@
           <tr><td>j / k</td><td>move</td></tr>
           <tr><td>enter</td><td>open the pull request</td></tr>
           <tr><td>space</td><td>fold the group</td></tr>
+          <tr><td>/</td><td>filter by repo or author</td></tr>
           <tr><td>ctrl-l</td><td>open a link or owner/repo#123</td></tr>
           <tr><td>r</td><td>refresh</td></tr>
           <tr><td>,</td><td>settings</td></tr>
@@ -243,6 +244,7 @@
           <tr><td>a</td><td>hand off to Claude Code or Codex, with the PR and lines</td></tr>
           <tr><td>M</td><td>merge, or auto-merge</td></tr>
           <tr><td>e</td><td>labels</td></tr>
+          <tr><td>i</td><td>images and diagrams</td></tr>
           <tr><td>o</td><td>open on GitHub or in your editor, at the file or line</td></tr>
           <tr><td>h</td><td>back to the inbox</td></tr>
         </table>
