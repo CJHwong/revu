@@ -19,6 +19,8 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 | `Enter`, `l` | Open the pull request, or fold a group header |
 | `Space` | Fold the current group |
 | `Tab` / `Shift+Tab` | Next or previous group |
+| `/` | Filter: type part of a repo or an author name, and the rows narrow as you type. Each group counts its matching rows. `Enter` keeps the filter; `Esc` clears it. |
+| `Esc` | Clear the filter |
 | `r` | Reload the config and fetch again |
 | `o` | Open in the browser |
 | `d` | Run the `open_diff` command |

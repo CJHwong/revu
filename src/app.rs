@@ -1977,6 +1977,8 @@ pub enum PromptKind {
     },
     Workspace,
     FindInDiff,
+    /// `/` in the inbox: the rows narrow as you type.
+    FilterInbox,
     UpdatedWithin,
     /// A custom editor command; `open` as in `Action::SetEditor`.
     Editor {
@@ -2809,6 +2811,8 @@ pub struct App {
     pub picker: Option<ratatui_image::picker::Picker>,
     /// Each PR's head and comment count when you last left it.
     pub seen: crate::seen::Seen,
+    /// The inbox shows only PRs whose repo or author contains this, ignoring case.
+    pub inbox_filter: String,
 }
 
 /// Ctrl+L everywhere; Cmd+L only where the terminal reports the Super modifier.
@@ -2868,6 +2872,7 @@ impl App {
             gallery: None,
             picker: None,
             seen: crate::seen::Seen::default(),
+            inbox_filter: String::new(),
         }
     }
 
@@ -3099,10 +3104,31 @@ impl App {
         for (group_index, group) in self.groups.iter().enumerate() {
             rows.push(Row::Header(group_index));
             if !group.collapsed {
-                rows.extend((0..group.prs.len()).map(|pr_index| Row::Pr(group_index, pr_index)));
+                rows.extend(
+                    self.shown_prs(group)
+                        .map(|pr_index| Row::Pr(group_index, pr_index)),
+                );
             }
         }
         rows
+    }
+
+    /// The filter in use: the prompt's text while you type it, else the kept one.
+    pub fn filter(&self) -> &str {
+        match &self.prompt {
+            Some(prompt) if prompt.kind == PromptKind::FilterInbox => prompt.text.trim(),
+            _ => &self.inbox_filter,
+        }
+    }
+
+    /// The indexes of the group's PRs that pass the filter.
+    pub fn shown_prs<'a>(&'a self, group: &'a Group) -> impl Iterator<Item = usize> + 'a {
+        let filter = self.filter().to_lowercase();
+        group.prs.iter().enumerate().filter_map(move |(index, pr)| {
+            let hit = pr.repo.to_lowercase().contains(&filter)
+                || pr.author.to_lowercase().contains(&filter);
+            hit.then_some(index)
+        })
     }
 
     pub fn selected_row(&self) -> Option<Row> {
@@ -3684,6 +3710,7 @@ impl App {
     }
 
     fn prompt_key(&mut self, key: KeyCode) -> Option<Action> {
+        let selected = self.selected_pr().map(PrSummary::reference);
         let prompt = self.prompt.as_mut()?;
         match key {
             // Escaping a clone question is the same as answering no.
@@ -3699,6 +3726,14 @@ impl App {
                 let message = "no workspace folder, so no diff here. r asks again.";
                 self.set_repo_state(RepoState::Failed(message.to_string()));
             }
+            KeyCode::Esc if prompt.kind == PromptKind::FilterInbox => {
+                self.prompt = None;
+                self.inbox_filter.clear();
+            }
+            KeyCode::Enter if prompt.kind == PromptKind::FilterInbox => {
+                self.inbox_filter = prompt.text.trim().to_string();
+                self.prompt = None;
+            }
             KeyCode::Esc => self.prompt = None,
             KeyCode::Backspace => {
                 prompt.text.pop();
@@ -3712,6 +3747,8 @@ impl App {
             KeyCode::Enter => return self.submit_prompt(),
             _ => {}
         }
+        // The filter changes the rows; the cursor stays on its PR while it shows.
+        self.reselect(selected);
         None
     }
 
@@ -3722,6 +3759,8 @@ impl App {
             PromptKind::Workspace => Some(Action::SetWorkspace(prompt.text.trim().to_string())),
             PromptKind::ConfirmClone { pr, dir } => self.submit_clone(pr, dir, &prompt.text),
             PromptKind::FindInDiff => self.in_view(|view| view.start_find(&prompt.text)),
+            // prompt_key keeps the filter itself, before the prompt closes.
+            PromptKind::FilterInbox => None,
             PromptKind::Definition { .. } => {
                 self.in_view(|view| view.find_definition(&prompt.text))
             }
@@ -4411,6 +4450,18 @@ impl App {
             KeyCode::Char('d') => {
                 return self.selected_pr().map(|pr| Action::RunDiff(pr.reference()));
             }
+            KeyCode::Char('/') => {
+                self.prompt = Some(Prompt {
+                    kind: PromptKind::FilterInbox,
+                    text: self.inbox_filter.clone(),
+                    ..Prompt::default()
+                });
+            }
+            KeyCode::Esc => {
+                let selected = self.selected_pr().map(PrSummary::reference);
+                self.inbox_filter.clear();
+                self.reselect(selected);
+            }
             _ => {}
         }
         None
@@ -4935,6 +4986,49 @@ mod tests {
         assert!(matches!(app.screen, Screen::Detail(_)));
         app.handle_key(key(KeyCode::Char('h')));
         assert!(matches!(app.screen, Screen::Inbox));
+    }
+
+    #[test]
+    fn slash_filters_the_inbox_by_repo_or_author_as_you_type() {
+        let mut app = app_with(vec![group("A", &[1, 2, 3], false)]);
+        app.groups[0].prs[1].repo = "acme/Web".to_string();
+        app.groups[0].prs[2].author = "webster".to_string();
+        app.list_state.select(Some(3));
+        app.handle_key(key(KeyCode::Char('/')));
+        for character in "WEB".chars() {
+            app.handle_key(key(KeyCode::Char(character)));
+        }
+        let shown = |app: &App| {
+            app.rows()
+                .into_iter()
+                .filter_map(|row| match row {
+                    Row::Pr(_, index) => Some(app.groups[0].prs[index].number),
+                    Row::Header(_) => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shown(&app), [2, 3], "a repo or an author, any case");
+        assert_eq!(
+            app.list_state.selected(),
+            Some(2),
+            "the cursor stays on a row"
+        );
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.inbox_filter, "WEB");
+        assert_eq!(shown(&app), [2, 3], "enter keeps it");
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(shown(&app), [1, 2, 3], "esc clears it");
+        assert_eq!(
+            app.selected_pr().map(|pr| pr.number),
+            Some(3),
+            "on the same PR"
+        );
+
+        app.handle_key(key(KeyCode::Char('/')));
+        app.handle_key(key(KeyCode::Char('x')));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.prompt.is_none());
+        assert_eq!(shown(&app), [1, 2, 3], "esc in the prompt clears it too");
     }
 
     #[test]
