@@ -36,17 +36,17 @@ revu never checks out a branch or touches your working tree, the index or `FETCH
 
 Each row shows the title, the review state, the checks and the comment count. Its second line shows the repository, the author, the last update and the size of the diff, such as `+120 -34, 7 files`.
 
-A `●` before the title marks a pull request with new commits or new comments since you last left it. revu saves each pull request's head commit and comment count when you open it and again when you go back to the inbox, so your own comments do not mark it. A pull request you have never opened has no mark.
+A `●` before the title marks a pull request with new commits or new comments since you last left it. revu saves each pull request's head commit and comment count when you open it and again when you go back to the inbox. After you comment, review or reply, the next inbox fetch counts as seen too, so your own comments do not mark it, even when you go back before the pull request reloads. A pull request you have never opened has no mark.
 
 The second line ends with who the pull request waits on:
 
 | Label | When |
 |---|---|
-| Your turn | Someone asked you by name for a review, or pushed after your last review. A request to one of your teams does not count. On your own pull request: a reviewer requested changes, or it has conflicts. |
+| Your turn | Someone asked you by name for a review, or pushed after your last review. A request to one of your teams does not count. Your last review is your latest approval or change request, so a reply in a thread later does not replace it, and a push means the pull request's head moved past the commit you reviewed. On your own pull request: a reviewer requested changes, or it has conflicts. |
 | Author's turn | You requested changes and nothing was pushed since. |
 | Conflicts | GitHub found merge conflicts. GitHub checks this lazily, so a pull request it has not checked yet shows nothing. |
 
-In a terminal at least 160 columns wide, the right 40% of the inbox previews the selected pull request: its branches, whether it can merge, the reviewers, the labels and the description. revu fetches the preview once the cursor rests on a row for 300 ms, so moving through the list sends no request per row. It fetches again when the row shows a newer update. A failed preview tries again on `r`. Each preview is one GraphQL call, 1 point of the API budget. Opening a pull request whose preview is current shows that preview at once and skips fetching it again; `r` in the pull request fetches everything.
+In a terminal at least 160 columns wide, the right 40% of the inbox previews the selected pull request: its branches, whether it can merge, the reviewers, the labels and the description. revu fetches the preview once the cursor rests on a row for 300 ms, so moving through the list sends no request per row. It fetches again when the row shows a newer update, a new head commit, other checks or another merge state, such as after a push to the base branch. A failed preview tries again on `r`. Each preview is one GraphQL call, 1 point of the API budget. Opening a pull request whose preview is current shows that preview at once and skips fetching it again; `r` in the pull request fetches everything.
 
 ## Edit at the PR's head
 

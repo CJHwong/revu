@@ -4626,6 +4626,7 @@ mod tests {
             head_oid: String::new(),
             turn: None,
             conflicts: false,
+            merge_state: String::new(),
         }
     }
 

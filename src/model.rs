@@ -114,6 +114,9 @@ pub struct PrSummary {
     /// GitHub found merge conflicts. GitHub computes this lazily, so a PR it has not
     /// checked yet reads as no conflict.
     pub conflicts: bool,
+    /// GitHub's mergeStateStatus, which a change to the base branch moves without
+    /// moving `updated_at`.
+    pub merge_state: String,
 }
 
 impl PrSummary {
@@ -492,6 +495,12 @@ struct Nodes<T> {
     nodes: Vec<T>,
 }
 
+impl<T> Default for Nodes<T> {
+    fn default() -> Self {
+        Self { nodes: Vec::new() }
+    }
+}
+
 #[derive(Deserialize)]
 struct CommitNode {
     commit: Commit,
@@ -501,7 +510,6 @@ struct CommitNode {
 #[serde(rename_all = "camelCase")]
 struct Commit {
     status_check_rollup: Option<Rollup>,
-    committed_date: Option<DateTime<Utc>>,
 }
 
 #[derive(Deserialize)]
@@ -624,7 +632,11 @@ struct RawRow {
     #[serde(default)]
     viewer_did_author: bool,
     mergeable: Option<String>,
-    viewer_latest_review: Option<RawViewerReview>,
+    merge_state_status: Option<String>,
+    viewer_latest_review: Option<RawReview>,
+    /// Each reviewer's latest approval or change request.
+    #[serde(default)]
+    latest_opinionated_reviews: Nodes<RawReview>,
     /// A pending request to you or to a team you are in.
     viewer_latest_review_request: Option<RawViewerRequest>,
 }
@@ -639,13 +651,6 @@ struct RawViewerRequest {
 struct RawTypename {
     #[serde(rename = "__typename")]
     typename: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RawViewerReview {
-    state: String,
-    submitted_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Deserialize)]
@@ -670,9 +675,7 @@ struct RawDetail {
     labels: Nodes<RawLabel>,
     assignees: Nodes<Login>,
     review_requests: Nodes<RawRequest>,
-    latest_opinionated_reviews: Nodes<RawReview>,
     latest_reviews: Option<Nodes<RawLatestReview>>,
-    merge_state_status: Option<String>,
     milestone: Option<RawTitle>,
     closing_issues_references: Option<Nodes<RawIssue>>,
     state: Option<String>,
@@ -905,6 +908,15 @@ struct RawReviewer {
 struct RawReview {
     author: Option<Login>,
     state: String,
+    #[serde(default)]
+    viewer_did_author: bool,
+    /// The PR's head when the review was submitted.
+    commit: Option<RawOid>,
+}
+
+#[derive(Deserialize)]
+struct RawOid {
+    oid: String,
 }
 
 #[derive(Deserialize)]
@@ -984,7 +996,7 @@ pub fn parse_detail(pull_request: &Value) -> Result<PrDetail> {
     let merge = merge_options(&raw);
     let reviewers = reviewers_from(
         &raw.review_requests,
-        &raw.latest_opinionated_reviews,
+        &raw.row.latest_opinionated_reviews,
         raw.latest_reviews.as_ref(),
     );
     let labels = raw.labels.nodes.into_iter();
@@ -1012,7 +1024,7 @@ pub fn parse_detail(pull_request: &Value) -> Result<PrDetail> {
         merge,
         viewer_is_author: raw.row.viewer_did_author,
         lifecycle,
-        merge_state: raw.merge_state_status.unwrap_or_default(),
+        merge_state: raw.row.merge_state_status.clone().unwrap_or_default(),
         check_counts,
         milestone: raw.milestone.map(|milestone| milestone.title),
         linked_issues,
@@ -1138,6 +1150,7 @@ fn summary_from(raw: RawRow) -> PrSummary {
     PrSummary {
         turn,
         conflicts,
+        merge_state: raw.merge_state_status.clone().unwrap_or_default(),
         repo: raw.repository.name_with_owner,
         number: raw.number,
         title: raw.title,
@@ -1157,7 +1170,9 @@ fn summary_from(raw: RawRow) -> PrSummary {
 
 /// Your turn: a review is requested from you by name, a push came after your
 /// review, or on your own PR, changes were requested or it conflicts. The author's turn:
-/// you requested changes and nothing was pushed since.
+/// you requested changes and nothing was pushed since. Your review is your latest
+/// approval or change request, so a reply in a thread later does not hide it; else
+/// your latest review of any kind.
 fn turn(raw: &RawRow, conflicts: bool) -> Option<Turn> {
     if raw.viewer_did_author {
         let changes = raw.review_decision.as_deref() == Some("CHANGES_REQUESTED");
@@ -1172,18 +1187,24 @@ fn turn(raw: &RawRow, conflicts: bool) -> Option<Turn> {
     if by_name {
         return Some(Turn::Yours);
     }
-    let review = raw
+    let opinion = raw
+        .latest_opinionated_reviews
+        .nodes
+        .iter()
+        .find(|review| review.viewer_did_author);
+    let latest = raw
         .viewer_latest_review
         .as_ref()
-        .filter(|review| review.state != "PENDING")?;
-    let pushed = raw
-        .commits
-        .nodes
-        .last()
-        .and_then(|node| node.commit.committed_date);
-    match (pushed, review.submitted_at) {
-        (Some(pushed), Some(reviewed)) if pushed > reviewed => Some(Turn::Yours),
-        _ if review.state == "CHANGES_REQUESTED" => Some(Turn::Authors),
+        .filter(|review| review.state != "PENDING");
+    let review = opinion.or(latest)?;
+    // The review's commit, not a date: a commit's date is when it was made, not pushed.
+    let pushed_since = review
+        .commit
+        .as_ref()
+        .is_some_and(|commit| !raw.head_ref_oid.is_empty() && commit.oid != raw.head_ref_oid);
+    match review.state.as_str() {
+        _ if pushed_since => Some(Turn::Yours),
+        "CHANGES_REQUESTED" => Some(Turn::Authors),
         _ => None,
     }
 }
@@ -1754,6 +1775,7 @@ pub mod tests {
             "repository": { "nameWithOwner": "acme/app" },
             "commits": commits,
             "additions": 12, "deletions": 3, "changedFiles": 2,
+            "headRefOid": "head",
         })
     }
 
@@ -1800,11 +1822,11 @@ pub mod tests {
 
     #[test]
     fn a_row_says_whose_turn_it_is() {
-        let reviewed =
-            |state: &str| json!({ "state": state, "submittedAt": "2026-11-15T10:00:00Z" });
-        let pushed = |at: &str| json!({ "nodes": [{ "commit": { "committedDate": at } }] });
+        // Reviews name the head they were made on; the row's head is "head".
+        let review = |state: &str, on: &str| json!({ "state": state, "commit": { "oid": on } });
+        let opinion = |state: &str, on: &str, mine: bool| json!({ "nodes": [{ "state": state, "viewerDidAuthor": mine, "commit": { "oid": on } }] });
         let turn = |fields: Value| {
-            let mut raw = row(1, json!("REVIEW_REQUIRED"), pushed("2026-11-15T09:00:00Z"));
+            let mut raw = row(1, json!("REVIEW_REQUIRED"), json!({ "nodes": [] }));
             raw.as_object_mut()
                 .unwrap()
                 .extend(fields.as_object().unwrap().clone());
@@ -1816,6 +1838,7 @@ pub mod tests {
             (pr.turn, pr.conflicts)
         };
         let yours = Some(Turn::Yours);
+        let authors = Some(Turn::Authors);
         assert_eq!(turn(json!({})), (None, false), "nothing asked of you");
         let requested = |typename: &str| json!({ "viewerLatestReviewRequest": { "requestedReviewer": { "__typename": typename } } });
         assert_eq!(
@@ -1825,21 +1848,41 @@ pub mod tests {
         );
         assert_eq!(turn(requested("Team")), (None, false), "a team's request");
         assert_eq!(
-            turn(json!({ "viewerLatestReview": reviewed("CHANGES_REQUESTED") })),
-            (Some(Turn::Authors), false),
+            turn(json!({ "viewerLatestReview": review("CHANGES_REQUESTED", "head") })),
+            (authors, false),
             "you asked for changes and nothing came since"
         );
         assert_eq!(
-            turn(json!({
-                "viewerLatestReview": reviewed("COMMENTED"),
-                "commits": pushed("2026-11-16T09:00:00Z"),
-            })),
+            turn(json!({ "viewerLatestReview": review("COMMENTED", "older") })),
             (yours, false),
-            "a push after your review"
+            "a push after your review, however old its commits' dates"
         );
         assert_eq!(
-            turn(json!({ "viewerLatestReview": reviewed("APPROVED") })),
+            turn(json!({ "viewerLatestReview": review("APPROVED", "head") })),
             (None, false)
+        );
+        assert_eq!(
+            turn(json!({
+                "latestOpinionatedReviews": opinion("CHANGES_REQUESTED", "head", true),
+                "viewerLatestReview": review("COMMENTED", "head"),
+            })),
+            (authors, false),
+            "a reply in a thread after your change request"
+        );
+        assert_eq!(
+            turn(json!({
+                "latestOpinionatedReviews": opinion("CHANGES_REQUESTED", "older", true),
+                "viewerLatestReview": review("COMMENTED", "head"),
+            })),
+            (yours, false),
+            "a push after your change request, though you commented since"
+        );
+        assert_eq!(
+            turn(json!({
+                "latestOpinionatedReviews": opinion("CHANGES_REQUESTED", "head", false),
+            })),
+            (None, false),
+            "someone else's change request"
         );
         assert_eq!(
             turn(json!({ "viewerDidAuthor": true, "reviewDecision": "CHANGES_REQUESTED" })),
