@@ -15,6 +15,7 @@ use crate::app::{
 };
 use crate::editor::Editor;
 use crate::file_tree::FileRow;
+use crate::gallery::{self, Gallery, Loaded};
 use crate::github::GhProblem;
 use crate::line_diff::{DiffRow, RowKind};
 use crate::model::{
@@ -24,6 +25,7 @@ use crate::model::{
 };
 use crate::theme::{ON_STATE, PrState, Theme};
 use crate::{markdown, overview};
+use ratatui_image::picker::Picker;
 
 /// What every render function needs besides the data it draws.
 #[derive(Clone, Copy)]
@@ -103,6 +105,75 @@ pub fn render(frame: &mut Frame, app: &mut App, theme: &Theme, now: DateTime<Utc
     if let Some(composer) = &app.composer {
         render_composer(frame, composer, paint);
     }
+    if let (Some(gallery), Some(picker)) = (app.gallery.as_mut(), &app.picker) {
+        render_gallery(frame, gallery, picker, paint);
+    }
+}
+
+/// The gallery covers the screen: the image centered, its place in the list on top, and
+/// the keys at the bottom.
+fn render_gallery(frame: &mut Frame, gallery: &mut Gallery, picker: &Picker, paint: Paint) {
+    let theme = paint.theme;
+    let screen = frame.area();
+    frame.render_widget(Clear, screen);
+    let title = format!(" Image {} of {} ", gallery.at + 1, gallery.urls.len());
+    let frame_block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme.accent))
+        .title(Line::from(paint.bold(title, theme.heading)))
+        .style(Style::new().bg(theme.background));
+    frame.render_widget(frame_block, screen);
+    let keys = Rect {
+        x: screen.x + 1,
+        y: screen.bottom().saturating_sub(2),
+        width: screen.width.saturating_sub(2),
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new(paint.span(
+            " h/l previous/next  o open in browser  esc close",
+            theme.muted,
+        )),
+        keys,
+    );
+    let area = gallery::image_area(screen);
+    let url = gallery.current().to_string();
+    let message = match gallery.loaded.get_mut(&url) {
+        None | Some(Loaded::Loading) => Some((format!("loading {url}"), theme.warning)),
+        Some(Loaded::Failed(error)) => Some((
+            format!("{error}\n{url}\no opens it in the browser"),
+            theme.danger,
+        )),
+        Some(Loaded::Ready(shown)) => draw_image(frame, shown, picker, area)
+            .err()
+            .map(|error| (error, theme.danger)),
+    };
+    if let Some((text, color)) = message {
+        let paragraph =
+            Paragraph::new(Text::styled(text, Style::new().fg(color))).wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, area);
+    }
+}
+
+/// Draws the image in the middle of `area`, encoding it again when the space changed.
+fn draw_image(
+    frame: &mut Frame,
+    shown: &mut gallery::Shown,
+    picker: &Picker,
+    area: Rect,
+) -> Result<(), String> {
+    if shown.fit != area.as_size() {
+        gallery::refit(shown, picker, area.as_size())?;
+    }
+    let size = shown.protocol.size();
+    let centered = Rect {
+        x: area.x + area.width.saturating_sub(size.width) / 2,
+        y: area.y + area.height.saturating_sub(size.height) / 2,
+        width: size.width.min(area.width),
+        height: size.height.min(area.height),
+    };
+    frame.render_widget(ratatui_image::Image::new(&shown.protocol), centered);
+    Ok(())
 }
 
 /// The review or line-comment box: what it sends, the text, and the keys.
@@ -550,6 +621,7 @@ fn detail_hints(view: &DetailView) -> Hints {
             ("enter", "fold"),
             ("R", "review"),
             ("e", "labels"),
+            ("i", "images"),
             ("f", "filter"),
             ("F", "order"),
             ("n", "bots"),
@@ -669,10 +741,17 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
                 "j/k, wheel",
                 "next or previous comment, thread or fold; a long one by a third of a screen",
             ),
-            ("enter", "open or close the folded block under the cursor"),
+            (
+                "enter",
+                "open or close the folded block under the cursor; on an image, show it",
+            ),
             (
                 "e",
                 "labels: tick or untick the repo's labels, enter applies",
+            ),
+            (
+                "i",
+                "images: every image in the PR, h/l previous/next, o browser, esc closes",
             ),
             ("], [", "next or previous card or folded block"),
             (
@@ -2672,6 +2751,7 @@ fn render_overview(frame: &mut Frame, view: &mut DetailView, area: Rect, paint: 
         *layout = Some(OverviewLayout {
             width,
             rows: overview::build(&context, width),
+            images: overview::images(&context),
         });
     }
     let Some(layout) = layout.as_ref() else {

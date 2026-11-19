@@ -166,6 +166,7 @@ fn card(
         fold: fold.map(|(id, _)| id),
         anchor: true,
         action: None,
+        image: None,
     };
     if !open {
         return vec![top];
@@ -526,18 +527,12 @@ fn timeline_rows(context: &Context, width: usize, folds: &mut Folds) -> Vec<Text
         Some(Err(error)) => return notice(error.clone(), theme.danger),
         Some(Ok(activity)) => activity,
     };
-    let filter = context.comments.filter;
-    let mut items: Vec<Comment> = activity
-        .timeline
-        .iter()
-        .filter(|item| !(context.comments.no_bots && is_bot(item)))
-        .filter_map(|item| filter.apply(item))
-        .collect();
+    let items = shown_items(activity, context.comments);
     if items.is_empty() {
-        return notice(filter.empty_text().to_string(), theme.muted);
-    }
-    if context.comments.newest_first {
-        items.reverse();
+        return notice(
+            context.comments.filter.empty_text().to_string(),
+            theme.muted,
+        );
     }
     let mut rows = Vec::new();
     if activity.timeline_cut {
@@ -549,6 +544,38 @@ fn timeline_rows(context: &Context, width: usize, folds: &mut Folds) -> Vec<Text
         rows.extend(item_rows(context, item, width, folds));
     }
     rows
+}
+
+/// The comments the list shows, in the order it shows them.
+fn shown_items(activity: &PrActivity, view: CommentView) -> Vec<Comment> {
+    let mut items: Vec<Comment> = activity
+        .timeline
+        .iter()
+        .filter(|item| !(view.no_bots && is_bot(item)))
+        .filter_map(|item| view.filter.apply(item))
+        .collect();
+    if view.newest_first {
+        items.reverse();
+    }
+    items
+}
+
+/// Every image the Overview shows, in its order: the description, then each comment and
+/// its threads. Images in closed folds count too.
+pub fn images(context: &Context) -> Vec<String> {
+    let mut urls = markdown::images(&context.detail.body, context.theme);
+    let Some(Ok(activity)) = context.activity else {
+        return urls;
+    };
+    for item in shown_items(activity, context.comments) {
+        urls.extend(markdown::images(&item.body, context.theme));
+        for thread in &item.threads {
+            for reply in &thread.comments {
+                urls.extend(markdown::images(&reply.body, context.theme));
+            }
+        }
+    }
+    urls
 }
 
 fn is_bot(comment: &Comment) -> bool {
@@ -687,6 +714,7 @@ fn thread_block(context: &Context, thread: &ThreadLine) -> Block {
         body.push(Block::Line {
             spans: title,
             indent: 0,
+            image: None,
         });
         body.extend(markdown::parse(&comment.body, theme));
         body.push(Block::Blank);
@@ -721,6 +749,7 @@ fn code_lines(context: &Context, code: &[HunkLine]) -> Vec<Block> {
                 ],
                 // A wrapped line continues under the code, not under the number.
                 indent: width + 3,
+                image: None,
             }
         })
         .collect()
@@ -769,6 +798,56 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    #[test]
+    fn images_run_from_the_description_through_each_comment_and_its_threads() {
+        let theme = theme::by_name("dracula").unwrap();
+        let mut detail = sample_detail();
+        detail.body = "![desc](https://a/desc.png)".to_string();
+        let mut activity = sample_activity();
+        let first = &mut activity.timeline[0];
+        first.body.push_str("\n\n![first](https://a/first.png)");
+        let threaded = activity
+            .timeline
+            .iter_mut()
+            .find(|item| !item.threads.is_empty())
+            .expect("a review with a thread");
+        threaded.threads[0].comments[0]
+            .body
+            .push_str("\n\n![reply](https://a/reply.png)");
+        let activity = Ok(activity);
+        let none = HashSet::new();
+        let context = |comments| Context {
+            detail: &detail,
+            activity: Some(&activity),
+            toggled: &none,
+            comments,
+            theme: &theme,
+            now: detail.created_at,
+        };
+        let oldest = images(&context(CommentView::default()));
+        assert_eq!(
+            oldest,
+            [
+                "https://a/desc.png",
+                "https://a/first.png",
+                "https://a/reply.png"
+            ]
+        );
+        let newest = images(&context(CommentView {
+            newest_first: true,
+            ..CommentView::default()
+        }));
+        assert_eq!(
+            newest,
+            [
+                "https://a/desc.png",
+                "https://a/reply.png",
+                "https://a/first.png"
+            ],
+            "the gallery follows the list's order"
+        );
     }
 
     #[test]

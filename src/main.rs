@@ -4,6 +4,7 @@ mod editor;
 mod editor_command;
 mod file_tree;
 mod find;
+mod gallery;
 mod github;
 mod highlight;
 mod line_diff;
@@ -28,6 +29,7 @@ use crossterm::execute;
 use crossterm::terminal::supports_keyboard_enhancement;
 use highlight::Syntax;
 use ratatui::DefaultTerminal;
+use ratatui::layout::Rect;
 use ratatui::text::Text;
 use std::io::Write;
 use std::path::PathBuf;
@@ -45,6 +47,11 @@ use repo::{CloneLookup, LocalRepo};
 enum Message {
     /// gh is missing or logged out; found after an inbox fetch failed.
     GhProblem(github::GhProblem),
+    /// An image for the gallery, fetched and encoded.
+    Image {
+        url: String,
+        result: Result<gallery::Shown, String>,
+    },
     /// The repo's labels, for the label menu.
     Labels {
         pr: PrRef,
@@ -299,6 +306,9 @@ fn handle_input(
     session: &mut Session,
 ) -> Result<bool> {
     let action = match input {
+        // The gallery covers the screen, so the wheel, clicks and a paste have nothing
+        // to reach.
+        Input::Scroll(..) | Input::Click(..) | Input::Paste(_) if app.gallery.is_some() => None,
         Input::Paste(text) => {
             app.handle_paste(&text);
             None
@@ -389,6 +399,7 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
             Message::LineNames { pr, names } => app.set_line_names(&pr, names),
             Message::Definitions { pr, name, result } => app.set_definitions(&pr, name, result),
             Message::Labels { pr, result } => app.set_repo_labels(&pr, result),
+            Message::Image { url, result } => app.set_image(url, result),
             Message::FilesProgress { pr, loaded, total } => {
                 app.set_files_progress(&pr, loaded, total)
             }
@@ -416,6 +427,24 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
     }
 }
 
+/// Fetches and encodes a gallery image off the UI thread, sized to the gallery.
+fn load_image(
+    terminal: &DefaultTerminal,
+    app: &mut App,
+    session: &Session,
+    url: String,
+) -> Result<()> {
+    let screen = terminal.size()?;
+    let fit = gallery::image_area(Rect::new(0, 0, screen.width, screen.height)).as_size();
+    let picker = app.picker.get_or_insert_with(gallery::picker).clone();
+    let sender = session.sender.clone();
+    thread::spawn(move || {
+        let result = gallery::load(&url, &picker, fit);
+        let _ = sender.send(Message::Image { url, result });
+    });
+    Ok(())
+}
+
 /// Returns false when the app should quit.
 fn perform(
     action: Action,
@@ -428,6 +457,7 @@ fn perform(
         Action::Refresh => refresh(app, session),
         Action::FetchDetail(pr) => start_load(app, session, pr),
         Action::OpenBrowser(url) => open_browser(app, &url),
+        Action::LoadImage(url) => load_image(terminal, app, session, url)?,
         Action::RunDiff(pr) => run_diff(terminal, app, session, &pr)?,
         Action::OpenEditor(target) => open_editor(terminal, app, session, &target)?,
         Action::LineNames {
