@@ -55,6 +55,11 @@ enum Message {
         item: markdown::Visual,
         result: Result<gallery::Shown, String>,
     },
+    /// A PR's header and sidebar, for the inbox preview pane.
+    Preview {
+        pr: PrRef,
+        result: Result<Box<PrDetail>, String>,
+    },
     /// The repo's labels, for the label menu.
     Labels {
         pr: PrRef,
@@ -424,6 +429,7 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
             Message::LineNames { pr, names } => app.set_line_names(&pr, names),
             Message::Definitions { pr, name, result } => app.set_definitions(&pr, name, result),
             Message::Labels { pr, result } => app.set_repo_labels(&pr, result),
+            Message::Preview { pr, result } => app.set_preview(pr, result),
             Message::Image { item, result } => app.set_image(item, result),
             Message::FilesProgress { pr, loaded, total } => {
                 app.set_files_progress(&pr, loaded, total)
@@ -818,6 +824,19 @@ fn dispatch_requests(app: &mut App, session: &mut Session) {
         }
         start_diff(session, job);
     }
+    if let Some(pr) = app.take_preview_request(Instant::now()) {
+        start_preview_fetch(session, pr);
+    }
+}
+
+fn start_preview_fetch(session: &Session, pr: PrRef) {
+    let sender = session.sender.clone();
+    thread::spawn(move || {
+        let result = github::fetch_detail(&pr.repo, pr.number)
+            .map(Box::new)
+            .map_err(|error| format!("{error:#}"));
+        let _ = sender.send(Message::Preview { pr, result });
+    });
 }
 
 /// Finds the clone in the workspace, asking for the workspace or for a clone first when needed.
@@ -1154,6 +1173,7 @@ fn refresh(app: &mut App, session: &mut Session) {
 
 /// One thread per group, so each group shows as soon as its own search returns.
 fn start_inbox_fetch(session: &Session, app: &mut App) {
+    app.previews.forget_failures();
     let generation = app.start_inbox(&session.config.groups);
     let updated_since = session
         .config

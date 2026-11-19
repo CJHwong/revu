@@ -441,6 +441,7 @@ fn render_inbox(frame: &mut Frame, app: &mut App, paint: Paint) {
     frame.render_widget(Paragraph::new(inbox_status(app, paint)), top);
 
     if let Some(errors) = app.inbox_failure() {
+        app.preview_shown = false;
         render_inbox_failure(frame, &errors, body, paint);
         frame.render_widget(
             Paragraph::new(hints_line(INBOX_HINTS, usize::from(bottom.width), paint)),
@@ -456,7 +457,16 @@ fn render_inbox(frame: &mut Frame, app: &mut App, paint: Paint) {
             body.inner(Margin::new(1, 1)),
         );
     }
-    let row_width = body.width.saturating_sub(2) as usize;
+    let (list_area, preview_area) = if body.width >= PREVIEW_MIN_WIDTH {
+        let [list, preview] =
+            Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .areas(body);
+        (list, Some(preview))
+    } else {
+        (body, None)
+    };
+    app.preview_shown = preview_area.is_some();
+    let row_width = list_area.width.saturating_sub(2) as usize;
     let selected = app.list_state.selected();
     let items: Vec<ListItem> = app
         .rows()
@@ -466,13 +476,80 @@ fn render_inbox(frame: &mut Frame, app: &mut App, paint: Paint) {
         .collect();
     let heights: Vec<usize> = items.iter().map(ListItem::height).collect();
     let list = List::new(items).highlight_style(Style::new().bg(paint.theme.selection));
-    frame.render_stateful_widget(list, body, &mut app.list_state);
-    app.inbox_clicks = list_targets(body, &heights, app.list_state.offset());
+    frame.render_stateful_widget(list, list_area, &mut app.list_state);
+    app.inbox_clicks = list_targets(list_area, &heights, app.list_state.offset());
+    if let Some(area) = preview_area {
+        render_preview(frame, app, area, paint);
+    }
 
     frame.render_widget(
         Paragraph::new(hints_line(INBOX_HINTS, usize::from(bottom.width), paint)),
         bottom,
     );
+}
+
+/// The inbox gives 40% of its width to the preview pane from this width, where the
+/// list still keeps room for a title beside its badges.
+const PREVIEW_MIN_WIDTH: u16 = 160;
+
+/// The selected PR's header, merge state, reviewers, labels and description, so a row
+/// can be judged without opening it.
+fn render_preview(frame: &mut Frame, app: &App, area: Rect, paint: Paint) {
+    let theme = paint.theme;
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme.muted));
+    let inner = block.inner(area).inner(Margin::new(1, 0));
+    frame.render_widget(block, area);
+    let Some((row, preview)) = app.selected_preview() else {
+        return;
+    };
+    let width = usize::from(inner.width);
+    let mut lines = markdown::wrap(&[paint.bold(row.title.clone(), theme.foreground)], width, 0);
+    match preview {
+        None => lines.push(Line::from(paint.span("loading...", theme.warning))),
+        Some(Err(error)) => {
+            let error = paint.span(format!("preview failed: {error}"), theme.danger);
+            lines.extend(markdown::wrap(&[error], width, 0));
+        }
+        Some(Ok(detail)) => lines.extend(preview_lines(detail, width, paint)),
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn preview_lines(detail: &PrDetail, width: usize, paint: Paint) -> Vec<Line<'static>> {
+    let theme = paint.theme;
+    let branches = [
+        paint.span("into ", theme.muted),
+        paint.span(detail.base.clone(), theme.accent),
+        paint.span(" from ", theme.muted),
+        paint.span(detail.head.clone(), theme.accent),
+    ];
+    let mut lines = markdown::wrap(&branches, width, 0);
+    let (headline, color, note) = crate::overview::merge_headline(detail, theme);
+    lines.push(Line::from(""));
+    lines.push(Line::from(paint.bold(headline, color)));
+    if let Some(note) = note {
+        lines.push(Line::from(paint.span(note, theme.muted)));
+    }
+    if !detail.reviewers.is_empty() {
+        lines.extend(section("Reviewers", paint));
+        lines.extend(reviewer_lines(&detail.reviewers, width, paint));
+    }
+    if !detail.labels.is_empty() {
+        lines.extend(section("Labels", paint));
+        lines.extend(label_chips(&detail.labels, width));
+    }
+    lines.extend(section("Description", paint));
+    if detail.body.trim().is_empty() {
+        lines.push(Line::from(paint.span("No description.", theme.muted)));
+        return lines;
+    }
+    let blocks = markdown::parse(&detail.body, theme);
+    let unfolded = std::collections::HashSet::new();
+    let rows = markdown::layout(&blocks, width, &mut markdown::Folds::new(&unfolded), theme);
+    lines.extend(rows.into_iter().map(|row| row.line));
+    lines
 }
 
 fn inbox_status(app: &App, paint: Paint) -> Line<'static> {
@@ -4316,6 +4393,55 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(screen.contains("No groups in config.yaml"), "{screen}");
+    }
+
+    #[test]
+    fn a_wide_inbox_previews_the_selected_pr_and_clicks_stay_on_the_list() {
+        let theme = theme::by_name("dracula").unwrap();
+        let detail = crate::model::tests::sample_detail();
+        let mut app = App::new();
+        app.loading = false;
+        app.groups = vec![Group {
+            title: "Mine".into(),
+            total: 1,
+            prs: vec![detail.summary.clone()],
+            collapsed: false,
+        }];
+        app.list_state.select(Some(1));
+        app.set_preview(detail.summary.reference(), Ok(Box::new(detail.clone())));
+        let draw = |app: &mut App, width: u16| {
+            let backend = ratatui::backend::TestBackend::new(width, 30);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| render(frame, app, &theme, Utc::now()))
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..30)
+                .map(|row| {
+                    (0..width)
+                        .map(|column| buffer[(column, row)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let wide = draw(&mut app, 200);
+        assert!(app.preview_shown);
+        assert!(
+            wide.contains(&format!("into {} from {}", detail.base, detail.head)),
+            "{wide}"
+        );
+        assert!(wide.contains("Description"), "{wide}");
+        assert_eq!(
+            app.inbox_clicks[1].area.width, 120,
+            "the list's 60%, not the screen"
+        );
+
+        let narrow = draw(&mut app, 120);
+        assert!(!app.preview_shown);
+        assert!(!narrow.contains("Description"), "{narrow}");
+        assert_eq!(app.inbox_clicks[1].area.width, 120);
     }
 
     #[test]

@@ -49,7 +49,7 @@ pub struct RateLimit {
 }
 
 /// Enough to fetch and link a pull request, from an inbox row or a pasted link.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PrRef {
     pub repo: String,
     pub number: u64,

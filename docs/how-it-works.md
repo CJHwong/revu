@@ -46,6 +46,8 @@ The second line ends with who the pull request waits on:
 | Author's turn | You requested changes and nothing was pushed since. |
 | Conflicts | GitHub found merge conflicts. GitHub checks this lazily, so a pull request it has not checked yet shows nothing. |
 
+In a terminal at least 160 columns wide, the right 40% of the inbox previews the selected pull request: its branches, whether it can merge, the reviewers, the labels and the description. revu fetches the preview once the cursor rests on a row for 300 ms, so moving through the list sends no request per row. It fetches again when the row shows a newer update. A failed preview tries again on `r`.
+
 ## The overview
 
 The merge box says whether the pull request can merge, and counts failing and pending checks, unresolved review threads and pending approvals. Skipped checks count neither as passed nor failed.
