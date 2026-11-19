@@ -457,6 +457,56 @@ pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+/// $XDG_CACHE_HOME/revu/worktrees, else ~/.cache/revu/worktrees: where `o` checks out
+/// a PR's head when your clone is on another branch.
+pub fn worktree_root() -> Result<PathBuf> {
+    let base = match std::env::var_os("XDG_CACHE_HOME").filter(|value| !value.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".cache"),
+    };
+    Ok(base.join("revu").join("worktrees"))
+}
+
+/// A worktree of `clone` at the PR's head, at `root/owner/name/number`, so a file opens
+/// at the PR's code while the clone stays on its own branch. A worktree already there
+/// moves to `head`, unless it holds uncommitted changes: then it stays, and the second
+/// value is the short commit it is on.
+pub fn pr_worktree(
+    root: &Path,
+    clone: &Path,
+    pr: &crate::model::PrRef,
+    head: &str,
+) -> Result<(PathBuf, Option<String>)> {
+    let dir = root.join(&pr.repo).join(pr.number.to_string());
+    if !dir.join(".git").exists() {
+        // A worktree folder you deleted is still registered until a prune.
+        ensure_success(&git(clone, &["worktree", "prune"])?, "git worktree prune")?;
+        fs::create_dir_all(root.join(&pr.repo))
+            .with_context(|| format!("create {}", root.display()))?;
+        let path = dir.to_string_lossy();
+        let output = git(clone, &["worktree", "add", "-q", "--detach", &path, head])?;
+        ensure_success(&output, "git worktree add")?;
+        return Ok((dir, None));
+    }
+    let current = git(&dir, &["rev-parse", "HEAD"])?;
+    ensure_success(&current, "git rev-parse")?;
+    let current = String::from_utf8_lossy(&current.stdout).trim().to_string();
+    if current == head {
+        return Ok((dir, None));
+    }
+    let status = git(&dir, &["status", "--porcelain"])?;
+    ensure_success(&status, "git status")?;
+    if !status.stdout.is_empty() {
+        let short = current.get(..7).unwrap_or(&current).to_string();
+        return Ok((dir, Some(short)));
+    }
+    ensure_success(
+        &git(&dir, &["checkout", "-q", "--detach", head])?,
+        "git checkout",
+    )?;
+    Ok((dir, None))
+}
+
 /// What the clone has checked out when it is not `commit`: its branch, else the short
 /// commit. None when it is `commit`, or when git cannot tell.
 pub fn checked_out_elsewhere(dir: &Path, commit: &str) -> Option<String> {
@@ -1002,6 +1052,74 @@ mod tests {
                 .unwrap()
                 .contains("[package]")
         );
+    }
+
+    #[test]
+    fn a_pr_worktree_opens_the_head_and_keeps_your_changes() {
+        let scratch = std::env::temp_dir().join(format!("revu-worktree-{}", std::process::id()));
+        let clone = scratch.join("clone");
+        let root = scratch.join("worktrees");
+        fs::create_dir_all(&clone).unwrap();
+        let run = |dir: &Path, args: &[&str]| {
+            let output = git(dir, args).unwrap();
+            ensure_success(&output, "git").unwrap();
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        let commit = [
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+        ];
+        run(&clone, &["init", "-q", "-b", "main"]);
+        for text in ["one", "two"] {
+            fs::write(clone.join("file.txt"), text).unwrap();
+            run(&clone, &["add", "file.txt"]);
+            run(
+                &clone,
+                &[&commit[..], &["commit", "-q", "-m", text]].concat(),
+            );
+        }
+        let head = run(&clone, &["rev-parse", "HEAD"]);
+        let older = run(&clone, &["rev-parse", "HEAD~1"]);
+        run(&clone, &["checkout", "-q", "--detach", &older]);
+        let pr = crate::model::PrRef {
+            repo: "acme/app".to_string(),
+            number: 7,
+        };
+
+        let (dir, kept) = pr_worktree(&root, &clone, &pr, &head).unwrap();
+        assert_eq!(dir, root.join("acme/app/7"));
+        assert_eq!(kept, None);
+        assert_eq!(fs::read_to_string(dir.join("file.txt")).unwrap(), "two");
+        assert_eq!(
+            run(&clone, &["rev-parse", "HEAD"]),
+            older,
+            "the clone stays put"
+        );
+        assert_eq!(
+            pr_worktree(&root, &clone, &pr, &head).unwrap(),
+            (dir.clone(), None)
+        );
+
+        // The PR moves while you have edits in the worktree: they stay.
+        fs::write(dir.join("file.txt"), "mine").unwrap();
+        let kept = pr_worktree(&root, &clone, &pr, &older).unwrap().1;
+        assert_eq!(kept, Some(head[..7].to_string()));
+        assert_eq!(fs::read_to_string(dir.join("file.txt")).unwrap(), "mine");
+
+        // Without edits, it follows the PR.
+        run(&dir, &["checkout", "-q", "--", "file.txt"]);
+        assert_eq!(pr_worktree(&root, &clone, &pr, &older).unwrap().1, None);
+        assert_eq!(fs::read_to_string(dir.join("file.txt")).unwrap(), "one");
+
+        // A worktree folder you deleted comes back.
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(pr_worktree(&root, &clone, &pr, &head).unwrap().1, None);
+        assert_eq!(fs::read_to_string(dir.join("file.txt")).unwrap(), "two");
+        let _ = fs::remove_dir_all(&scratch);
     }
 
     #[test]

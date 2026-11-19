@@ -105,7 +105,7 @@ editor:
   wait: false
 ```
 
-`{dir}` is the clone, `{file}` the file's full path, `{line}` the line. The paths are quoted for the shell. `wait: true`, the default, hands the terminal to the editor until it exits. `wait: false` starts it beside revu, for an editor with its own window.
+`{dir}` is the clone, or the worktree at the PR's head when the clone is on another branch, `{file}` the file's full path, `{line}` the line. The paths are quoted for the shell. `wait: true`, the default, hands the terminal to the editor until it exits. `wait: false` starts it beside revu, for an editor with its own window.
 
 Settings (`,`) sets it from a list: your shell's editor, which removes the key, the editors from the table that are installed, and Custom command. A custom command gets `wait` from the editor's name; change it here if that guess is wrong.
 

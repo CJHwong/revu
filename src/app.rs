@@ -333,7 +333,10 @@ pub struct EditorTarget {
     /// Without a line, the editor opens at the file's first change between these commits.
     pub changes: Option<(String, String)>,
     /// The branch or commit the clone has checked out, when it is not the PR's head.
+    /// Then the file opens in a worktree at the PR's head instead of the clone.
     pub elsewhere: Option<String>,
+    pub pr: PrRef,
+    pub head: String,
 }
 
 /// A path for a GitHub URL, with the characters that would end or break it escaped.
@@ -766,29 +769,32 @@ impl DetailView {
         })
     }
 
-    /// The file in the clone's working tree, which may be on another branch than the PR.
+    /// The file at the PR's head: in the clone when it has the head checked out, else
+    /// in a worktree that `main` prepares before the editor starts.
     fn editor_target(&self, path: &str, line: Option<u64>) -> Result<EditorTarget, String> {
         let RepoState::Ready(repo) = &self.repo else {
             return Err(self.clone_not_ready("the local clone is not ready yet"));
         };
-        if !repo.dir.join(path).is_file() {
-            return Err(
-                "not in your clone's checkout; check out the PR branch to edit it".to_string(),
-            );
+        let Some(detail) = self.loaded() else {
+            return Err("the pull request is still loading".to_string());
+        };
+        let elsewhere = crate::repo::checked_out_elsewhere(&repo.dir, &detail.head_oid);
+        // A worktree is checked for the file once it is at the head.
+        if elsewhere.is_none() && !repo.dir.join(path).is_file() {
+            return Err("the PR's head has no such file".to_string());
         }
-        let detail = self.loaded();
         let changes = match line {
             Some(_) => None,
-            None => detail.map(|detail| (detail.base_oid.clone(), detail.head_oid.clone())),
+            None => Some((detail.base_oid.clone(), detail.head_oid.clone())),
         };
-        let elsewhere = detail
-            .and_then(|detail| crate::repo::checked_out_elsewhere(&repo.dir, &detail.head_oid));
         Ok(EditorTarget {
             dir: repo.dir.clone(),
             path: path.to_string(),
             line,
             changes,
             elsewhere,
+            pr: self.pr.clone(),
+            head: detail.head_oid.clone(),
         })
     }
 
@@ -6349,7 +6355,7 @@ mod tests {
             menu.editor
                 .as_ref()
                 .unwrap_err()
-                .contains("check out the PR branch")
+                .contains("the PR's head has no such file")
         );
         app.handle_key(key(KeyCode::Esc));
         assert!(app.open_menu.is_none());

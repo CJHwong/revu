@@ -48,6 +48,12 @@ The second line ends with who the pull request waits on:
 
 In a terminal at least 160 columns wide, the right 40% of the inbox previews the selected pull request: its branches, whether it can merge, the reviewers, the labels and the description. revu fetches the preview once the cursor rests on a row for 300 ms, so moving through the list sends no request per row. It fetches again when the row shows a newer update. A failed preview tries again on `r`. Each preview is one GraphQL call, 1 point of the API budget. Opening a pull request whose preview is current shows that preview at once and skips fetching it again; `r` in the pull request fetches everything.
 
+## Edit at the PR's head
+
+When `o` opens a file in your editor and the clone is on another branch, revu adds a worktree of the clone at the PR's head, detached, under `$XDG_CACHE_HOME/revu/worktrees/<owner>/<repo>/<number>` (else `~/.cache/revu/...`). Your clone's branch and working tree stay as they are. The worktree shares the clone's objects, so it costs only the checked-out files.
+
+The next `o` on the same pull request reuses the worktree and moves it to the PR's newest head. If it holds changes you have not committed, revu leaves it where it is and says so, so your edits are never overwritten. To keep an edit, commit it in the worktree, on a branch you create there. To drop a worktree, run `git worktree remove <folder>` in the clone.
+
 ## The overview
 
 The merge box says whether the pull request can merge, and counts failing and pending checks, unresolved review threads and pending approvals. Skipped checks count neither as passed nor failed.

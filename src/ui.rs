@@ -3795,17 +3795,16 @@ fn render_open_menu(frame: &mut Frame, menu: &OpenMenu, paint: Paint) {
                 Some(line) => format!("line {line}"),
                 None => "its first change".to_string(),
             };
-            let mut spans = vec![paint.span(
-                format!("   {} on your clone's copy, at {at}", menu.editor_name),
+            let place = match &target.elsewhere {
+                Some(elsewhere) => {
+                    format!("a worktree at the PR's head, since your clone is on {elsewhere}")
+                }
+                None => "your clone, at the PR's head".to_string(),
+            };
+            Line::from(paint.span(
+                format!("   {} on {place}, at {at}", menu.editor_name),
                 theme.muted,
-            )];
-            if let Some(elsewhere) = &target.elsewhere {
-                spans.push(paint.span(
-                    format!(". The clone is on {elsewhere}, not the PR's head"),
-                    theme.warning,
-                ));
-            }
-            Line::from(spans)
+            ))
         }
         Err(why) => Line::from(paint.span(format!("   {why}"), theme.danger)),
     };
