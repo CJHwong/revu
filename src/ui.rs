@@ -550,7 +550,7 @@ fn pr_item(pr: &PrSummary, width: usize, selected: bool, paint: Paint) -> ListIt
         Span::from(" "),
     ];
     first.extend(badges.spans);
-    let second = paint.span(
+    let mut second = vec![paint.span(
         format!(
             "    {}#{} by {}, updated {}",
             pr.repo,
@@ -559,8 +559,22 @@ fn pr_item(pr: &PrSummary, width: usize, selected: bool, paint: Paint) -> ListIt
             relative_time(pr.updated_at, paint.now)
         ),
         secondary,
-    );
+    )];
+    second.extend(size_spans(pr, secondary, paint));
     ListItem::new(Text::from(vec![Line::from(first), Line::from(second)]))
+}
+
+/// The diff size in the form the PR header uses, so a small review stands out.
+fn size_spans(pr: &PrSummary, secondary: Color, paint: Paint) -> [Span<'static>; 3] {
+    let files = match pr.changed_files {
+        1 => ", 1 file".to_string(),
+        count => format!(", {count} files"),
+    };
+    [
+        paint.span(format!("   +{}", pr.additions), paint.theme.success),
+        paint.span(format!(" -{}", pr.deletions), paint.theme.danger),
+        paint.span(files, secondary),
+    ]
 }
 
 fn badge_spans(pr: &PrSummary, secondary: Color, paint: Paint) -> Vec<Span<'static>> {
@@ -4313,21 +4327,51 @@ mod tests {
         };
         let width = |comments: u64| {
             let pr = PrSummary {
-                repo: "acme/api".into(),
-                number: 1,
-                title: "Fix".into(),
-                url: String::new(),
-                author: "joey".into(),
-                updated_at: Utc::now(),
-                is_draft: false,
-                review: ReviewState::Awaiting,
-                checks: None,
                 comments,
+                ..summary()
             };
             Line::from(badge_spans(&pr, theme.muted, paint)).width()
         };
         assert_eq!(width(0), width(1));
         assert_eq!(width(0), width(12));
+    }
+
+    fn summary() -> PrSummary {
+        PrSummary {
+            repo: "acme/api".into(),
+            number: 1,
+            title: "Fix".into(),
+            url: String::new(),
+            author: "joey".into(),
+            updated_at: Utc::now(),
+            is_draft: false,
+            review: ReviewState::Awaiting,
+            checks: None,
+            comments: 0,
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+        }
+    }
+
+    #[test]
+    fn an_inbox_row_shows_the_diff_size_like_the_pr_header() {
+        let theme = theme::by_name("dracula").unwrap();
+        let paint = Paint {
+            theme: &theme,
+            now: Utc::now(),
+        };
+        let size = |changed_files: u64| {
+            let pr = PrSummary {
+                additions: 120,
+                deletions: 34,
+                changed_files,
+                ..summary()
+            };
+            Line::from(size_spans(&pr, theme.muted, paint).to_vec()).to_string()
+        };
+        assert_eq!(size(7), "   +120 -34, 7 files");
+        assert_eq!(size(1), "   +120 -34, 1 file");
     }
 
     #[test]
