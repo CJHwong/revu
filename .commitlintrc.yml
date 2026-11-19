@@ -1,0 +1,4 @@
+# Commit messages follow Conventional Commits: `type: subject`, then a body with [why] and
+# [how]. CI checks every commit of a pull request against this.
+extends:
+  - "@commitlint/config-conventional"
