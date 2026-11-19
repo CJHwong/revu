@@ -57,7 +57,7 @@ The gallery shows one image or diagram at a time, in a box over the pull request
 
 A ` ```mermaid ` block shows as `[diagram: mermaid]` above its source. In the gallery, revu draws it as a picture itself, offline, with no browser or Node.
 
-Ghostty and kitty show the real image through the kitty graphics protocol, and iTerm2 and WezTerm through iTerm2's. revu tells them apart by `TERM` and `TERM_PROGRAM`. Every other terminal, and any terminal inside tmux, shows the image in colored half blocks. revu downloads images with `curl`, and sends your `gh` token only to GitHub's own hosts, so attachments on private repositories load. It shows PNG, JPEG, GIF and WebP; for an SVG, `o` opens it in the browser.
+Ghostty and kitty show the real image through the kitty graphics protocol, and iTerm2 and WezTerm through iTerm2's. revu tells them apart by `TERM` and `TERM_PROGRAM`. Every other terminal, and any terminal inside tmux, shows the image in colored half blocks. revu downloads images with `curl`, and sends your `gh` token only to GitHub's own hosts, so attachments on private repositories load. It shows PNG, JPEG, GIF, WebP and SVG. An SVG cannot load files from your disk.
 
 ## Files changed
 
