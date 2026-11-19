@@ -1187,19 +1187,52 @@ fn render_diff_pane(
                         _ => line.clone(),
                     })
                     .collect();
-                if view.diff_wrap {
-                    Paragraph::new(lines).wrap(Wrap { trim: false })
-                } else {
+                if !view.diff_wrap {
                     // Stop where the longest visible line ends at the right edge.
                     let longest = lines.iter().map(Line::width).max().unwrap_or(0);
                     let last = longest.saturating_sub(inner.width as usize) as u16;
                     view.diff_shift = view.diff_shift.min(last);
-                    Paragraph::new(lines).scroll((0, view.diff_shift))
                 }
+                let shift = (!view.diff_wrap).then_some(view.diff_shift);
+                render_diff_lines(frame, lines, inner, shift);
+                return;
             }
         },
     };
     frame.render_widget(content, inner);
+}
+
+/// Draws diff lines one under another, wrapped, or cut and shifted right by `shift`. A
+/// line with a background in its style, a code row with syntax colors, gets it across
+/// every row it takes, to the pane's edge.
+fn render_diff_lines(frame: &mut Frame, lines: Vec<Line<'static>>, area: Rect, shift: Option<u16>) {
+    let mut top = area.y;
+    for line in lines {
+        if top >= area.bottom() {
+            break;
+        }
+        let background = line.style.bg;
+        let paragraph = match shift {
+            Some(shift) => Paragraph::new(line).scroll((0, shift)),
+            None => Paragraph::new(line).wrap(Wrap { trim: false }),
+        };
+        let rows = match shift {
+            Some(_) => 1,
+            None => paragraph.line_count(area.width).max(1) as u16,
+        };
+        let rect = Rect {
+            y: top,
+            height: rows.min(area.bottom() - top),
+            ..area
+        };
+        if let Some(background) = background {
+            frame
+                .buffer_mut()
+                .set_style(rect, Style::new().bg(background));
+        }
+        frame.render_widget(paragraph, rect);
+        top += rows;
+    }
 }
 
 /// The PR footer's status: an error first, then a write to GitHub in progress, then
@@ -2173,6 +2206,8 @@ fn find_note(view: &DetailView, paint: Paint) -> Vec<Piece> {
 /// Marks every place the find text appears in a line, ignoring case. The line of the
 /// current match gets the stronger mark.
 pub fn mark_matches(line: Line<'static>, query: &str, mark: Style) -> Line<'static> {
+    // The line's own style carries a code row's background, which the pane fills.
+    let line_style = line.style;
     let cells: Vec<(char, Style)> = line
         .spans
         .iter()
@@ -2209,7 +2244,7 @@ pub fn mark_matches(line: Line<'static>, query: &str, mark: Style) -> Line<'stat
             _ => spans.push(Span::styled(character.to_string(), style)),
         }
     }
-    Line::from(spans)
+    Line::from(spans).style(line_style)
 }
 
 /// "w wraps", or how far an unwrapped diff is scrolled sideways.
@@ -3659,6 +3694,29 @@ fn display_width(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_code_row_fills_its_background_to_the_edge_on_every_row_it_takes() {
+        let gray = Style::new().bg(Color::Rgb(40, 40, 40));
+        let lines = vec![
+            Line::from("short").style(gray),
+            Line::from("a line long enough to wrap").style(gray),
+            Line::from("").style(gray),
+            Line::from("header"),
+        ];
+        let area = Rect::new(0, 0, 12, 8);
+        let backend = ratatui::backend::TestBackend::new(12, 8);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_diff_lines(frame, lines, area, None))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let filled: Vec<bool> = (0..8)
+            .map(|row| buffer[(11, row)].bg == Color::Rgb(40, 40, 40))
+            .collect();
+        // short, three wrapped rows, the blank line, then the header without one.
+        assert_eq!(filled, [true, true, true, true, true, false, false, false]);
+    }
     use crate::theme;
     use chrono::TimeZone;
 

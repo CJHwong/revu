@@ -46,14 +46,49 @@ fn add_syntax(mut text: Text<'static>, syntax: Syntax) -> Text<'static> {
         ) else {
             continue;
         };
+        let code_background = most_common_background(left.iter().chain(&right));
         for ((index, left), right) in indexes.into_iter().zip(left).zip(right) {
             let colored = Line::from([left.spans, right.spans].concat());
             if let Some(merged) = merge(&text.lines[index], &colored, syntax) {
                 text.lines[index] = merged;
             }
+            let line = &mut text.lines[index];
+            if let Some(background) = row_background(line, code_background, syntax) {
+                line.style = line.style.bg(background);
+            }
         }
     }
     text
+}
+
+/// The background `bat`'s theme gives code, when it gives one: the most common one.
+fn most_common_background<'a>(lines: impl Iterator<Item = &'a Line<'static>>) -> Option<Color> {
+    let mut counts: Vec<(Color, usize)> = Vec::new();
+    for color in lines.flat_map(|line| line.spans.iter().filter_map(|span| span.style.bg)) {
+        match counts.iter_mut().find(|(seen, _)| *seen == color) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((color, 1)),
+        }
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(color, _)| color)
+}
+
+/// The background a code row fills to the pane's edge: the change tint when every
+/// character on it changed, else the code's background. The diff pane paints it.
+fn row_background(line: &Line<'static>, code: Option<Color>, syntax: Syntax) -> Option<Color> {
+    let mut tints = cells(line)
+        .into_iter()
+        .filter(|(character, _)| !character.is_whitespace())
+        .map(|(_, style)| style.bg);
+    let first = tints.next().flatten();
+    let changed = matches!(first, Some(tint) if tint == syntax.added || tint == syntax.removed);
+    match changed && tints.all(|tint| tint == first) {
+        true => first,
+        false => code,
+    }
 }
 
 /// A line's text before and after the right column's line numbers: the second run of dim
@@ -294,6 +329,44 @@ mod tests {
                 .add_modifier(Modifier::BOLD),
             "an added word gets bat's color on the added tint, still bold"
         );
+    }
+
+    #[test]
+    fn a_row_takes_the_change_tint_only_when_all_of_it_changed() {
+        let gray = Some(Color::Rgb(40, 40, 40));
+        let on = |bg: Color| Style::new().bg(bg);
+        let added = Line::from(vec![
+            Span::styled("  ", on(SYNTAX.added)),
+            Span::styled("let x", on(SYNTAX.added)),
+        ]);
+        assert_eq!(row_background(&added, gray, SYNTAX), Some(SYNTAX.added));
+        let one_word = Line::from(vec![
+            Span::styled("let ", Style::new()),
+            Span::styled("x", on(SYNTAX.added)),
+        ]);
+        assert_eq!(
+            row_background(&one_word, gray, SYNTAX),
+            gray,
+            "a changed word"
+        );
+        assert_eq!(
+            row_background(&Line::from(""), gray, SYNTAX),
+            gray,
+            "a blank line"
+        );
+        assert_eq!(
+            row_background(&Line::from("x"), None, SYNTAX),
+            None,
+            "a theme without one"
+        );
+        let lines = [
+            Line::from(Span::styled("a", on(Color::Red))),
+            Line::from(vec![
+                Span::styled("b", on(Color::Blue)),
+                Span::styled("c", on(Color::Blue)),
+            ]),
+        ];
+        assert_eq!(most_common_background(lines.iter()), Some(Color::Blue));
     }
 
     #[test]
