@@ -1,6 +1,6 @@
 # Checks, then builds revu for macOS and Linux when a version tag is pushed, publishes the
-# binaries as a GitHub Release. The Homebrew formula is updated by hand (RELEASING.md), unless
-# the HOMEBREW_TAP_TOKEN secret is set.
+# binaries as a GitHub Release, and updates the Homebrew formula when the HOMEBREW_TAP_KEY
+# secret is set.
 name: release
 
 on:
@@ -74,23 +74,27 @@ jobs:
     needs: release
     runs-on: ubuntu-24.04
     env:
-      # A fine-grained token with write access to CJHwong/homebrew-tap.
-      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      # The private half of a deploy key that can write to CJHwong/homebrew-tap only.
+      TAP_KEY: ${{ secrets.HOMEBREW_TAP_KEY }}
     steps:
-      - name: Check for the tap token
-        if: env.TAP_TOKEN == ''
-        run: echo "::warning::HOMEBREW_TAP_TOKEN is not set. Update the Homebrew formula by hand, as RELEASING.md says."
+      - name: Check for the tap key
+        if: env.TAP_KEY == ''
+        run: echo "::warning::HOMEBREW_TAP_KEY is not set. Update the Homebrew formula by hand, as RELEASING.md says."
       - uses: actions/checkout@v7
-        if: env.TAP_TOKEN != ''
+        if: env.TAP_KEY != ''
       - uses: actions/download-artifact@v8
-        if: env.TAP_TOKEN != ''
+        if: env.TAP_KEY != ''
         with:
           name: checksums
       - name: Update the formula
-        if: env.TAP_TOKEN != ''
+        if: env.TAP_KEY != ''
         run: |
           version="${GITHUB_REF_NAME#v}"
-          git clone "https://x-access-token:${TAP_TOKEN}@github.com/CJHwong/homebrew-tap.git" tap
+          key="$RUNNER_TEMP/tap_key"
+          printf '%s\n' "$TAP_KEY" > "$key"
+          chmod 600 "$key"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone git@github.com:CJHwong/homebrew-tap.git tap
           mkdir -p tap/Formula
           sh packaging/homebrew-formula.sh "$version" checksums.txt > tap/Formula/revu.rb
           cd tap
