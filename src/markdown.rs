@@ -648,7 +648,7 @@ impl<'t> Builder<'t> {
             Event::Text(text) => self.push(text.to_string(), self.style()),
             Event::Code(code) => self.push(code.to_string(), self.code_style()),
             Event::Html(html) | Event::InlineHtml(html) => self.html(&html),
-            Event::SoftBreak => self.push(" ".to_string(), self.style()),
+            Event::SoftBreak => self.soft_break(),
             Event::HardBreak => self.flush(),
             Event::Rule => {
                 self.flush();
@@ -823,6 +823,16 @@ impl<'t> Builder<'t> {
             cell.push(span);
         } else {
             self.line.push(span);
+        }
+    }
+
+    /// GitHub shows a single newline in a description or comment as a line break. A
+    /// summary or a table cell holds one line, so there it stays a space.
+    fn soft_break(&mut self) {
+        if self.summary.is_some() || self.cell.is_some() {
+            self.push(" ".to_string(), self.style());
+        } else {
+            self.flush();
         }
     }
 
@@ -1191,6 +1201,29 @@ mod tests {
         ));
         assert_eq!(rows[..2], ["☑ Keep it small", "☐ Add docs"]);
         assert_eq!(rows[3..5], ["1. one", "2. two"]);
+    }
+
+    /// GitHub shows a single newline in a description or comment as a line break.
+    #[test]
+    fn a_single_newline_breaks_the_line_as_on_github() {
+        let rows = text(&render(
+            "JiraTickets: ACE-1\nReleaseType: hotfix\n\n- one\n  two\n\n> a\n> b",
+            40,
+            &[],
+        ));
+        assert_eq!(
+            rows,
+            [
+                "JiraTickets: ACE-1",
+                "ReleaseType: hotfix",
+                "",
+                "• one",
+                "  two",
+                "",
+                "▎ a",
+                "▎ b"
+            ]
+        );
     }
 
     #[test]
