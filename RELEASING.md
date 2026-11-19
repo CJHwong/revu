@@ -1,8 +1,9 @@
 # Releasing
 
-1. Set the version in `Cargo.toml`, run `cargo build` so `Cargo.lock` follows, and commit them as `release: X.Y.Z` on main.
-2. When the checks on main pass, tag and push:
+1. Set the version in `Cargo.toml`, run `cargo build` so `Cargo.lock` follows, and commit them as `chore(release): X.Y.Z` on a branch. Open a pull request and rebase-merge it when its checks pass. main takes changes only through a pull request.
+2. Tag the merged commit and push the tag:
    ```sh
+   git switch main && git pull
    git tag -a vX.Y.Z -m "revu X.Y.Z"
    git push origin vX.Y.Z
    ```
