@@ -478,6 +478,9 @@ fn render_inbox(frame: &mut Frame, app: &mut App, paint: Paint) {
 fn inbox_status(app: &App, paint: Paint) -> Line<'static> {
     let theme = paint.theme;
     let mut spans = vec![paint.bold(" revu ", theme.heading)];
+    if !app.filter().is_empty() {
+        spans.push(paint.span(format!(" filter: {} ", app.filter()), theme.accent));
+    }
     if app.loading {
         spans.push(paint.span(" loading...", theme.warning));
     } else if let Some(fetched_at) = app.fetched_at {
@@ -497,7 +500,9 @@ fn row_item(app: &App, row: Row, width: usize, selected: bool, paint: Paint) -> 
     match row {
         Row::Header(group_index) => {
             let loading = app.group_loading.get(group_index).copied().unwrap_or(false);
-            ListItem::new(header_line(&app.groups[group_index], loading, paint))
+            let group = &app.groups[group_index];
+            let matching = (!app.filter().is_empty()).then(|| app.shown_prs(group).count());
+            ListItem::new(header_line(group, matching, loading, paint))
         }
         Row::Pr(group_index, pr_index) => {
             let pr = &app.groups[group_index].prs[pr_index];
@@ -506,11 +511,19 @@ fn row_item(app: &App, row: Row, width: usize, selected: bool, paint: Paint) -> 
     }
 }
 
-fn header_line(group: &Group, loading: bool, paint: Paint) -> Line<'static> {
+/// `matching` is how many rows pass the inbox filter, when one is set.
+fn header_line(
+    group: &Group,
+    matching: Option<usize>,
+    loading: bool,
+    paint: Paint,
+) -> Line<'static> {
     let marker = if group.collapsed { "▸" } else { "▾" };
     let shown = group.prs.len() as u64;
     // A search past the page limit shows how many of the matches are listed.
-    let count = if group.total > shown {
+    let count = if let Some(matching) = matching {
+        format!("{matching} of {shown}")
+    } else if group.total > shown {
         format!("{shown} of {}", group.total)
     } else {
         group.total.to_string()
@@ -678,6 +691,7 @@ const INBOX_HINTS: Hints = &[
     ("tab", "next group"),
     ("o", "browser"),
     ("r", "refresh"),
+    ("/", "filter"),
     ("ctrl-l", "open a link"),
     (",", "settings"),
 ];
@@ -839,6 +853,7 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
             ("enter, l", "open the pull request, or fold a group header"),
             ("space", "fold the current group"),
             ("tab, shift-tab", "next or previous group"),
+            ("/, esc", "filter by repo or author, clear the filter"),
             ("o, d", "open in the browser, run the open_diff command"),
             ("r, q", "reload the config and refresh, quit"),
         ],
@@ -3166,6 +3181,11 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
         PromptKind::UpdatedWithin => (
             " Updated within, in days ".to_string(),
             "PRs updated in this many days, or empty for no limit. enter saves and reloads, esc keeps it"
+                .to_string(),
+        ),
+        PromptKind::FilterInbox => (
+            " Filter the inbox ".to_string(),
+            "part of a repo or an author name. the rows narrow as you type. enter keeps the filter, esc clears it"
                 .to_string(),
         ),
         PromptKind::FindInDiff => (
