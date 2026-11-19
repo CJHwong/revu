@@ -614,6 +614,32 @@ pub fn network_error(said: &str) -> Option<String> {
     Some(line.to_string())
 }
 
+/// A 5xx from GitHub as its status line, in place of the HTML page gh prints with it.
+fn server_error(said: &str) -> Option<String> {
+    let (_, after) = said.split_once("HTTP ")?;
+    let code: String = after.chars().take_while(char::is_ascii_digit).collect();
+    if code.len() != 3 || !code.starts_with('5') {
+        return None;
+    }
+    let title = said
+        .split_once("<title>")
+        .and_then(|(_, rest)| rest.split_once("</title>"))
+        .map(|(title, _)| title.trim_start_matches(code.as_str()).trim());
+    let line = after[code.len()..].lines().next().unwrap_or_default();
+    let reason = line
+        .trim_start_matches(':')
+        .split(" (")
+        .next()
+        .unwrap_or_default()
+        .trim();
+    let reason = title.filter(|title| !title.is_empty()).unwrap_or(reason);
+    let status = format!("HTTP {code} {reason}");
+    Some(format!(
+        "GitHub had a server error ({}). Try again in a moment.",
+        status.trim()
+    ))
+}
+
 /// GitHub's rate limits as what to do, in place of gh's text and the raw JSON.
 /// `limit` comes from the same response, so its reset time is the one that applies.
 fn rate_limit_message(said: &str, limit: Option<&RateLimit>) -> Option<String> {
@@ -687,6 +713,9 @@ fn run_graphql(args: &[String]) -> Result<Value> {
             bail!("{message}");
         }
         if let Some(error) = network_error(&stderr) {
+            bail!("{error}");
+        }
+        if let Some(error) = server_error(&stderr) {
             bail!("{error}");
         }
         bail!(
@@ -765,6 +794,28 @@ mod tests {
             Some("Post \"https://api.github.com/graphql\": proxyconnect tcp: dial tcp 10.0.0.1:9: i/o timeout")
         );
         assert_eq!(network_error("HTTP 502: Bad Gateway"), None);
+    }
+
+    #[test]
+    fn a_server_error_shows_its_status_not_the_html_page() {
+        let html = "gh: HTTP 502 <html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>";
+        assert_eq!(
+            server_error(html).as_deref(),
+            Some("GitHub had a server error (HTTP 502 Bad Gateway). Try again in a moment.")
+        );
+        assert_eq!(
+            server_error("HTTP 503: Service Unavailable (https://api.github.com/graphql)")
+                .as_deref(),
+            Some(
+                "GitHub had a server error (HTTP 503 Service Unavailable). Try again in a moment."
+            )
+        );
+        assert_eq!(
+            server_error("gh: HTTP 504").as_deref(),
+            Some("GitHub had a server error (HTTP 504). Try again in a moment.")
+        );
+        assert_eq!(server_error("HTTP 401: Bad credentials"), None);
+        assert_eq!(server_error("Could not resolve to a PullRequest"), None);
     }
 
     #[test]

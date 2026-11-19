@@ -2823,7 +2823,7 @@ pub struct App {
     /// PRs you wrote to, whose next inbox row counts as seen: you may leave before the
     /// reload that shows your own comment.
     wrote: HashSet<PrRef>,
-    /// The inbox shows only PRs whose repo or author contains this, ignoring case.
+    /// The inbox shows only PRs whose repo, number, author or title contains this, ignoring case.
     pub inbox_filter: String,
     /// The inbox is wide enough for the preview pane, as of the last draw.
     pub preview_shown: bool,
@@ -3243,9 +3243,8 @@ impl App {
     pub fn shown_prs<'a>(&'a self, group: &'a Group) -> impl Iterator<Item = usize> + 'a {
         let filter = self.filter().to_lowercase();
         group.prs.iter().enumerate().filter_map(move |(index, pr)| {
-            let hit = pr.repo.to_lowercase().contains(&filter)
-                || pr.author.to_lowercase().contains(&filter);
-            hit.then_some(index)
+            let text = format!("{}#{} {} {}", pr.repo, pr.number, pr.author, pr.title);
+            text.to_lowercase().contains(&filter).then_some(index)
         })
     }
 
@@ -3997,7 +3996,11 @@ impl App {
                     None => Some(mode.cursor),
                 }
             }
-            KeyCode::Esc | KeyCode::Char('S') | KeyCode::Char('q') => view.line_mode = None,
+            KeyCode::Esc
+            | KeyCode::Char('S')
+            | KeyCode::Char('q')
+            | KeyCode::Char('h')
+            | KeyCode::Left => view.line_mode = None,
             KeyCode::Char('w') => {
                 view.diff_wrap = !view.diff_wrap;
                 view.diff_shift = 0;
@@ -4485,8 +4488,6 @@ impl App {
         }
         if result.is_ok() {
             self.wrote.insert(pr.clone());
-        }
-        if result.is_ok() {
             self.saved = note.map(|note| note.done.to_string());
         }
         let Some(composer) = self.composer.as_mut().filter(|composer| &composer.pr == pr) else {
@@ -5258,7 +5259,7 @@ mod tests {
     }
 
     #[test]
-    fn slash_filters_the_inbox_by_repo_or_author_as_you_type() {
+    fn slash_filters_the_inbox_by_repo_number_author_or_title_as_you_type() {
         let mut app = app_with(vec![group("A", &[1, 2, 3], false)]);
         app.groups[0].prs[1].repo = "acme/Web".to_string();
         app.groups[0].prs[2].author = "webster".to_string();
@@ -5292,6 +5293,11 @@ mod tests {
             Some(3),
             "on the same PR"
         );
+        app.groups[0].prs[0].title = "Fix the Login page".to_string();
+        app.inbox_filter = "login".to_string();
+        assert_eq!(shown(&app), [1], "a title");
+        app.inbox_filter = "#3".to_string();
+        assert_eq!(shown(&app), [3], "a number");
 
         app.handle_key(key(KeyCode::Char('/')));
         app.handle_key(key(KeyCode::Char('x')));
@@ -6673,6 +6679,13 @@ mod tests {
         assert!(view(&app).line_mode.is_some(), "{:?}", app.error);
         app.handle_key(key(KeyCode::Char('S')));
         assert!(view(&app).line_mode.is_none(), "S closes it again");
+        app.handle_key(key(KeyCode::Char('S')));
+        app.handle_key(key(KeyCode::Char('h')));
+        assert!(view(&app).line_mode.is_none(), "h closes it too");
+        assert!(
+            matches!(app.screen, Screen::Detail(_)),
+            "h stops at the diff"
+        );
     }
 
     #[test]
