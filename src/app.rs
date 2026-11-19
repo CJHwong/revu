@@ -2813,6 +2813,50 @@ pub struct App {
     pub seen: crate::seen::Seen,
     /// The inbox shows only PRs whose repo or author contains this, ignoring case.
     pub inbox_filter: String,
+    /// The inbox is wide enough for the preview pane, as of the last draw.
+    pub preview_shown: bool,
+    pub previews: Previews,
+}
+
+/// How long the selection must rest on a row before the preview fetches it, so holding
+/// j sends no request per row.
+const PREVIEW_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// A preview's fetched detail, or why the fetch failed.
+pub type Preview = Result<Box<PrDetail>, String>;
+
+/// The preview pane's details, one fetch per PR.
+#[derive(Default)]
+pub struct Previews {
+    details: HashMap<PrRef, Preview>,
+    /// The row the selection rests on, and since when.
+    resting: Option<(PrRef, std::time::Instant)>,
+    fetching: HashSet<PrRef>,
+}
+
+impl Previews {
+    pub fn get(&self, pr: &PrRef) -> Option<&Preview> {
+        self.details.get(pr)
+    }
+
+    /// The selected row needs a fetch when it has none, or when the inbox row is newer
+    /// than the fetched detail. A failed fetch waits for the next refresh.
+    fn needs_fetch(&self, row: &PrSummary) -> bool {
+        let reference = row.reference();
+        if self.fetching.contains(&reference) {
+            return false;
+        }
+        match self.details.get(&reference) {
+            None => true,
+            Some(Ok(detail)) => detail.summary.updated_at < row.updated_at,
+            Some(Err(_)) => false,
+        }
+    }
+
+    /// A refresh retries the PRs whose preview failed.
+    pub fn forget_failures(&mut self) {
+        self.details.retain(|_, result| result.is_ok());
+    }
 }
 
 /// Ctrl+L everywhere; Cmd+L only where the terminal reports the Super modifier.
@@ -2873,6 +2917,8 @@ impl App {
             picker: None,
             seen: crate::seen::Seen::default(),
             inbox_filter: String::new(),
+            preview_shown: false,
+            previews: Previews::default(),
         }
     }
 
@@ -3111,6 +3157,47 @@ impl App {
             }
         }
         rows
+    }
+
+    /// The PR the preview pane should fetch now: the selected row, once the selection
+    /// has rested on it for `PREVIEW_DELAY`.
+    pub fn take_preview_request(&mut self, now: std::time::Instant) -> Option<PrRef> {
+        if !self.preview_shown || !matches!(self.screen, Screen::Inbox) {
+            return None;
+        }
+        let row = self.selected_pr()?;
+        if !self.previews.needs_fetch(row) {
+            // A later return to a row that needs a fetch starts its wait over.
+            self.previews.resting = None;
+            return None;
+        }
+        let reference = row.reference();
+        let previews = &mut self.previews;
+        match &previews.resting {
+            Some((resting, since)) if *resting == reference => {
+                if now.duration_since(*since) < PREVIEW_DELAY {
+                    return None;
+                }
+            }
+            _ => {
+                previews.resting = Some((reference, now));
+                return None;
+            }
+        }
+        previews.resting = None;
+        previews.fetching.insert(reference.clone());
+        Some(reference)
+    }
+
+    pub fn set_preview(&mut self, pr: PrRef, result: Preview) {
+        self.previews.fetching.remove(&pr);
+        self.previews.details.insert(pr, result);
+    }
+
+    /// The selected PR's preview, while the selection is on a PR.
+    pub fn selected_preview(&self) -> Option<(&PrSummary, Option<&Preview>)> {
+        let row = self.selected_pr()?;
+        Some((row, self.previews.get(&row.reference())))
     }
 
     /// The filter in use: the prompt's text while you type it, else the kept one.
@@ -4986,6 +5073,73 @@ mod tests {
         assert!(matches!(app.screen, Screen::Detail(_)));
         app.handle_key(key(KeyCode::Char('h')));
         assert!(matches!(app.screen, Screen::Inbox));
+    }
+
+    #[test]
+    fn the_preview_fetches_once_the_selection_rests() {
+        let mut app = app_with(vec![group("A", &[1, 2], false)]);
+        app.preview_shown = true;
+        app.list_state.select(Some(1));
+        let start = std::time::Instant::now();
+        let after = |millis: u64| start + std::time::Duration::from_millis(millis);
+        assert_eq!(
+            app.take_preview_request(start),
+            None,
+            "the selection just arrived"
+        );
+        assert_eq!(app.take_preview_request(after(100)), None);
+        let first = app
+            .take_preview_request(after(300))
+            .expect("rested long enough");
+        assert_eq!(first.number, 1);
+        assert_eq!(
+            app.take_preview_request(after(700)),
+            None,
+            "already fetching"
+        );
+
+        app.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(app.take_preview_request(after(800)), None);
+        app.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(
+            app.take_preview_request(after(900)),
+            None,
+            "back on a PR still fetching"
+        );
+        app.set_preview(first, Err("boom".to_string()));
+        assert_eq!(
+            app.take_preview_request(after(1300)),
+            None,
+            "a failure waits for r"
+        );
+        app.previews.forget_failures();
+        assert_eq!(app.take_preview_request(after(1400)), None);
+        assert!(
+            app.take_preview_request(after(1800)).is_some(),
+            "r retries it"
+        );
+
+        // A row with a preview between two visits to one without.
+        let second = app.take_preview_request(after(1800)).map(|pr| pr.number);
+        assert_eq!(second, None, "PR 1 is fetching, so nothing");
+        app.set_preview(app.selected_pr().unwrap().reference(), Err("x".into()));
+        app.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(app.take_preview_request(after(1900)), None);
+        app.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(
+            app.take_preview_request(after(5000)),
+            None,
+            "back on a failed row"
+        );
+
+        app.preview_shown = false;
+        app.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(app.take_preview_request(after(2000)), None);
+        assert_eq!(
+            app.take_preview_request(after(2400)),
+            None,
+            "a narrow inbox fetches nothing"
+        );
     }
 
     #[test]

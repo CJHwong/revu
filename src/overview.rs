@@ -280,7 +280,10 @@ fn finished_box(context: &Context, width: usize) -> Option<Vec<TextRow>> {
     ))
 }
 
-fn merge_headline(detail: &PrDetail, theme: &Theme) -> (&'static str, Color, Option<&'static str>) {
+pub(crate) fn merge_headline(
+    detail: &PrDetail,
+    theme: &Theme,
+) -> (&'static str, Color, Option<&'static str>) {
     if detail.summary.is_draft || detail.merge_state == "DRAFT" {
         let note = "Mark it ready for review before it can merge";
         return ("◌ Draft", theme.github_state(PrState::Draft), Some(note));
