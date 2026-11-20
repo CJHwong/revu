@@ -103,6 +103,21 @@ pub fn find_clone(workspaces: &[PathBuf], repo: &str) -> Result<CloneLookup> {
     Ok(CloneLookup::Missing(named))
 }
 
+/// The GitHub repo of each clone directly inside a workspace folder, `owner/name`, sorted.
+/// A folder that cannot be read holds no clone to complete, so it adds none.
+pub fn clones_in(workspaces: &[PathBuf]) -> Vec<String> {
+    let mut repos: Vec<String> = workspaces
+        .iter()
+        .filter_map(|workspace| fs::read_dir(workspace).ok())
+        .flat_map(|entries| entries.flatten().map(|entry| entry.path()))
+        .filter(|dir| dir.join(".git").exists())
+        .filter_map(|dir| origin_of(&dir).and_then(|url| github_repo_of_remote(&url)))
+        .collect();
+    repos.sort();
+    repos.dedup();
+    repos
+}
+
 fn clone_inside(workspace: &Path, repo: &str) -> Result<Option<PathBuf>> {
     let entries =
         fs::read_dir(workspace).with_context(|| format!("read {}", workspace.display()))?;
@@ -801,6 +816,19 @@ mod tests {
             Some(work.join("tool")),
             "the first folder wins"
         );
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn clones_in_lists_the_github_repo_of_each_clone() {
+        let base = std::env::temp_dir().join(format!("revu-clones-{}", std::process::id()));
+        let (work, side) = (base.join("work"), base.join("side"));
+        clone_of(&work.join("renamed"), "Acme/Lib");
+        clone_of(&side.join("tool"), "acme/tool");
+        clone_of(&side.join("again"), "acme/tool");
+        fs::create_dir_all(side.join("notes")).unwrap();
+        let folders = [work, side, base.join("missing")];
+        assert_eq!(clones_in(&folders), ["acme/lib", "acme/tool"]);
         fs::remove_dir_all(&base).unwrap();
     }
 

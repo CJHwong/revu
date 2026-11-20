@@ -61,6 +61,8 @@ pub enum Action {
         base: String,
         head: String,
     },
+    /// The GitHub repo of each clone in the workspace folders, for the filter to complete.
+    CloneRepos,
     /// Which changed files hold the find text.
     FindFiles {
         pr: PrRef,
@@ -2825,6 +2827,9 @@ pub struct App {
     wrote: HashSet<PrRef>,
     /// The inbox shows only PRs whose repo, number, author or title contains this, ignoring case.
     pub inbox_filter: String,
+    /// The repos cloned in the workspace folders, `owner/name`; the filter completes them.
+    clone_repos: Vec<String>,
+    clone_repos_requested: bool,
     /// The inbox is wide enough for the preview pane, as of the last draw.
     pub preview_shown: bool,
     pub previews: Previews,
@@ -2948,6 +2953,8 @@ impl App {
             seen: crate::seen::Seen::default(),
             wrote: HashSet::new(),
             inbox_filter: String::new(),
+            clone_repos: Vec::new(),
+            clone_repos_requested: false,
             preview_shown: false,
             previews: Previews::default(),
         }
@@ -3236,6 +3243,91 @@ impl App {
         match &self.prompt {
             Some(prompt) if prompt.kind == PromptKind::FilterInbox => prompt.text.trim(),
             _ => &self.inbox_filter,
+        }
+    }
+
+    /// Asks once for the repos in the workspace folders, which Ctrl+L completes: at
+    /// start, or at the first Ctrl+L when no folder was set then.
+    pub fn clone_repos_request(&mut self) -> Option<Action> {
+        if self.clone_repos_requested || self.workspace_dirs.is_empty() {
+            return None;
+        }
+        self.clone_repos_requested = true;
+        Some(Action::CloneRepos)
+    }
+
+    /// Keeps the clones' repos, and hands them to the Ctrl+L box if it is open.
+    pub fn set_clone_repos(&mut self, repos: Vec<String>) {
+        self.clone_repos = repos;
+        let words = self.pr_words(&self.clone_repos);
+        if let Some(prompt) = &mut self.prompt
+            && prompt.kind == PromptKind::OpenLink
+        {
+            prompt.words = words;
+        }
+    }
+
+    /// The inbox's repos, then the other repos given, `owner/name`, each once.
+    fn repos_with(&self, others: &[String]) -> Vec<String> {
+        let listed = self.groups.iter().flat_map(|group| &group.prs);
+        let mut repos: Vec<String> = Vec::new();
+        for repo in listed.map(|pr| &pr.repo).chain(others) {
+            if !repos.iter().any(|known| known.eq_ignore_ascii_case(repo)) {
+                repos.push(repo.clone());
+            }
+        }
+        repos
+    }
+
+    /// What Tab completes: repo names, the inbox's first, then the inbox's
+    /// `repo#number`s. Each comes without its owner first, as you type a repo by its name.
+    fn pr_words(&self, others: &[String]) -> Vec<String> {
+        let name = |repo: &str| {
+            repo.split_once('/')
+                .map_or(repo, |(_, name)| name)
+                .to_string()
+        };
+        let repos = self.repos_with(others);
+        let names = repos.iter().flat_map(|repo| [name(repo), repo.clone()]);
+        let prs = self
+            .groups
+            .iter()
+            .flat_map(|group| &group.prs)
+            .flat_map(|pr| {
+                let short = format!("{}#{}", name(&pr.repo), pr.number);
+                [short, format!("{}#{}", pr.repo, pr.number)]
+            });
+        names.chain(prs).collect()
+    }
+
+    /// The PR a link, `owner/repo#123`, or `name#123` names. A bare name needs exactly
+    /// one repo of that name in the inbox or the clones.
+    fn pr_of_text(&self, text: &str) -> Result<PrRef, String> {
+        if let Some(pr) = parse_pr_ref(text) {
+            return Ok(pr);
+        }
+        let unknown = || "not a pull request link, owner/repo#number or repo#number".to_string();
+        let (name, number) = text.trim().split_once('#').ok_or_else(unknown)?;
+        let repos = self.repos_with(&self.clone_repos);
+        let owners: Vec<&String> = repos
+            .iter()
+            .filter(|repo| {
+                repo.split_once('/')
+                    .is_some_and(|(_, repo_name)| repo_name.eq_ignore_ascii_case(name))
+            })
+            .collect();
+        match owners.as_slice() {
+            [repo] => parse_pr_ref(&format!("{repo}#{number}")).ok_or_else(unknown),
+            [] => Err(format!(
+                "no repo named {name} in the inbox or your clones; type owner/{name}#number"
+            )),
+            many => Err(format!(
+                "more than one repo is named {name}: {}. type owner/{name}#number",
+                many.iter()
+                    .map(|repo| repo.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
         }
     }
 
@@ -3644,8 +3736,11 @@ impl App {
             return None;
         }
         if is_open_link_shortcut(&key) {
-            self.prompt = Some(Prompt::default());
-            return None;
+            self.prompt = Some(Prompt {
+                words: self.pr_words(&self.clone_repos),
+                ..Prompt::default()
+            });
+            return self.clone_repos_request();
         }
         match self.screen {
             Screen::Inbox => self.inbox_key(key.code),
@@ -4512,12 +4607,14 @@ impl App {
     }
 
     fn submit_link(&mut self, mut prompt: Prompt) -> Option<Action> {
-        let Some(pr) = parse_pr_ref(&prompt.text) else {
-            prompt.error = Some("not a pull request link or owner/repo#number".to_string());
-            self.prompt = Some(prompt);
-            return None;
-        };
-        Some(self.open_pr(pr, None))
+        match self.pr_of_text(&prompt.text) {
+            Ok(pr) => Some(self.open_pr(pr, None)),
+            Err(error) => {
+                prompt.error = Some(error);
+                self.prompt = Some(prompt);
+                None
+            }
+        }
     }
 
     fn open_pr(&mut self, pr: PrRef, summary: Option<PrSummary>) -> Action {
@@ -4593,6 +4690,7 @@ impl App {
                 self.prompt = Some(Prompt {
                     kind: PromptKind::FilterInbox,
                     text: self.inbox_filter.clone(),
+                    words: self.pr_words(&[]),
                     ..Prompt::default()
                 });
             }
@@ -5304,6 +5402,63 @@ mod tests {
         app.handle_key(key(KeyCode::Esc));
         assert!(app.prompt.is_none());
         assert_eq!(shown(&app), [1, 2, 3], "esc in the prompt clears it too");
+    }
+
+    #[test]
+    fn tab_completes_the_inbox_filter_from_the_inbox_only() {
+        let mut app = app_with(vec![group("A", &[7, 12], false)]);
+        app.workspace_dirs = vec!["~/Work".to_string()];
+        app.set_clone_repos(vec!["acme/tools".to_string()]);
+        let ghost = |app: &App| app.prompt.as_ref().unwrap().suggestion();
+        let action = app.handle_key(key(KeyCode::Char('/')));
+        assert!(action.is_none(), "the filter reads no clones");
+        type_text(&mut app, "AP");
+        assert_eq!(ghost(&app).as_deref(), Some("p"), "the name, not the owner");
+        app.handle_key(key(KeyCode::Tab));
+        type_text(&mut app, "#1");
+        assert_eq!(ghost(&app).as_deref(), Some("2"));
+        app.handle_key(key(KeyCode::Esc));
+        type_text(&mut app, "/too");
+        assert_eq!(ghost(&app), None, "a clone is not in the inbox");
+    }
+
+    #[test]
+    fn ctrl_l_completes_the_inbox_and_the_clones_and_opens_a_bare_name() {
+        let mut app = app_with(vec![group("A", &[7], false)]);
+        app.workspace_dirs = vec!["~/Work".to_string()];
+        let ghost = |app: &App| app.prompt.as_ref().unwrap().suggestion();
+        let ctrl_l = |app: &mut App| app.handle_key(with_modifier('l', KeyModifiers::CONTROL));
+        assert!(matches!(ctrl_l(&mut app), Some(Action::CloneRepos)));
+        type_text(&mut app, "app#");
+        assert_eq!(ghost(&app).as_deref(), Some("7"), "the inbox's PRs");
+        app.set_clone_repos(vec!["acme/tools".to_string(), "other/tools".to_string()]);
+        app.prompt.as_mut().unwrap().text = "too".to_string();
+        assert_eq!(
+            ghost(&app).as_deref(),
+            Some("ls"),
+            "words reach the open box"
+        );
+        app.handle_key(key(KeyCode::Esc));
+        assert!(ctrl_l(&mut app).is_none(), "the clones are read once");
+
+        app.prompt.as_mut().unwrap().text = "tools#42".to_string();
+        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
+        let error = app
+            .prompt
+            .as_ref()
+            .unwrap()
+            .error
+            .clone()
+            .unwrap_or_default();
+        assert!(error.contains("acme/tools, other/tools"), "{error}");
+
+        app.prompt.as_mut().unwrap().text = "app#42".to_string();
+        let action = app.handle_key(key(KeyCode::Enter));
+        let opened = PrRef {
+            repo: "acme/app".to_string(),
+            number: 42,
+        };
+        assert!(matches!(action, Some(Action::FetchDetail(ref pr)) if *pr == opened));
     }
 
     #[test]

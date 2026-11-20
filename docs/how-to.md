@@ -22,7 +22,7 @@ To see older pull requests too, remove `updated_within_days`, or change it under
 
 ## Open a pull request that is not in your inbox
 
-Press `Ctrl+L`, or paste, and give its link or `owner/repo#123`.
+Press `Ctrl+L`, or paste, and give its link, `owner/repo#123`, or `repo#123` for a repo in your inbox or your clones. `Tab` completes the repo name.
 
 ## Change the theme
 

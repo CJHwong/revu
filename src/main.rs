@@ -171,6 +171,7 @@ enum Message {
         pr: PrRef,
         result: Result<Vec<String>, String>,
     },
+    CloneRepos(Vec<String>),
     File {
         pr: PrRef,
         path: String,
@@ -237,6 +238,8 @@ fn main() -> Result<()> {
     app.theme_name = theme::name_of(&session.config.theme).unwrap_or(app.theme_name);
     use_syntax_theme(&mut app, &session.config.theme);
     start_inbox_fetch(&session, &mut app);
+    // Ctrl+L completes the clones' repos, so their names load before its first use.
+    app.queued = app.clone_repos_request();
     // Starting the fetch clears the top line's error, so these go up after it.
     if !startup_errors.is_empty() {
         app.error = Some(startup_errors.join("; "));
@@ -460,6 +463,7 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
                 app.set_find_words(&pr, result.unwrap_or_default())
             }
             Message::File { pr, path, result } => app.set_file(&pr, &path, result),
+            Message::CloneRepos(repos) => app.set_clone_repos(repos),
         }
     }
 }
@@ -540,6 +544,19 @@ fn perform(
                 let result =
                     repo::diff_words(&dir, &base, &head).map_err(|error| format!("{error:#}"));
                 let _ = sender.send(Message::FindWords { pr, result });
+            });
+        }
+        Action::CloneRepos => {
+            let workspaces: Vec<_> = session
+                .config
+                .workspace_dirs
+                .iter()
+                .map(|folder| repo::expand_home(folder))
+                .collect();
+            let sender = session.sender.clone();
+            // Each clone's origin is a git call, so the reading stays off the UI thread.
+            thread::spawn(move || {
+                let _ = sender.send(Message::CloneRepos(repo::clones_in(&workspaces)));
             });
         }
         Action::FindFiles {
