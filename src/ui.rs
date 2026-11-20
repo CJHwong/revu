@@ -663,6 +663,11 @@ fn secondary_color(selected: bool, theme: &Theme) -> Color {
 }
 
 /// `new` marks a PR with commits or comments since you last left it.
+///
+/// Every row is the same grid: the title over the repo line, then a cell each for the
+/// review, the checks and the comments, with the turn under the review and a conflict
+/// under the checks. A cell stays when it is empty, and text too long for its cell is
+/// cut, so nothing moves from row to row.
 fn pr_lines(
     pr: &PrSummary,
     new: bool,
@@ -672,9 +677,10 @@ fn pr_lines(
 ) -> [Line<'static>; 2] {
     let theme = paint.theme;
     let secondary = secondary_color(selected, theme);
-    let badges = Line::from(badge_spans(pr, secondary, paint));
-    let title_width = width.saturating_sub(badges.width() + 4);
-    let title = pad_to_width(&truncate_to_width(&pr.title, title_width), title_width);
+    let narrow = width < NARROW_INBOX;
+    let badges = Line::from(badge_spans(pr, secondary, narrow, paint));
+    let text_width = width.saturating_sub(badges.width() + 4);
+    let title = pad_to_width(&truncate_to_width(&pr.title, text_width), text_width);
 
     let mut first = vec![
         if new {
@@ -683,79 +689,112 @@ fn pr_lines(
             Span::from("    ")
         },
         paint.bold(title, theme.foreground),
-        Span::from(" "),
     ];
     first.extend(badges.spans);
-    let mut second = vec![paint.span(
-        format!(
-            "    {}#{} by {}, updated {}",
-            pr.repo,
-            pr.number,
-            pr.author,
-            relative_time(pr.updated_at, paint.now)
-        ),
-        secondary,
-    )];
-    second.extend(size_spans(pr, secondary, paint));
-    let mut second = Line::from(second);
+
+    let size = size_spans(pr, secondary, narrow, paint);
+    let size_width: usize = size.iter().map(Span::width).sum();
+    let meta = repo_line(pr, text_width.saturating_sub(size_width), paint.now);
+    let mut second = vec![Span::raw("    "), paint.span(meta, secondary)];
+    second.extend(size);
     let labels = turn_spans(pr, secondary, paint);
     if !labels.is_empty() {
-        // The labels start under the badges, so they line up from row to row.
-        let gap = (4 + title_width + 1).saturating_sub(second.width()).max(3);
-        second.spans.push(Span::raw(" ".repeat(gap)));
-        second.spans.extend(labels);
+        let used: usize = second.iter().map(Span::width).sum();
+        second.push(Span::raw(" ".repeat((4 + text_width).saturating_sub(used))));
+        second.push(Span::raw(GAP));
+        second.extend(labels);
     }
-    [Line::from(first), second]
+    [Line::from(first), Line::from(second)]
 }
 
+/// The repo, the author and the update time, as much as fits. Each part goes whole,
+/// the time first, so a cut never ends inside a name; only a repo too long alone is cut.
+fn repo_line(pr: &PrSummary, width: usize, now: DateTime<Utc>) -> String {
+    let repo = format!("{}#{}", pr.repo, pr.number);
+    let by = format!("{repo} by {}", pr.author);
+    let full = format!("{by}, updated {}", relative_time(pr.updated_at, now));
+    [full, by]
+        .into_iter()
+        .find(|line| unicode_width::UnicodeWidthStr::width(line.as_str()) <= width)
+        .unwrap_or_else(|| truncate_to_width(&repo, width))
+}
+
+/// The space between two cells of an inbox row.
+const GAP: &str = "   ";
+
+/// The turn sits under the review badge and a conflict under the checks, each in its
+/// own cell, so neither moves when the other is missing.
 fn turn_spans(pr: &PrSummary, secondary: Color, paint: Paint) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    match pr.turn {
-        Some(Turn::Yours) => spans.push(paint.bold("Your turn", paint.theme.accent)),
-        Some(Turn::Authors) => spans.push(paint.span("Author's turn", secondary)),
-        None => {}
+    let turn = match pr.turn {
+        Some(Turn::Yours) => paint.bold("Your turn", paint.theme.accent),
+        Some(Turn::Authors) => paint.span("Author's turn", secondary),
+        None => Span::raw(""),
+    };
+    if !pr.conflicts {
+        return if pr.turn.is_some() {
+            vec![turn]
+        } else {
+            Vec::new()
+        };
     }
-    if pr.conflicts {
-        if !spans.is_empty() {
-            spans.push(Span::raw("  "));
-        }
-        spans.push(paint.span("Conflicts", paint.theme.danger));
+    vec![
+        pad_span(turn, REVIEW_WIDTH),
+        Span::raw(GAP),
+        paint.span("Conflicts", paint.theme.danger),
+    ]
+}
+
+/// The diff size in the form the PR header uses, so a small review stands out.
+/// A narrow inbox leaves out the file count, so the title and the repo keep their room.
+fn size_spans(pr: &PrSummary, secondary: Color, narrow: bool, paint: Paint) -> Vec<Span<'static>> {
+    let mut spans = vec![
+        paint.span(format!("   +{}", pr.additions), paint.theme.success),
+        paint.span(format!(" -{}", pr.deletions), paint.theme.danger),
+    ];
+    if !narrow {
+        let files = match pr.changed_files {
+            1 => ", 1 file".to_string(),
+            count => format!(", {count} files"),
+        };
+        spans.push(paint.span(files, secondary));
     }
     spans
 }
 
-/// The diff size in the form the PR header uses, so a small review stands out.
-fn size_spans(pr: &PrSummary, secondary: Color, paint: Paint) -> [Span<'static>; 3] {
-    let files = match pr.changed_files {
-        1 => ", 1 file".to_string(),
-        count => format!(", {count} files"),
-    };
-    [
-        paint.span(format!("   +{}", pr.additions), paint.theme.success),
-        paint.span(format!(" -{}", pr.deletions), paint.theme.danger),
-        paint.span(files, secondary),
-    ]
-}
+/// Below this many columns, the inbox list shortens its rows: no file count, and the
+/// comment count as a number with a glyph.
+const NARROW_INBOX: usize = 120;
 
-fn badge_spans(pr: &PrSummary, secondary: Color, paint: Paint) -> Vec<Span<'static>> {
+/// The review badge's cell, as wide as "Changes requested"; the turn below it takes
+/// the same width.
+const REVIEW_WIDTH: usize = 17;
+/// The checks' cell, as wide as "✓ 100/100"; a conflict below it fits.
+const CHECKS_WIDTH: usize = 9;
+
+/// The review, the checks and the comments, each in its cell with a gap before it.
+fn badge_spans(pr: &PrSummary, secondary: Color, narrow: bool, paint: Paint) -> Vec<Span<'static>> {
     let review = if pr.is_draft {
         paint.span("Draft", paint.theme.github_state(PrState::Draft))
     } else {
         review_span(pr.review, paint)
     };
+    // The count sits at the cell's right edge, so the numbers line up by their digits.
+    let comments = match (pr.comments, narrow) {
+        (0, _) => String::new(),
+        (count, true) => format!("{count} ✎"),
+        (1, false) => "1 comment".to_string(),
+        (count, false) => format!("{count} comments"),
+    };
+    let comments_width = if narrow { 5 } else { 12 };
+    // No comments and no checks leave their cells blank, so the rows that have them
+    // stand out. The blank keeps the cell's width, so every row's badges line up.
     vec![
-        pad_span(review, 18),
-        pad_span(checks_span(pr.checks.as_ref(), paint), 9),
-        // No comments and no checks leave their cells blank, so the rows that have them
-        // stand out. The blank keeps the cell's width, so every row's badges line up.
-        pad_span(
-            match pr.comments {
-                0 => Span::raw(""),
-                1 => paint.span("    1 comment", secondary),
-                count => paint.span(format!("{count:>5} comments"), secondary),
-            },
-            14,
-        ),
+        Span::raw(GAP),
+        pad_span(review, REVIEW_WIDTH),
+        Span::raw(GAP),
+        pad_span(checks_span(pr.checks.as_ref(), paint), CHECKS_WIDTH),
+        Span::raw(GAP),
+        paint.span(format!("{comments:>comments_width$}"), secondary),
     ]
 }
 
@@ -4605,7 +4644,8 @@ mod tests {
                 comments,
                 ..summary()
             };
-            Line::from(badge_spans(&pr, theme.muted, paint)).width()
+            [false, true]
+                .map(|narrow| Line::from(badge_spans(&pr, theme.muted, narrow, paint)).width())
         };
         assert_eq!(width(0), width(1));
         assert_eq!(width(0), width(12));
@@ -4647,10 +4687,39 @@ mod tests {
                 changed_files,
                 ..summary()
             };
-            Line::from(size_spans(&pr, theme.muted, paint).to_vec()).to_string()
+            Line::from(size_spans(&pr, theme.muted, false, paint)).to_string()
         };
         assert_eq!(size(7), "   +120 -34, 7 files");
         assert_eq!(size(1), "   +120 -34, 1 file");
+    }
+
+    #[test]
+    fn a_narrow_inbox_drops_the_file_count_and_counts_comments_with_a_glyph() {
+        let theme = theme::by_name("dracula").unwrap();
+        let paint = Paint {
+            theme: &theme,
+            now: Utc::now(),
+        };
+        let pr = PrSummary {
+            comments: 27,
+            changed_files: 7,
+            ..summary()
+        };
+        let row = |width: usize| {
+            let [first, second] = pr_lines(&pr, false, width, false, paint);
+            format!("{first}\n{second}")
+        };
+        let wide = row(NARROW_INBOX);
+        assert!(
+            wide.contains("27 comments") && wide.contains("7 files"),
+            "{wide}"
+        );
+        let narrow = row(NARROW_INBOX - 1);
+        assert!(
+            narrow.contains("27 ✎") && !narrow.contains("comments"),
+            "{narrow}"
+        );
+        assert!(!narrow.contains("files"), "{narrow}");
     }
 
     #[test]
@@ -4669,9 +4738,85 @@ mod tests {
             Line::from(turn_spans(&pr, theme.muted, paint)).to_string()
         };
         assert_eq!(labels(None, false), "");
-        assert_eq!(labels(Some(Turn::Yours), true), "Your turn  Conflicts");
+        let conflicts_slot = " ".repeat(REVIEW_WIDTH + GAP.len());
+        assert_eq!(
+            labels(Some(Turn::Yours), true),
+            format!("Your turn{}Conflicts", &conflicts_slot[9..])
+        );
         assert_eq!(labels(Some(Turn::Authors), false), "Author's turn");
-        assert_eq!(labels(None, true), "Conflicts");
+        assert_eq!(
+            labels(None, true),
+            format!("{conflicts_slot}Conflicts"),
+            "conflicts keep their slot with no turn"
+        );
+    }
+
+    #[test]
+    fn every_inbox_row_keeps_each_item_in_the_same_column() {
+        let theme = theme::by_name("dracula").unwrap();
+        let paint = Paint {
+            theme: &theme,
+            now: Utc::now(),
+        };
+        // Columns, not bytes: a cut line holds a multi-byte ellipsis.
+        let column = |line: &Line, text: &str| {
+            let line = line.to_string();
+            line.find(text)
+                .map(|at| unicode_width::UnicodeWidthStr::width(&line[..at]))
+        };
+        let long = PrSummary {
+            title: "a title far too long to fit in the room the row gives it".repeat(2),
+            repo: "hardcoretech/a-very-long-repository-name-indeed".to_string(),
+            author: "someone-with-a-long-name".to_string(),
+            review: ReviewState::ChangesRequested,
+            comments: 105,
+            turn: Some(Turn::Yours),
+            conflicts: true,
+            ..summary()
+        };
+        let short = PrSummary {
+            review: ReviewState::ChangesRequested,
+            comments: 3,
+            conflicts: true,
+            ..summary()
+        };
+        let plain = PrSummary {
+            repo: long.repo.clone(),
+            author: long.author.clone(),
+            ..summary()
+        };
+        for width in [90, 150] {
+            let [long_first, long_second] = pr_lines(&long, false, width, false, paint);
+            let [short_first, short_second] = pr_lines(&short, false, width, false, paint);
+            let [_, plain_second] = pr_lines(&plain, false, width, false, paint);
+            let review = column(&long_first, "Changes requested");
+            assert_eq!(review, column(&short_first, "Changes requested"), "{width}");
+            assert_eq!(column(&long_second, "Your turn"), review, "{width}");
+            let conflicts = column(&long_second, "Conflicts");
+            assert_eq!(conflicts, column(&short_second, "Conflicts"), "{width}");
+            assert_eq!(conflicts, review.map(|at| at + REVIEW_WIDTH + GAP.len()));
+            assert_eq!(long_first.width(), width, "{width}");
+            assert_eq!(short_first.width(), width, "{width}");
+            let room = review.unwrap() - GAP.len();
+            assert!(
+                plain_second.width() <= room,
+                "a row with no label is cut too"
+            );
+            if width == 150 {
+                let text = plain_second.to_string();
+                assert!(text.contains("by someone-with-a-long-name   "), "{text}");
+                assert!(!text.contains("updated"), "the time goes whole: {text}");
+            }
+            assert!(
+                long_first
+                    .to_string()
+                    .chars()
+                    .take(room)
+                    .collect::<String>()
+                    .ends_with('\u{2026}'),
+                "the title stops before the gap"
+            );
+        }
     }
 
     #[test]
