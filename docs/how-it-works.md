@@ -34,11 +34,11 @@ revu never checks out a branch or touches your working tree, the index or `FETCH
 
 ## The inbox
 
-Each row shows the title, the review state, the checks and the comment count. Its second line shows the repository, the author, the last update and the size of the diff, such as `+120 -34, 7 files`.
+Each row shows the title, the review state, the checks and the comment count. Its second line shows the repository, the author, the last update and the size of the diff, such as `+120 -34, 7 files`. Each item keeps its column on every row. When the second line does not fit, the last update goes first, then the author; only a repository name too long alone is cut. In an inbox list under 120 columns wide, the file count goes and the comment count shows as `27 ✎`.
 
 A `●` before the title marks a pull request with new commits or new comments since you last left it. revu saves each pull request's head commit and comment count when you open it and again when you go back to the inbox. After you comment, review or reply, the next inbox fetch counts as seen too, so your own comments do not mark it, even when you go back before the pull request reloads. A pull request you have never opened has no mark.
 
-The second line ends with who the pull request waits on:
+Under the review state, the second line says who the pull request waits on, and under the checks, whether it has conflicts:
 
 | Label | When |
 |---|---|
