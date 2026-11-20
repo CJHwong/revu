@@ -3283,7 +3283,7 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
         ),
         PromptKind::OpenLink => (
             " Open a pull request ".to_string(),
-            "paste a PR link or owner/repo#123, enter to open, esc to cancel".to_string(),
+            "paste a PR link, or type owner/repo#123 or repo#123. tab completes a repo from the inbox or your clones. enter to open, esc to cancel".to_string(),
         ),
         PromptKind::Workspace => (
             " Workspace folder ".to_string(),
@@ -3302,7 +3302,7 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
         ),
         PromptKind::FilterInbox => (
             " Filter the inbox ".to_string(),
-            "part of a repo, a #number, an author or a title. the rows narrow as you type. enter keeps the filter, esc clears it"
+            "part of a repo, a #number, an author or a title. tab completes a repo or repo#number from the inbox. enter keeps the filter, esc clears it"
                 .to_string(),
         ),
         PromptKind::FindInDiff => (

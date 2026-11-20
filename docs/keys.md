@@ -6,7 +6,7 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 
 | Key | Action |
 |---|---|
-| `Ctrl+L` (or `Cmd+L`), or paste | Open a pull request by link or `owner/repo#123`. `Cmd+L` works only in terminals that pass Cmd to applications through the kitty keyboard protocol and do not use `Cmd+L` themselves. `Ctrl+L` works everywhere. |
+| `Ctrl+L` (or `Cmd+L`), or paste | Open a pull request by link, `owner/repo#123`, or `repo#123` when one repo in the inbox or your clones has that name. `Tab` completes a repo name, from the inbox or a clone in your workspace folders, then a `repo#number` from the inbox. `Cmd+L` works only in terminals that pass Cmd to applications through the kitty keyboard protocol and do not use `Cmd+L` themselves. `Ctrl+L` works everywhere. |
 | `?` | Show every key. `j`/`k` and `Space`/`b` scroll it; any other key closes it. |
 | `,` | Settings: the theme, the workspace folders, how many days back the inbox looks, and the editor `o` opens files in. `Enter` edits the selected one and saves it to its line in the config at once; comments and other lines stay as they are. Editor lists your shell's editor, the editors revu finds installed, and Custom command. A new number of days reloads the inbox. |
 | `,`, then Theme | Pick a color theme. `Enter` applies it at once, diffs included, and saves it as the `theme:` line in the config. See [Configuration](configuration.md#theme) for the list. |
@@ -19,7 +19,7 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 | `Enter`, `l` | Open the pull request, or fold a group header |
 | `Space` | Fold the current group |
 | `Tab` / `Shift+Tab` | Next or previous group |
-| `/` | Filter: type part of a repo, a `#number`, an author or a title, and the rows narrow as you type. Each group counts its matching rows. `Enter` keeps the filter; `Esc` clears it. |
+| `/` | Filter: type part of a repo, a `#number`, an author or a title, and the rows narrow as you type. Each group counts its matching rows. `Tab` completes a repo name or a `repo#number` from the inbox. `Enter` keeps the filter; `Esc` clears it. |
 | `Esc` | Clear the filter |
 | `r` | Reload the config and fetch again |
 | `o` | Open in the browser |
