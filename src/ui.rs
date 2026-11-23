@@ -3787,10 +3787,17 @@ fn render_label_menu(frame: &mut Frame, menu: &LabelMenu, paint: Paint) {
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(theme.heading))
         .title(paint.bold(" Labels ", theme.heading))
-        .title_bottom(paint.span(
-            " type to filter, up/down move, space ticks, enter applies, esc ",
-            theme.muted,
-        ))
+        .title_bottom(if menu.cancel_asked {
+            paint.span(
+                " not applied: enter applies, esc drops them ",
+                theme.warning,
+            )
+        } else {
+            paint.span(
+                " type to filter, up/down move, space ticks, enter applies, esc ",
+                theme.muted,
+            )
+        })
         .style(Style::new().bg(theme.background).fg(theme.foreground));
     frame.render_widget(Clear, box_area);
     frame.render_widget(Paragraph::new(lines).block(block), box_area);

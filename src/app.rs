@@ -2123,6 +2123,8 @@ pub struct LabelMenu {
     pub filter: String,
     /// The cursor, among the shown labels.
     pub selected: usize,
+    /// Esc was pressed once over ticks not applied yet; a second esc drops them.
+    pub cancel_asked: bool,
 }
 
 impl LabelMenu {
@@ -2150,6 +2152,11 @@ impl LabelMenu {
     }
 
     /// The adds and removes, by label id; nothing when the ticks match the PR.
+    /// Some tick differs from the PR's labels, so closing would drop a change.
+    pub fn changed(&self) -> bool {
+        self.chosen != self.current
+    }
+
     fn change(self) -> Option<Action> {
         let Some(Ok(labels)) = &self.labels else {
             return None;
@@ -4209,6 +4216,23 @@ impl App {
                 self.inbox_filter = prompt.text.trim().to_string();
                 self.prompt = None;
             }
+            // A merge is hard to undo, so an answer that sends nothing says so.
+            KeyCode::Esc if matches!(prompt.kind, PromptKind::ConfirmMerge { .. }) => {
+                self.prompt = None;
+                self.error = Some("merge not sent".to_string());
+            }
+            KeyCode::Esc if matches!(prompt.kind, PromptKind::ConfirmDiscard { .. }) => {
+                self.prompt = None;
+                self.error = Some("review not discarded".to_string());
+            }
+            KeyCode::Enter
+                if matches!(prompt.kind, PromptKind::ConfirmMerge { .. })
+                    && !prompt.text.trim().eq_ignore_ascii_case("y") =>
+            {
+                prompt.text.clear();
+                prompt.error =
+                    Some("merge not sent: type y, then enter, to merge; esc cancels".to_string());
+            }
             KeyCode::Esc => self.prompt = None,
             KeyCode::Backspace => {
                 prompt.text.pop();
@@ -4241,11 +4265,13 @@ impl App {
             }
             PromptKind::UpdatedWithin => self.submit_updated_within(&prompt.text),
             PromptKind::Editor { open } => self.submit_editor(&prompt.text, open),
-            PromptKind::ConfirmDiscard { pr, pending_review } => prompt
-                .text
-                .trim()
-                .eq_ignore_ascii_case("y")
-                .then_some(Action::DiscardReview { pr, pending_review }),
+            PromptKind::ConfirmDiscard { pr, pending_review } => {
+                if prompt.text.trim().eq_ignore_ascii_case("y") {
+                    return Some(Action::DiscardReview { pr, pending_review });
+                }
+                self.error = Some("review not discarded".to_string());
+                None
+            }
             PromptKind::ConfirmMerge {
                 pr,
                 pull_request_id,
@@ -4680,6 +4706,7 @@ impl App {
             current,
             filter: String::new(),
             selected: 0,
+            cancel_asked: false,
         });
         fetch
     }
@@ -4697,8 +4724,16 @@ impl App {
     fn label_menu_key(&mut self, key: KeyCode) -> Option<Action> {
         let menu = self.label_menu.as_mut()?;
         let shown = menu.shown().len();
+        let cancel_asked = std::mem::take(&mut menu.cancel_asked);
         match key {
-            KeyCode::Esc => self.label_menu = None,
+            // Ticks are a write to GitHub not sent yet, so esc asks once before it drops them.
+            KeyCode::Esc if menu.changed() && !cancel_asked => menu.cancel_asked = true,
+            KeyCode::Esc => {
+                if menu.changed() {
+                    self.error = Some("labels not changed".to_string());
+                }
+                self.label_menu = None;
+            }
             KeyCode::Down => menu.selected = (menu.selected + 1).min(shown.saturating_sub(1)),
             KeyCode::Up => menu.selected = menu.selected.saturating_sub(1),
             KeyCode::Char(' ') => menu.toggle(),
@@ -6999,6 +7034,72 @@ mod tests {
     }
 
     #[test]
+    fn esc_on_unapplied_label_ticks_warns_before_dropping_them() {
+        let (mut app, pr) = files_tab(Vec::new());
+        app.handle_key(key(KeyCode::Char('1')));
+        app.handle_key(key(KeyCode::Char('e')));
+        let labels = vec![RepoLabel {
+            id: "L9".to_string(),
+            name: "zzz-new".to_string(),
+            color: "ededed".to_string(),
+        }];
+        app.set_repo_labels(&pr, Ok(labels));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(
+            app.label_menu.is_none(),
+            "with no ticks, esc closes at once"
+        );
+
+        app.handle_key(key(KeyCode::Char('e')));
+        type_text(&mut app, "zzz");
+        app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Esc));
+        let menu = app
+            .label_menu
+            .as_ref()
+            .expect("the first esc keeps the menu");
+        assert!(menu.cancel_asked);
+        app.handle_key(key(KeyCode::Down));
+        assert!(
+            !app.label_menu.as_ref().unwrap().cancel_asked,
+            "another key takes it back"
+        );
+        app.handle_key(key(KeyCode::Esc));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.label_menu.is_none(), "a second esc drops the changes");
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|error| error.contains("labels not changed"))
+        );
+    }
+
+    #[test]
+    fn a_discard_answer_other_than_y_says_the_review_stays() {
+        for answer in [Some("n"), None] {
+            let (mut app, pr) = files_tab(Vec::new());
+            let mut activity = crate::model::tests::sample_activity();
+            activity.pending_review = Some("PRR_1".to_string());
+            app.set_activity(&pr, Ok(activity));
+            app.handle_key(key(KeyCode::Char('X')));
+            assert!(app.prompt.is_some(), "X asks first");
+            let action = match answer {
+                Some(text) => {
+                    type_text(&mut app, text);
+                    app.handle_key(key(KeyCode::Enter))
+                }
+                None => app.handle_key(key(KeyCode::Esc)),
+            };
+            assert!(action.is_none() && app.prompt.is_none());
+            assert_eq!(
+                app.error.as_deref(),
+                Some("review not discarded"),
+                "{answer:?}"
+            );
+        }
+    }
+
+    #[test]
     fn y_copies_a_file_path_or_a_folder_path() {
         let (mut app, _) = files_tab(vec![file("src/a.rs", ViewedState::Unviewed)]);
         view_mut(&mut app).tree_view = false;
@@ -8076,6 +8177,39 @@ mod tests {
         assert!(
             app.merge_menu.is_none() && app.prompt.is_none(),
             "esc sends nothing"
+        );
+    }
+
+    #[test]
+    fn a_merge_answer_other_than_y_warns_and_asks_again() {
+        let (mut app, pr) = files_tab(Vec::new());
+        app.set_detail(&pr, Ok(mergeable("CLEAN")));
+        app.handle_key(key(KeyCode::Char('M')));
+        app.handle_key(key(KeyCode::Enter));
+        type_text(&mut app, "yes please");
+        assert!(
+            app.handle_key(key(KeyCode::Enter)).is_none(),
+            "no merge sent"
+        );
+        let prompt = app.prompt.as_ref().expect("the question stays open");
+        assert!(
+            prompt
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("not sent"))
+        );
+        assert!(prompt.text.is_empty(), "the wrong answer is cleared");
+        type_text(&mut app, "y");
+        assert!(sent_request(app.handle_key(key(KeyCode::Enter))).is_some());
+
+        app.handle_key(key(KeyCode::Char('M')));
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.prompt.is_none());
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|error| error.contains("not sent"))
         );
     }
 
