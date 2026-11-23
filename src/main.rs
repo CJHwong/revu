@@ -16,6 +16,7 @@ mod overview;
 mod repo;
 mod seen;
 mod sha256;
+mod stack;
 mod syntax;
 mod syntax_theme;
 mod theme;
@@ -56,6 +57,11 @@ enum Message {
         result: Result<gallery::Shown, String>,
     },
     /// A PR's header and sidebar, for the inbox preview pane.
+    /// A repo's open PRs, which link its stacks.
+    OpenLinks {
+        repo: String,
+        result: Result<Vec<stack::Link>, String>,
+    },
     Preview {
         pr: PrRef,
         result: Result<Box<PrDetail>, String>,
@@ -438,6 +444,7 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
             Message::Definitions { pr, name, result } => app.set_definitions(&pr, name, result),
             Message::Labels { pr, result } => app.set_repo_labels(&pr, result),
             Message::Preview { pr, result } => app.set_preview(pr, result),
+            Message::OpenLinks { repo, result } => app.set_open_links(repo, result),
             Message::Worktree { target, result } => open_in_worktree(app, target, result),
             Message::Image { item, result } => app.set_image(item, result),
             Message::FilesProgress { pr, loaded, total } => {
@@ -853,6 +860,17 @@ fn dispatch_requests(app: &mut App, session: &mut Session) {
     if let Some(pr) = app.take_preview_request(Instant::now()) {
         start_preview_fetch(session, pr);
     }
+    for repo in app.take_links_requests() {
+        start_links_fetch(session, repo);
+    }
+}
+
+fn start_links_fetch(session: &Session, repo: String) {
+    let sender = session.sender.clone();
+    thread::spawn(move || {
+        let result = github::fetch_open_links(&repo).map_err(|error| format!("{error:#}"));
+        let _ = sender.send(Message::OpenLinks { repo, result });
+    });
 }
 
 fn start_preview_fetch(session: &Session, pr: PrRef) {

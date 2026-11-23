@@ -12,6 +12,7 @@ use crate::model::{
     self, ChangedFile, Group, HunkLine, MergeRequest, PrActivity, PrDetail, RateLimit, Side,
     TIMELINE_LIMIT, Verdict,
 };
+use crate::stack::{self, Link};
 
 /// The GraphQL budgets the responses reported, one per reset time. GitHub reports two
 /// counters with different reset times for one token, picking one per response, so
@@ -46,10 +47,10 @@ fn record_rate_limit(
 const PAGE_SIZE: u32 = 100;
 
 const ROW_FIELDS: &str = "number title url isDraft updatedAt reviewDecision totalCommentsCount \
-    additions deletions changedFiles headRefOid viewerDidAuthor mergeable mergeStateStatus \
+    additions deletions changedFiles headRefOid baseRefName headRefName isCrossRepository viewerDidAuthor mergeable mergeStateStatus \
     viewerLatestReview { state commit { oid } } \
     latestOpinionatedReviews(first: 20) { nodes { author { login } state viewerDidAuthor commit { oid } } } \
-    viewerLatestReviewRequest { requestedReviewer { __typename } } author { login } repository { nameWithOwner }";
+    viewerLatestReviewRequest { requestedReviewer { __typename } } author { login } repository { nameWithOwner defaultBranchRef { name } }";
 
 const ROLLUP_COUNTS: &str = "totalCount \
     checkRunCountsByState { state count } \
@@ -84,7 +85,7 @@ pub fn detail_document() -> String {
     format!(
         "query({PR_VARIABLES}) {{ \
          repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ \
-         {ROW_FIELDS} id baseRefOid body createdAt baseRefName headRefName \
+         {ROW_FIELDS} id baseRefOid body createdAt \
          commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state contexts(first: 0) {{ {ROLLUP_COUNTS} }} }} }} }} }} \
          commitCount: commits {{ totalCount }} \
          labels(first: 20) {{ nodes {{ name color }} }} \
@@ -222,6 +223,43 @@ pub fn fetch_files(
             None => return Ok(files),
         }
     }
+}
+
+const OPEN_LINKS_DOCUMENT: &str = "query($owner: String!, $name: String!, $cursor: String) { \
+    repository(owner: $owner, name: $name) { \
+    pullRequests(states: OPEN, first: 100, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) { pageInfo { hasNextPage endCursor } \
+    nodes { number title baseRefName headRefName isCrossRepository isDraft reviewDecision } } } }";
+
+/// A repo with more open PRs than this many pages links only the newest ones.
+const OPEN_LINKS_PAGES: usize = 10;
+
+/// Every open PR of a repo, with only the branch names that link a stack. One request
+/// per 100 PRs, however deep the stacks are.
+pub fn fetch_open_links(repo: &str) -> Result<Vec<Link>> {
+    let (owner, name) = split_repo(repo)?;
+    let mut links = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..OPEN_LINKS_PAGES {
+        let mut args = graphql_args(
+            OPEN_LINKS_DOCUMENT,
+            &[("owner", owner), ("name", name)],
+            &[],
+        );
+        if let Some(after) = &cursor {
+            args.extend(["-f".to_string(), format!("cursor={after}")]);
+        }
+        let data = run_graphql(&args)?;
+        let raw = data
+            .pointer("/repository/pullRequests")
+            .with_context(|| format!("{repo} has no pullRequests field"))?;
+        let (page, next) = stack::parse_links_page(raw)?;
+        links.extend(page);
+        match next {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    Ok(links)
 }
 
 /// Sets the viewer's Viewed checkbox, the same one the web shows, for each path: one

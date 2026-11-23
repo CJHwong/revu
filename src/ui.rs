@@ -10,8 +10,8 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::app::{
     AgentMenu, App, Click, ClickTarget, ComposeKind, Composer, DetailView, DiffOutput,
-    EditorChoice, EditorMenu, LabelMenu, MergeItem, MergeMenu, OpenMenu, Overlay, OverviewLayout,
-    Prompt, PromptKind, RepoState, Row, SETTINGS, SaveNote, Screen, Tab,
+    EditorChoice, EditorMenu, LabelMenu, LinksState, MergeItem, MergeMenu, OpenMenu, Overlay,
+    OverviewLayout, Prompt, PromptKind, RepoState, Row, SETTINGS, SaveNote, Screen, Tab,
 };
 use crate::editor::Editor;
 use crate::file_tree::FileRow;
@@ -24,6 +24,7 @@ use crate::model::{
     MergeMethod, MergeRequest, PrActivity, PrDetail, PrRef, PrSummary, RateLimit, ReviewState,
     Reviewer, Side, SinceCounts, ThreadLine, Turn, Verdict, ViewedState,
 };
+use crate::stack::{RepoStack, StackIndex};
 use crate::theme::{ON_STATE, PrState, Theme};
 use crate::{markdown, overview};
 use ratatui_image::picker::Picker;
@@ -469,6 +470,7 @@ fn render_inbox(frame: &mut Frame, app: &mut App, paint: Paint) {
     let row_width = list_area.width.saturating_sub(2) as usize;
     let selected = app.list_state.selected();
     let rows = app.rows();
+    let stacks = app.stack_index();
     let items: Vec<ListItem> = rows
         .iter()
         .enumerate()
@@ -483,7 +485,7 @@ fn render_inbox(frame: &mut Frame, app: &mut App, paint: Paint) {
                 gap_above,
                 selected: selected == Some(index),
             };
-            row_item(app, item, row_width, paint)
+            row_item(app, &stacks, item, row_width, paint)
         })
         .collect();
     let heights: Vec<usize> = items.iter().map(ListItem::height).collect();
@@ -595,7 +597,13 @@ struct RowItem {
     selected: bool,
 }
 
-fn row_item(app: &App, item: RowItem, width: usize, paint: Paint) -> ListItem<'static> {
+fn row_item(
+    app: &App,
+    stacks: &StackIndex,
+    item: RowItem,
+    width: usize,
+    paint: Paint,
+) -> ListItem<'static> {
     let mut lines = match item.row {
         Row::Header(group_index) => {
             let loading = app.group_loading.get(group_index).copied().unwrap_or(false);
@@ -605,7 +613,17 @@ fn row_item(app: &App, item: RowItem, width: usize, paint: Paint) -> ListItem<'s
         }
         Row::Pr(group_index, pr_index) => {
             let pr = &app.groups[group_index].prs[pr_index];
-            pr_lines(pr, app.seen.is_new(pr), width, item.selected, paint).to_vec()
+            // A chain from the loaded rows alone may miss a PR, so its places would lie.
+            let place = stacks
+                .place(&pr.repo, pr.number)
+                .map(|place| (place.position, &stacks.stacks[place.stack]))
+                .filter(|(_, found)| found.complete)
+                .map(|(position, found)| (position, found.stack.members.len()));
+            pr_lines(pr, place, app.seen.is_new(pr), width, item.selected, paint).to_vec()
+        }
+        Row::Stack(group_index, pr_index) => {
+            let anchor = (group_index, pr_index);
+            stack_lines(app, stacks, anchor, width, item.selected, paint).to_vec()
         }
     };
     if item.selected {
@@ -619,10 +637,101 @@ fn row_item(app: &App, item: RowItem, width: usize, paint: Paint) -> ListItem<'s
         lines.insert(0, Line::default());
     }
     // A blank line after each PR keeps one PR's two lines apart from the next one's.
-    if matches!(item.row, Row::Pr(..)) {
+    if matches!(item.row, Row::Pr(..) | Row::Stack(..)) {
         lines.push(Line::default());
     }
     ListItem::new(Text::from(lines))
+}
+
+/// A stack's row: the branch it is based on, the repo, how many of its PRs the group
+/// holds and how many wait on you.
+fn stack_lines(
+    app: &App,
+    stacks: &StackIndex,
+    (group_index, anchor): (usize, usize),
+    width: usize,
+    selected: bool,
+    paint: Paint,
+) -> [Line<'static>; 2] {
+    let theme = paint.theme;
+    let group = &app.groups[group_index];
+    let newest = &group.prs[anchor];
+    let Some(place) = stacks.place(&newest.repo, newest.number) else {
+        return [Line::default(), Line::default()];
+    };
+    let found = &stacks.stacks[place.stack];
+    let here: Vec<&PrSummary> = group
+        .prs
+        .iter()
+        .filter(|member| {
+            stacks
+                .place(&member.repo, member.number)
+                .map(|other| other.stack)
+                == Some(place.stack)
+        })
+        .collect();
+    let secondary = secondary_color(selected, theme);
+    // The same cells as a PR row, so each item sits in the column it has there.
+    let text_width = width.saturating_sub(badges_width(width < NARROW_INBOX) + 4);
+    let unfolded = app.unfolded_stacks.contains(&found.key()) || !app.filter().is_empty();
+    let marker = if unfolded { "  ▾ " } else { "  ▸ " };
+    let label = format!("stack on {}", found.stack.root);
+    let label = pad_to_width(&truncate_to_width(&label, text_width), text_width);
+    let length = found.stack.members.len();
+    let count = if here.len() < length {
+        format!("{} of {length} PRs here", here.len())
+    } else {
+        format!("{length} PRs")
+    };
+    let mut first = vec![
+        paint.bold(marker, theme.fold),
+        paint.bold(label, theme.foreground),
+        Span::raw(GAP),
+        pad_span(paint.span(count, theme.accent), REVIEW_WIDTH),
+    ];
+    if let Some(status) = link_status(app, found, paint) {
+        first.push(Span::raw(GAP));
+        first.push(status);
+    }
+    let meta = stack_meta(found, newest, text_width, paint.now);
+    let mut second = vec![
+        Span::raw("    "),
+        paint.span(pad_to_width(&meta, text_width), secondary),
+    ];
+    let yours = here
+        .iter()
+        .filter(|member| member.turn == Some(Turn::Yours))
+        .count();
+    if yours > 0 {
+        second.push(Span::raw(GAP));
+        second.push(paint.bold(format!("{yours} need you"), theme.accent));
+    }
+    [Line::from(first), Line::from(second)]
+}
+
+/// The repo and the newest update of the stack's PRs in the group, as much as fits.
+fn stack_meta(found: &RepoStack, newest: &PrSummary, width: usize, now: DateTime<Utc>) -> String {
+    let full = format!(
+        "{}, updated {}",
+        found.repo,
+        relative_time(newest.updated_at, now)
+    );
+    if display_width(&full) <= width {
+        full
+    } else {
+        truncate_to_width(&found.repo, width)
+    }
+}
+
+/// Until every open PR of the repo is in, the chain may miss a PR between two rows.
+fn link_status(app: &App, found: &RepoStack, paint: Paint) -> Option<Span<'static>> {
+    match app.open_links.get(&found.repo) {
+        Some(LinksState::Loaded(_)) => None,
+        Some(LinksState::Failed) => {
+            Some(paint.span("linked from the inbox only", paint.theme.warning))
+        }
+        None => Some(paint.span("linking...", paint.theme.warning)),
+    }
 }
 
 /// `matching` is how many rows pass the inbox filter, when one is set.
@@ -668,8 +777,10 @@ fn secondary_color(selected: bool, theme: &Theme) -> Color {
 /// review, the checks and the comments, with the turn under the review and a conflict
 /// under the checks. A cell stays when it is empty, and text too long for its cell is
 /// cut, so nothing moves from row to row.
+/// `stack` is the PR's position in its stack, and the stack's length.
 fn pr_lines(
     pr: &PrSummary,
+    stack: Option<(usize, usize)>,
     new: bool,
     width: usize,
     selected: bool,
@@ -680,7 +791,14 @@ fn pr_lines(
     let narrow = width < NARROW_INBOX;
     let badges = Line::from(badge_spans(pr, secondary, narrow, paint));
     let text_width = width.saturating_sub(badges.width() + 4);
-    let title = pad_to_width(&truncate_to_width(&pr.title, text_width), text_width);
+    let tag = stack.map_or_else(String::new, |(position, length)| {
+        format!(
+            "{position:>width$}/{length} ",
+            width = length.to_string().len()
+        )
+    });
+    let title_width = text_width.saturating_sub(display_width(&tag));
+    let title = pad_to_width(&truncate_to_width(&pr.title, title_width), title_width);
 
     let mut first = vec![
         if new {
@@ -688,6 +806,7 @@ fn pr_lines(
         } else {
             Span::from("    ")
         },
+        paint.span(tag, theme.accent),
         paint.bold(title, theme.foreground),
     ];
     first.extend(badges.spans);
@@ -785,7 +904,7 @@ fn badge_spans(pr: &PrSummary, secondary: Color, narrow: bool, paint: Paint) -> 
         (1, false) => "1 comment".to_string(),
         (count, false) => format!("{count} comments"),
     };
-    let comments_width = if narrow { 5 } else { 12 };
+    let comments_width = comments_width(narrow);
     // No comments and no checks leave their cells blank, so the rows that have them
     // stand out. The blank keeps the cell's width, so every row's badges line up.
     vec![
@@ -796,6 +915,16 @@ fn badge_spans(pr: &PrSummary, secondary: Color, narrow: bool, paint: Paint) -> 
         Span::raw(GAP),
         paint.span(format!("{comments:>comments_width$}"), secondary),
     ]
+}
+
+/// The comment count's cell: wide enough for "99 comments", or for "99 ✎" when narrow.
+fn comments_width(narrow: bool) -> usize {
+    if narrow { 5 } else { 12 }
+}
+
+/// How wide a PR row's badges are: the review state, the checks and the comments.
+fn badges_width(narrow: bool) -> usize {
+    3 * display_width(GAP) + REVIEW_WIDTH + CHECKS_WIDTH + comments_width(narrow)
 }
 
 fn review_span(review: ReviewState, paint: Paint) -> Span<'static> {
@@ -1003,8 +1132,11 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
         "Inbox",
         &[
             ("j/k, g/G", "move, top, bottom"),
-            ("enter, l", "open the pull request, or fold a group header"),
-            ("space", "fold the current group"),
+            (
+                "enter, l",
+                "open the pull request, or fold a group header or a stack",
+            ),
+            ("space", "fold the current stack, else the current group"),
             ("tab, shift-tab", "next or previous group"),
             (
                 "/, esc",
@@ -1032,6 +1164,7 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
                 "hand off to Claude Code or Codex: what you write, with the PR, lines and thread here",
             ),
             ("X", "discard your pending review and its line comments"),
+            ("{, }", "the PR below or above this one in its stack"),
             (
                 "M",
                 "merge: pick merge commit, squash or rebase; auto-merge when blocked, or turn it off",
@@ -1047,7 +1180,7 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "enter",
-                "open or close the folded block under the cursor; on an image, show it",
+                "open or close the folded block under the cursor; on an image, show it; on a stack's PR, open it",
             ),
             (
                 "e",
@@ -1057,7 +1190,7 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
                 "i",
                 "images and mermaid diagrams in the PR, h/l previous/next, o browser, esc closes",
             ),
-            ("], [", "next or previous card or folded block"),
+            ("], [", "next or previous card, folded block or stack PR"),
             (
                 "f, F, n",
                 "filter comments (all, unresolved, mine), flip the order, hide bots",
@@ -3037,6 +3170,8 @@ fn render_overview(frame: &mut Frame, view: &mut DetailView, area: Rect, paint: 
         scroll,
         page,
         clicks,
+        stack,
+        stack_full,
         ..
     } = view
     else {
@@ -3051,6 +3186,8 @@ fn render_overview(frame: &mut Frame, view: &mut DetailView, area: Rect, paint: 
             comments: *comments,
             theme: paint.theme,
             now: paint.now,
+            stack: stack.as_ref(),
+            stack_full: *stack_full,
         };
         *layout = Some(OverviewLayout {
             width,
@@ -4454,6 +4591,86 @@ mod tests {
     }
 
     #[test]
+    fn a_stack_row_has_two_lines_in_the_columns_of_a_pr_row() {
+        let theme = theme::by_name("dracula").unwrap();
+        let paint = Paint {
+            theme: &theme,
+            now: Utc::now(),
+        };
+        let member = |number, base: &str, head: &str| PrSummary {
+            number,
+            base: base.to_string(),
+            head: head.to_string(),
+            repo: "acme/billing".to_string(),
+            turn: Some(Turn::Yours),
+            updated_at: paint.now - chrono::Duration::hours(2),
+            ..summary()
+        };
+        let mut app = App::new();
+        app.groups = vec![Group {
+            title: "A".to_string(),
+            total: 2,
+            prs: vec![
+                member(2, "stack/one", "stack/two"),
+                member(1, "feature/invoice-rework-2026q4", "stack/one"),
+            ],
+            collapsed: false,
+        }];
+        let text = |lines: [Line<'static>; 2]| {
+            lines.map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.to_string())
+                    .collect::<String>()
+            })
+        };
+        for width in [140, 90] {
+            let [first, second] = text(stack_lines(
+                &app,
+                &app.stack_index(),
+                (0, 0),
+                width,
+                false,
+                paint,
+            ));
+            let [pr_first, pr_second] = text(pr_lines(
+                &app.groups[0].prs[0],
+                None,
+                false,
+                width,
+                false,
+                paint,
+            ));
+            let column =
+                |line: &str, text: &str| line.find(text).map(|at| display_width(&line[..at]));
+            let review_column = column(&pr_first, "Awaiting").unwrap();
+            assert_eq!(
+                column(&first, "2 PRs"),
+                Some(review_column),
+                "{first}\n{pr_first}"
+            );
+            let turn_column = column(&pr_second, "Your turn").unwrap();
+            assert_eq!(
+                column(&second, "2 need you"),
+                Some(turn_column),
+                "{second}\n{pr_second}"
+            );
+            assert!(first.contains("stack on feature/"), "{first}");
+            assert!(second.contains("acme/billing"), "{second}");
+            assert!(display_width(&first) <= width, "{first}");
+        }
+        let [_, wide] = text(stack_lines(
+            &app,
+            &app.stack_index(),
+            (0, 0),
+            140,
+            false,
+            paint,
+        ));
+        assert!(wide.contains("acme/billing, updated 2h ago"), "{wide}");
+    }
+
+    #[test]
     fn an_inbox_with_no_groups_says_how_to_get_some() {
         let theme = theme::by_name("dracula").unwrap();
         let mut app = App::new();
@@ -4670,6 +4887,10 @@ mod tests {
             turn: None,
             conflicts: false,
             merge_state: String::new(),
+            base: "main".to_string(),
+            head: "feature".to_string(),
+            cross_repo: false,
+            default_branch: "main".to_string(),
         }
     }
 
@@ -4706,7 +4927,7 @@ mod tests {
             ..summary()
         };
         let row = |width: usize| {
-            let [first, second] = pr_lines(&pr, false, width, false, paint);
+            let [first, second] = pr_lines(&pr, None, false, width, false, paint);
             format!("{first}\n{second}")
         };
         let wide = row(NARROW_INBOX);
@@ -4786,9 +5007,9 @@ mod tests {
             ..summary()
         };
         for width in [90, 150] {
-            let [long_first, long_second] = pr_lines(&long, false, width, false, paint);
-            let [short_first, short_second] = pr_lines(&short, false, width, false, paint);
-            let [_, plain_second] = pr_lines(&plain, false, width, false, paint);
+            let [long_first, long_second] = pr_lines(&long, None, false, width, false, paint);
+            let [short_first, short_second] = pr_lines(&short, None, false, width, false, paint);
+            let [_, plain_second] = pr_lines(&plain, None, false, width, false, paint);
             let review = column(&long_first, "Changes requested");
             assert_eq!(review, column(&short_first, "Changes requested"), "{width}");
             assert_eq!(column(&long_second, "Your turn"), review, "{width}");

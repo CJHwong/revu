@@ -63,6 +63,14 @@ To throw away the pending review and its line comments instead, press `X`, then 
 
 On your own pull request, and on one that is merged or closed, the review takes only Comment.
 
+## Review a stack of pull requests
+
+1. In the inbox, press `Enter` on the stack's row. Its pull requests list bottom first, each with its place, such as `1/10`.
+2. Open the bottom one and review it.
+3. Press `}` to open the next one up, or `{` for the one below. On the Overview, the Stack card shows where you are.
+
+See [Stacked pull requests](how-it-works.md#stacked-pull-requests).
+
 ## Hand a spot to a coding agent
 
 1. Put the cursor where the question is. In select lines (`S`), that is a line, a `V` range, or a thread. On any tab, it is the pull request as a whole; on Files changed, also the selected file.

@@ -13,6 +13,7 @@ use crate::github::RepoLabel;
 use crate::line_diff::{DiffRow, RowKind};
 use crate::markdown::TextRow;
 use crate::repo::{GrepHit, LocalRepo, MAX_GREP_HITS};
+use crate::stack::{Link, RepoStack, StackIndex};
 
 use crate::config::{EditorConfig, GroupConfig, ViewPrefs};
 use crate::model::{
@@ -25,6 +26,18 @@ pub enum Row {
     Header(usize),
     /// Group index, then the PR index inside that group.
     Pr(usize, usize),
+    /// Two or more PRs of one stack in a group, folded into one row. Named by the group
+    /// and the PR index of the stack's newest PR there, which is where the row sits.
+    Stack(usize, usize),
+}
+
+/// A repo's open PRs, fetched to link its stacks. A repo with no entry has not
+/// answered yet.
+#[derive(Debug, Clone)]
+pub enum LinksState {
+    Loaded(Vec<Link>),
+    /// The error went to the footer; the stacks link from the inbox rows alone.
+    Failed,
 }
 
 #[derive(Debug, Clone)]
@@ -401,6 +414,12 @@ pub struct DetailView {
     /// Folds the user opened or closed, away from their default state.
     pub toggled_folds: HashSet<crate::markdown::FoldId>,
     pub comments: crate::overview::CommentView,
+    /// The stack this PR sits in, for the Stack card and `{` / `}`.
+    pub stack: Option<RepoStack>,
+    /// The Stack card lists every PR, not only the ones around this one.
+    pub stack_full: bool,
+    /// A PR of the stack that Enter or a click on the card asked to open.
+    open_request: Option<u64>,
     /// The Overview laid out at the last drawn width. Cleared when its content changes.
     pub overview: Option<OverviewLayout>,
     /// The Overview's visible height at the last draw, for paging.
@@ -529,6 +548,9 @@ impl DetailView {
                 no_bots: prefs.no_bots,
                 ..Default::default()
             },
+            stack: None,
+            stack_full: false,
+            open_request: None,
             overview: None,
             page: 20,
             commits: ListState::default().with_selected(Some(0)),
@@ -1748,6 +1770,11 @@ impl DetailView {
             .and_then(|layout| layout.rows.get(self.cursor));
         match row.and_then(|row| row.action) {
             Some(crate::markdown::RowAction::ChecksTab) => self.show_tab(Tab::Checks),
+            Some(crate::markdown::RowAction::OpenPr(number)) => self.open_request = Some(number),
+            Some(crate::markdown::RowAction::FullStack) => {
+                self.stack_full = !self.stack_full;
+                self.overview = None;
+            }
             Some(crate::markdown::RowAction::UnresolvedComments) => {
                 let filter = crate::overview::CommentFilter::Unresolved;
                 self.set_comments(crate::overview::CommentView {
@@ -1771,6 +1798,20 @@ impl DetailView {
             self.toggled_folds.insert(id);
         }
         self.overview = None;
+    }
+
+    /// The PR right above or below this one in its stack.
+    fn stack_neighbor(&self, above: bool) -> Option<u64> {
+        let members = &self.stack.as_ref()?.stack.members;
+        let index = members
+            .iter()
+            .position(|member| member.number == self.pr.number)?;
+        let target = if above {
+            index + 1
+        } else {
+            index.checked_sub(1)?
+        };
+        members.get(target).map(|member| member.number)
     }
 
     /// Moves the Overview cursor to the next or previous card or fold.
@@ -2746,6 +2787,13 @@ fn matching_word<'a>(words: &'a [String], typed: &str) -> Option<(&'a str, &'a s
 
 pub struct App {
     pub groups: Vec<Group>,
+    /// Each repo's open PRs, by repo. A refresh of the inbox fetches them again.
+    pub open_links: HashMap<String, LinksState>,
+    /// The inbox fetch each repo's open PRs were last asked for. The last answer stays
+    /// until the next one arrives, as a group keeps its rows.
+    links_asked: HashMap<String, u64>,
+    /// The stacks the user unfolded, by repo and bottom PR. A stack starts folded.
+    pub unfolded_stacks: HashSet<(String, u64)>,
     pub list_state: ListState,
     pub screen: Screen,
     pub prompt: Option<Prompt>,
@@ -2952,6 +3000,9 @@ impl App {
             picker: None,
             seen: crate::seen::Seen::default(),
             wrote: HashSet::new(),
+            open_links: HashMap::new(),
+            links_asked: HashMap::new(),
+            unfolded_stacks: HashSet::new(),
             inbox_filter: String::new(),
             clone_repos: Vec::new(),
             clone_repos_requested: false,
@@ -3184,17 +3235,202 @@ impl App {
     }
 
     pub fn rows(&self) -> Vec<Row> {
+        let index = self.stack_index();
         let mut rows = Vec::new();
         for (group_index, group) in self.groups.iter().enumerate() {
             rows.push(Row::Header(group_index));
             if !group.collapsed {
+                rows.extend(self.group_rows(group_index, &index));
+            }
+        }
+        rows
+    }
+
+    /// A group's rows. Two or more PRs of one stack fold into a stack row at the place
+    /// of the newest one, and unfold in stack order, bottom first.
+    fn group_rows(&self, group_index: usize, index: &StackIndex) -> Vec<Row> {
+        let group = &self.groups[group_index];
+        let shown: Vec<usize> = self.shown_prs(group).collect();
+        let place = |pr_index: usize| {
+            let pr = &group.prs[pr_index];
+            index.place(&pr.repo, pr.number)
+        };
+        let mut members: HashMap<usize, Vec<usize>> = HashMap::new();
+        for &pr_index in &shown {
+            if let Some(found) = place(pr_index) {
+                members.entry(found.stack).or_default().push(pr_index);
+            }
+        }
+        let mut rows = Vec::new();
+        let mut placed = HashSet::new();
+        for &pr_index in &shown {
+            let stack = place(pr_index)
+                .map(|found| found.stack)
+                .filter(|stack| members[stack].len() > 1);
+            let Some(stack) = stack else {
+                rows.push(Row::Pr(group_index, pr_index));
+                continue;
+            };
+            if !placed.insert(stack) {
+                continue;
+            }
+            rows.push(Row::Stack(group_index, pr_index));
+            if self.stack_unfolded(index, stack) {
+                let mut stacked = members[&stack].clone();
+                stacked.sort_by_key(|member| place(*member).map(|found| found.position));
                 rows.extend(
-                    self.shown_prs(group)
-                        .map(|pr_index| Row::Pr(group_index, pr_index)),
+                    stacked
+                        .into_iter()
+                        .map(|member| Row::Pr(group_index, member)),
                 );
             }
         }
         rows
+    }
+
+    /// A filter unfolds every stack, so a match never hides inside a folded one.
+    fn stack_unfolded(&self, index: &StackIndex, stack: usize) -> bool {
+        !self.filter().is_empty() || self.unfolded_stacks.contains(&index.stacks[stack].key())
+    }
+
+    /// The stacks of every repo the inbox or the open PR shows. A repo whose open PRs
+    /// have arrived links from all of them; any other links from the rows loaded so far.
+    pub fn stack_index(&self) -> StackIndex {
+        let mut loaded: HashMap<&str, Vec<Link>> = HashMap::new();
+        let mut numbers = HashSet::new();
+        for pr in self.groups.iter().flat_map(|group| &group.prs) {
+            if numbers.insert((pr.repo.as_str(), pr.number)) {
+                loaded
+                    .entry(&pr.repo)
+                    .or_default()
+                    .push(Link::from_summary(pr));
+            }
+        }
+        let mut index = StackIndex::default();
+        let mut repos: Vec<&str> = loaded.keys().copied().collect();
+        repos.extend(self.open_links.keys().map(String::as_str));
+        repos.sort_unstable();
+        repos.dedup();
+        for repo in repos {
+            match self.open_links.get(repo) {
+                Some(LinksState::Loaded(links)) => index.add_repo(repo, links, true),
+                _ => index.add_repo(repo, loaded.get(repo).map_or(&[], Vec::as_slice), false),
+            }
+        }
+        index
+    }
+
+    /// The repos whose open PRs to fetch now: one with an inbox row based on a branch
+    /// other than the default, and the open PR's repo. Each goes once per refresh.
+    pub fn take_links_requests(&mut self) -> Vec<String> {
+        let mut repos: Vec<String> = self
+            .groups
+            .iter()
+            .flat_map(|group| &group.prs)
+            .filter(|pr| !pr.cross_repo && !pr.default_branch.is_empty())
+            .filter(|pr| pr.base != pr.default_branch)
+            .map(|pr| pr.repo.clone())
+            .collect();
+        if let Some(view) = self.open_view() {
+            repos.push(view.pr.repo.clone());
+        }
+        repos.sort_unstable();
+        repos.dedup();
+        let generation = self.inbox_generation;
+        repos.retain(|repo| self.links_asked.get(repo) != Some(&generation));
+        for repo in &repos {
+            self.links_asked.insert(repo.clone(), generation);
+        }
+        repos
+    }
+
+    /// Gives the open PR the stack it sits in, and draws its Overview again when the
+    /// stack changed.
+    fn sync_view_stack(&mut self) {
+        let index = self.stack_index();
+        let Screen::Detail(view) = &mut self.screen else {
+            return;
+        };
+        let stack = index
+            .place(&view.pr.repo, view.pr.number)
+            .map(|place| index.stacks[place.stack].clone());
+        if stack != view.stack {
+            view.stack = stack;
+            view.overview = None;
+        }
+    }
+
+    /// Opens a PR of the open PR's stack, with its inbox row when the inbox has it.
+    fn open_stack_member(&mut self, number: u64) -> Action {
+        let repo = match &self.screen {
+            Screen::Detail(view) => view.pr.repo.clone(),
+            _ => String::new(),
+        };
+        let pr = PrRef { repo, number };
+        let summary = self
+            .groups
+            .iter()
+            .flat_map(|group| &group.prs)
+            .find(|row| row.reference() == pr)
+            .cloned();
+        self.open_pr(pr, summary)
+    }
+
+    pub fn set_open_links(&mut self, repo: String, result: Result<Vec<Link>, String>) {
+        let selected = self.selected_pr().map(PrSummary::reference);
+        match result {
+            Ok(links) => {
+                self.open_links.insert(repo, LinksState::Loaded(links));
+            }
+            Err(error) => {
+                self.error = Some(format!("linking the stacks of {repo}: {error}"));
+                // An earlier answer still links better than the inbox rows alone.
+                self.open_links.entry(repo).or_insert(LinksState::Failed);
+            }
+        }
+        self.reselect(selected);
+        self.sync_view_stack();
+    }
+
+    /// Folds or unfolds the stack on the selected row, or the one the selected PR sits
+    /// in, and selects the stack's row. False when the row is in no stack row.
+    fn toggle_selected_stack(&mut self) -> bool {
+        let (group_index, pr_index) = match self.selected_row() {
+            Some(Row::Stack(group, pr) | Row::Pr(group, pr)) => (group, pr),
+            _ => return false,
+        };
+        let index = self.stack_index();
+        let pr = &self.groups[group_index].prs[pr_index];
+        let Some(place) = index.place(&pr.repo, pr.number) else {
+            return false;
+        };
+        let rows = self.rows();
+        let stack_row = rows.iter().position(|row| match row {
+            Row::Stack(group, anchor) if *group == group_index => {
+                let anchor = &self.groups[*group].prs[*anchor];
+                index
+                    .place(&anchor.repo, anchor.number)
+                    .map(|found| found.stack)
+                    == Some(place.stack)
+            }
+            _ => false,
+        });
+        let Some(stack_row) = stack_row else {
+            return false;
+        };
+        let Row::Stack(_, anchor) = rows[stack_row] else {
+            return false;
+        };
+        let key = index.stacks[place.stack].key();
+        if !self.unfolded_stacks.remove(&key) {
+            self.unfolded_stacks.insert(key);
+        }
+        let anchor_row = self
+            .rows()
+            .iter()
+            .position(|row| *row == Row::Stack(group_index, anchor));
+        self.list_state.select(anchor_row);
+        true
     }
 
     /// The PR the preview pane should fetch now: the selected row, once the selection
@@ -3347,7 +3583,7 @@ impl App {
     fn selected_pr(&self) -> Option<&PrSummary> {
         match self.selected_row()? {
             Row::Pr(group_index, pr_index) => self.groups[group_index].prs.get(pr_index),
-            Row::Header(_) => None,
+            Row::Header(_) | Row::Stack(..) => None,
         }
     }
 
@@ -3431,11 +3667,29 @@ impl App {
 
     fn reselect(&mut self, pr: Option<PrRef>) {
         let rows = self.rows();
-        let position = pr.and_then(|pr| {
+        let is_pr = |row: &Row, pr: &PrRef| match row {
+            Row::Pr(group, index) => self.groups[*group].prs[*index].reference() == *pr,
+            Row::Header(_) | Row::Stack(..) => false,
+        };
+        // A PR that a stack now folds keeps the selection on its stack's row.
+        let stack_of = |pr: &PrRef| {
+            let index = self.stack_index();
+            let stack = index.place(&pr.repo, pr.number)?.stack;
             rows.iter().position(|row| match row {
-                Row::Pr(group, index) => self.groups[*group].prs[*index].reference() == pr,
-                Row::Header(_) => false,
+                Row::Stack(group, anchor) => {
+                    let anchor = &self.groups[*group].prs[*anchor];
+                    index
+                        .place(&anchor.repo, anchor.number)
+                        .map(|found| found.stack)
+                        == Some(stack)
+                }
+                _ => false,
             })
+        };
+        let position = pr.and_then(|pr| {
+            rows.iter()
+                .position(|row| is_pr(row, &pr))
+                .or_else(|| stack_of(&pr))
         });
         if let Some(position) = position {
             self.list_state.select(Some(position));
@@ -3536,6 +3790,7 @@ impl App {
         }
         view.detail = Some(result);
         view.overview = None;
+        self.sync_view_stack();
     }
 
     pub fn set_activity(&mut self, pr: &PrRef, result: Result<PrActivity, String>) {
@@ -3652,6 +3907,9 @@ impl App {
         };
         let target = hit(&view.clicks)?;
         let result = view.click(target, row);
+        if let Some(number) = view.open_request.take() {
+            return Some(self.open_stack_member(number));
+        }
         let on_image = view.tab == Tab::Overview
             && matches!(target.click, Click::Page { .. })
             && view
@@ -4632,6 +4890,7 @@ impl App {
         view.preloaded = preview.is_some();
         view.summary = summary;
         self.screen = Screen::Detail(Box::new(view));
+        self.sync_view_stack();
         if let Some(detail) = preview {
             self.set_detail(&pr, Ok(detail));
         }
@@ -4674,7 +4933,11 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
             KeyCode::Char('g') | KeyCode::Home => self.list_state.select(Some(0)),
             KeyCode::Char('G') | KeyCode::End => self.select_last(),
-            KeyCode::Char(' ') => self.toggle_selected_group(),
+            KeyCode::Char(' ') => {
+                if !self.toggle_selected_stack() {
+                    self.toggle_selected_group();
+                }
+            }
             KeyCode::Tab => self.jump_group(true),
             KeyCode::BackTab => self.jump_group(false),
             KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => return self.open_selected(),
@@ -4857,7 +5120,22 @@ impl App {
             KeyCode::Char('b') | KeyCode::PageUp => view.move_in_tab(-view.page_step()),
             KeyCode::Char('g') | KeyCode::Home => view.move_in_tab(-1_000_000),
             KeyCode::Char('G') | KeyCode::End => view.move_in_tab(1_000_000),
-            KeyCode::Enter if view.tab == Tab::Overview => view.press_row(),
+            KeyCode::Enter if view.tab == Tab::Overview => {
+                view.press_row();
+                if let Some(number) = view.open_request.take() {
+                    return Some(self.open_stack_member(number));
+                }
+            }
+            KeyCode::Char('{') | KeyCode::Char('}') => {
+                let above = key == KeyCode::Char('}');
+                match view.stack_neighbor(above) {
+                    Some(number) => return Some(self.open_stack_member(number)),
+                    None => {
+                        let side = if above { "above" } else { "below" };
+                        self.error = Some(format!("no PR {side} this one in a stack"));
+                    }
+                }
+            }
             KeyCode::Char(']') if view.tab == Tab::Overview => view.jump_anchor(true),
             KeyCode::Char('f') if view.tab == Tab::Overview => {
                 let filter = view.comments.filter.next();
@@ -5001,9 +5279,16 @@ impl App {
     }
 
     fn open_selected(&mut self) -> Option<Action> {
-        if let Some(Row::Header(_)) = self.selected_row() {
-            self.toggle_selected_group();
-            return None;
+        match self.selected_row() {
+            Some(Row::Header(_)) => {
+                self.toggle_selected_group();
+                return None;
+            }
+            Some(Row::Stack(..)) => {
+                self.toggle_selected_stack();
+                return None;
+            }
+            _ => {}
         }
         let summary = self.selected_pr()?.clone();
         Some(self.open_pr(summary.reference(), Some(summary)))
@@ -5012,7 +5297,7 @@ impl App {
     /// On a PR row, folds its group and moves the selection to the group header.
     fn toggle_selected_group(&mut self) {
         let group_index = match self.selected_row() {
-            Some(Row::Header(index) | Row::Pr(index, _)) => index,
+            Some(Row::Header(index) | Row::Pr(index, _) | Row::Stack(index, _)) => index,
             None => return,
         };
         self.groups[group_index].collapsed = !self.groups[group_index].collapsed;
@@ -5145,6 +5430,10 @@ mod tests {
             turn: None,
             conflicts: false,
             merge_state: String::new(),
+            base: "main".to_string(),
+            head: format!("branch-{number}"),
+            cross_repo: false,
+            default_branch: "main".to_string(),
         }
     }
 
@@ -5174,6 +5463,235 @@ mod tests {
         );
         app.handle_key(key(KeyCode::Char('r')));
         assert!(view(&app).summary.is_some(), "a reload keeps it");
+    }
+
+    /// A PR on `base` whose own branch is `head`.
+    fn stacked(number: u64, base: &str, head: &str) -> PrSummary {
+        PrSummary {
+            base: base.to_string(),
+            head: head.to_string(),
+            ..pr(number)
+        }
+    }
+
+    /// Group A, newest first: 3 sits on 2, 2 on 1, and 1 on `feature/x`; 9 stands alone.
+    fn stack_group() -> Group {
+        Group {
+            title: "A".to_string(),
+            total: 4,
+            prs: vec![
+                stacked(2, "a", "b"),
+                pr(9),
+                stacked(3, "b", "c"),
+                stacked(1, "feature/x", "a"),
+            ],
+            collapsed: false,
+        }
+    }
+
+    #[test]
+    fn a_stack_folds_into_one_row_where_its_newest_pr_was() {
+        let app = app_with(vec![stack_group()]);
+        assert_eq!(
+            app.rows(),
+            [Row::Header(0), Row::Stack(0, 0), Row::Pr(0, 1)]
+        );
+    }
+
+    #[test]
+    fn enter_unfolds_a_stack_bottom_first_and_space_folds_it_from_a_member() {
+        let mut app = app_with(vec![stack_group()]);
+        app.list_state.select(Some(1));
+        assert!(
+            app.handle_key(key(KeyCode::Enter)).is_none(),
+            "Enter on a stack opens no PR"
+        );
+        assert_eq!(
+            app.rows(),
+            [
+                Row::Header(0),
+                Row::Stack(0, 0),
+                Row::Pr(0, 3),
+                Row::Pr(0, 0),
+                Row::Pr(0, 2),
+                Row::Pr(0, 1)
+            ]
+        );
+        app.list_state.select(Some(3));
+        app.handle_key(key(KeyCode::Char(' ')));
+        assert!(
+            !app.groups[0].collapsed,
+            "Space folds the stack, not the group"
+        );
+        assert_eq!(app.selected_row(), Some(Row::Stack(0, 0)));
+        assert_eq!(app.rows().len(), 3);
+    }
+
+    #[test]
+    fn a_stack_stays_unfolded_across_a_refresh() {
+        let mut app = app_with(vec![stack_group()]);
+        app.list_state.select(Some(1));
+        app.handle_key(key(KeyCode::Enter));
+        let configs = [GroupConfig {
+            title: "A".to_string(),
+            query: String::new(),
+            collapsed: false,
+        }];
+        let generation = app.start_inbox(&configs);
+        app.set_group(generation, 0, Ok(stack_group()), Utc::now());
+        assert_eq!(app.rows().len(), 6);
+    }
+
+    #[test]
+    fn a_filter_shows_a_match_inside_a_folded_stack() {
+        let mut app = app_with(vec![stack_group()]);
+        app.inbox_filter = "PR 3".to_string();
+        assert_eq!(app.rows(), [Row::Header(0), Row::Pr(0, 2)]);
+        app.inbox_filter = "PR".to_string();
+        assert_eq!(app.rows().len(), 6, "a filter unfolds the stack");
+    }
+
+    #[test]
+    fn a_lone_member_in_a_group_stays_a_plain_row() {
+        let mut app = app_with(vec![
+            stack_group(),
+            Group {
+                title: "B".to_string(),
+                total: 1,
+                prs: vec![stacked(3, "b", "c")],
+                collapsed: false,
+            },
+        ]);
+        assert_eq!(app.rows()[3..], [Row::Header(1), Row::Pr(1, 0)]);
+        let index = app.stack_index();
+        assert_eq!(
+            index.place("acme/app", 3).map(|place| place.position),
+            Some(3)
+        );
+        app.list_state.select(Some(4));
+        app.handle_key(key(KeyCode::Char(' ')));
+        assert!(
+            app.groups[1].collapsed,
+            "with no stack row, Space folds the group"
+        );
+    }
+
+    #[test]
+    fn open_prs_are_fetched_once_for_a_repo_with_a_stacked_row() {
+        let mut app = app_with(vec![Group {
+            title: "A".to_string(),
+            total: 2,
+            prs: vec![
+                pr(1),
+                PrSummary {
+                    repo: "acme/lib".to_string(),
+                    ..stacked(2, "feature/x", "y")
+                },
+            ],
+            collapsed: false,
+        }]);
+        assert_eq!(app.take_links_requests(), ["acme/lib"]);
+        assert!(
+            app.take_links_requests().is_empty(),
+            "a fetch in flight goes once"
+        );
+    }
+
+    #[test]
+    fn open_prs_link_a_member_the_inbox_did_not_load() {
+        // Only 1 and 3 are in the inbox; 2, between them, comes from the repo's open PRs.
+        let mut app = app_with(vec![Group {
+            title: "A".to_string(),
+            total: 2,
+            prs: vec![stacked(3, "b", "c"), stacked(1, "main", "a")],
+            collapsed: false,
+        }]);
+        assert_eq!(app.rows(), [Row::Header(0), Row::Pr(0, 0), Row::Pr(0, 1)]);
+        let links = [
+            stacked(1, "main", "a"),
+            stacked(2, "a", "b"),
+            stacked(3, "b", "c"),
+        ]
+        .iter()
+        .map(Link::from_summary)
+        .collect();
+        app.set_open_links("acme/app".to_string(), Ok(links));
+        assert_eq!(app.rows(), [Row::Header(0), Row::Stack(0, 0)]);
+        let index = app.stack_index();
+        assert_eq!(
+            index.place("acme/app", 3).map(|place| place.position),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn a_refresh_asks_again_and_keeps_the_last_links_meanwhile() {
+        let mut app = app_with(vec![stack_group()]);
+        let complete = |app: &App| app.stack_index().stacks.iter().all(|found| found.complete);
+        assert!(!complete(&app), "rows alone may miss a PR in the middle");
+        assert_eq!(app.take_links_requests(), ["acme/app"]);
+        let links = stack_group().prs.iter().map(Link::from_summary).collect();
+        app.set_open_links("acme/app".to_string(), Ok(links));
+        assert!(complete(&app));
+        let configs = [GroupConfig {
+            title: "A".to_string(),
+            query: String::new(),
+            collapsed: false,
+        }];
+        let generation = app.start_inbox(&configs);
+        app.set_group(generation, 0, Ok(stack_group()), Utc::now());
+        assert!(complete(&app), "the last answer stays until the next one");
+        assert_eq!(
+            app.take_links_requests(),
+            ["acme/app"],
+            "a refresh asks again"
+        );
+        app.set_open_links("acme/app".to_string(), Err("timeout".to_string()));
+        assert!(complete(&app), "a failed refresh keeps the last answer");
+    }
+
+    #[test]
+    fn a_failed_fetch_of_open_prs_says_why() {
+        let mut app = app_with(vec![stack_group()]);
+        app.set_open_links("acme/app".to_string(), Err("rate limited".to_string()));
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|error| error.contains("rate limited"))
+        );
+        assert_eq!(
+            app.rows().len(),
+            3,
+            "the stack still links from the inbox rows"
+        );
+    }
+
+    #[test]
+    fn braces_open_the_pr_below_or_above_in_the_stack() {
+        let mut app = app_with(vec![stack_group()]);
+        let pr = |number| PrRef {
+            repo: "acme/app".to_string(),
+            number,
+        };
+        app.open_pr(pr(2), None);
+        let Screen::Detail(view) = &app.screen else {
+            panic!("expected detail screen")
+        };
+        assert_eq!(
+            view.stack.as_ref().map(|found| found.stack.members.len()),
+            Some(3)
+        );
+        let above = app.handle_key(key(KeyCode::Char('}')));
+        assert!(matches!(above, Some(Action::FetchDetail(opened)) if opened == pr(3)));
+        app.handle_key(key(KeyCode::Char('{')));
+        let below = app.handle_key(key(KeyCode::Char('{')));
+        assert!(matches!(below, Some(Action::FetchDetail(opened)) if opened == pr(1)));
+        assert!(app.handle_key(key(KeyCode::Char('{'))).is_none());
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|error| error.contains("below"))
+        );
     }
 
     #[test]
@@ -5371,7 +5889,7 @@ mod tests {
                 .into_iter()
                 .filter_map(|row| match row {
                     Row::Pr(_, index) => Some(app.groups[0].prs[index].number),
-                    Row::Header(_) => None,
+                    Row::Header(_) | Row::Stack(..) => None,
                 })
                 .collect::<Vec<_>>()
         };

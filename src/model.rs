@@ -117,6 +117,14 @@ pub struct PrSummary {
     /// GitHub's mergeStateStatus, which a change to the base branch moves without
     /// moving `updated_at`.
     pub merge_state: String,
+    /// The branch this PR merges into.
+    pub base: String,
+    /// This PR's own branch. A PR whose base is another PR's head sits on top of it.
+    pub head: String,
+    /// The head lives in a fork, so its branch name can't link it to a PR here.
+    pub cross_repo: bool,
+    /// The repo's default branch. A PR based on any other branch may sit in a stack.
+    pub default_branch: String,
 }
 
 impl PrSummary {
@@ -488,6 +496,12 @@ struct Name {
 #[serde(rename_all = "camelCase")]
 struct RepoRef {
     name_with_owner: String,
+    default_branch_ref: Option<RawBranch>,
+}
+
+#[derive(Deserialize)]
+struct RawBranch {
+    name: String,
 }
 
 #[derive(Deserialize)]
@@ -630,6 +644,12 @@ struct RawRow {
     #[serde(default)]
     head_ref_oid: String,
     #[serde(default)]
+    base_ref_name: String,
+    #[serde(default)]
+    head_ref_name: String,
+    #[serde(default)]
+    is_cross_repository: bool,
+    #[serde(default)]
     viewer_did_author: bool,
     mergeable: Option<String>,
     merge_state_status: Option<String>,
@@ -670,8 +690,6 @@ struct RawDetail {
     commit_count: RawCount,
     body: String,
     created_at: DateTime<Utc>,
-    base_ref_name: String,
-    head_ref_name: String,
     labels: Nodes<RawLabel>,
     assignees: Nodes<Login>,
     review_requests: Nodes<RawRequest>,
@@ -1035,11 +1053,11 @@ pub fn parse_detail(pull_request: &Value) -> Result<PrDetail> {
         additions: raw.row.additions,
         deletions: raw.row.deletions,
         changed_files: raw.row.changed_files,
+        base: raw.row.base_ref_name.clone(),
+        head: raw.row.head_ref_name.clone(),
         summary: summary_from(raw.row),
         body: raw.body,
         created_at: raw.created_at,
-        base: raw.base_ref_name,
-        head: raw.head_ref_name,
         labels: labels
             .map(|label| Label {
                 name: label.name,
@@ -1151,6 +1169,11 @@ fn summary_from(raw: RawRow) -> PrSummary {
         turn,
         conflicts,
         merge_state: raw.merge_state_status.clone().unwrap_or_default(),
+        default_branch: raw
+            .repository
+            .default_branch_ref
+            .map(|branch| branch.name)
+            .unwrap_or_default(),
         repo: raw.repository.name_with_owner,
         number: raw.number,
         title: raw.title,
@@ -1165,6 +1188,9 @@ fn summary_from(raw: RawRow) -> PrSummary {
         deletions: raw.deletions,
         changed_files: raw.changed_files,
         head_oid: raw.head_ref_oid,
+        base: raw.base_ref_name,
+        head: raw.head_ref_name,
+        cross_repo: raw.is_cross_repository,
     }
 }
 
@@ -1216,7 +1242,7 @@ fn login_or_ghost(author: Option<Login>) -> String {
 
 /// GitHub's web inbox shows "Awaiting approval" for PRs whose API decision is null,
 /// so a null decision maps to the same state.
-fn review_state(decision: Option<&str>) -> ReviewState {
+pub fn review_state(decision: Option<&str>) -> ReviewState {
     match decision {
         Some("APPROVED") => ReviewState::Approved,
         Some("CHANGES_REQUESTED") => ReviewState::ChangesRequested,

@@ -69,6 +69,10 @@ pub enum RowAction {
     ChecksTab,
     /// Show only the unresolved review threads.
     UnresolvedComments,
+    /// Open this PR of the stack.
+    OpenPr(u64),
+    /// List every PR of the stack, or only the ones around this PR again.
+    FullStack,
 }
 
 impl TextRow {

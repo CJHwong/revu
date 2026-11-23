@@ -16,8 +16,8 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 | Key | Action |
 |---|---|
 | `j` / `k`, `g` / `G` | Move, top, bottom |
-| `Enter`, `l` | Open the pull request, or fold a group header |
-| `Space` | Fold the current group |
+| `Enter`, `l` | Open the pull request, or fold a group header or a stack |
+| `Space` | Fold the current stack, else the current group |
 | `Tab` / `Shift+Tab` | Next or previous group |
 | `/` | Filter: type part of a repo, a `#number`, an author or a title, and the rows narrow as you type. Each group counts its matching rows. `Tab` completes a repo name or a `repo#number` from the inbox. `Enter` keeps the filter; `Esc` clears it. |
 | `Esc` | Clear the filter |
@@ -38,6 +38,7 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 | `R` | Review: `Tab` picks Comment, Approve or Request changes. `ctrl+s` asks to confirm and `y` sends. Your pending line comments go with it. Request changes needs a comment; Comment needs a comment or line comments. Only Comment applies on your own PR, as GitHub requires, and on a merged or closed one. |
 | `a` | Hand off to a coding agent. A box shows what revu attaches: the PR, its base and head, your clone, and in select lines (`S`) the marked lines and the thread on the cursor's line. Write what you want; `Tab` completes a word from the diff's words and file names. Then `ctrl+s` lists where it goes. See [Hand a spot to a coding agent](how-to.md#hand-a-spot-to-a-coding-agent). |
 | `X` | Discard your pending review and every line comment in it, after a `y`. |
+| `{` / `}` | Open the pull request below or above this one in its stack. See [Stacked pull requests](how-it-works.md#stacked-pull-requests). |
 | `M` | Merge: the methods the repo allows, as on GitHub, starting on your usual one. `Enter` picks one and `y` sends it. When GitHub blocks the merge, a method turns on auto-merge instead, where the repo allows it; an admin can tick Bypass requirements to merge at once. When auto-merge is on, `M` turns it off. While GitHub is still checking the PR, `r` fetches it again. |
 | `o` | Open in the browser. On a file (Files changed, select lines, a full file, a repo match), `o` asks: Editor or GitHub, starting on Editor when it can open the file. GitHub opens the PR's diff at the file, in select lines at the cursor's line, and a repo match at its line at the PR head. Editor opens the file at the PR's head, at the cursor's line, the match's line, or the file's first change, in `$VISUAL` or `$EDITOR` (else `vi`) or the [`editor`](configuration.md#editor) you set. The first time, revu asks which editor to use and remembers it; Settings (`,`) changes it. A terminal editor takes over until you quit it; VS Code, Zed, Sublime Text and the JetBrains IDEs open the clone beside revu. When your clone has the PR's head checked out, the file opens there. When the clone is on another branch, revu checks out the head in a worktree of the clone, under `~/.cache/revu/worktrees/<owner>/<repo>/<number>`, and opens the file there; the clone stays on its branch. The menu says which. See [Edit at the PR's head](how-it-works.md#edit-at-the-prs-head). |
 | `d` | Run the `open_diff` command |
@@ -46,9 +47,9 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 
 | Key | Action |
 |---|---|
-| `j` / `k` | Next or previous comment, review thread or folded block when its top is on screen. Otherwise a third of a screen, so a long comment is read through, not skipped. The cursor never stops on an empty line. |
-| `Enter` | Open or close the card, review thread or `<details>` block under the cursor. On the merge box, `Enter` on the Checks row opens the Checks tab, and on the Comments row shows only unresolved threads. |
-| `]` / `[` | Next or previous card or folded block |
+| `j` / `k` | Next or previous comment, review thread, folded block or pull request of the Stack card when its top is on screen. Otherwise a third of a screen, so a long comment is read through, not skipped. The cursor never stops on an empty line. |
+| `Enter` | Open or close the card, review thread or `<details>` block under the cursor. On the merge box, `Enter` on the Checks row opens the Checks tab, and on the Comments row shows only unresolved threads. On the Stack card, `Enter` on a pull request opens it, and on `… 3 more` lists every pull request of the stack. |
+| `]` / `[` | Next or previous card, folded block or pull request of the Stack card |
 | `f` / `F` / `n` | Filter the comments (All, Unresolved, Mine), flip oldest or newest first, hide bots. Mine shows only your own words, with the threads you replied in open. |
 | `e` | Labels: type to filter, `↑`/`↓` move, `Space` ticks, `Enter` applies the changes to GitHub. |
 | `i` | Images: every image and mermaid diagram in the pull request, the description first, then the comments in the list's order. A click on an `[image: ...]` line or a mermaid block, or `Enter` with the cursor on it, opens the gallery at that image. Otherwise `i` starts at the first image on screen. See [Images](#images). |
