@@ -136,6 +136,8 @@ Reviews and comments are multi-line text boxes.
 
 Copying uses OSC 52 and `pbcopy`. Inside tmux, OSC 52 needs `set -g set-clipboard on`.
 
+One-line boxes, such as `ctrl+l`, `/` and the label filter, take `←` / `→` to move, `Home` / `End` to go to either end, and `Backspace` / `Delete` on either side of the cursor. `Tab` completes only with the cursor at the end.
+
 ## Mouse
 
 A click works like the keys on what it hits: it opens a pull request in the inbox, switches a tab, selects a file, commit or check, folds a folder, opens or closes a card, thread or folded block on the Overview, opens the gallery at an image, or a review thread in select lines.
