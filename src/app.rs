@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use crate::editor::{Editor, Outcome};
 use crate::file_tree::{self, FileRow};
 use crate::github::RepoLabel;
+use crate::line_cursor::LineCursor;
 use crate::line_diff::{DiffRow, RowKind};
 use crate::markdown::TextRow;
 use crate::repo::{GrepHit, LocalRepo, MAX_GREP_HITS};
@@ -2121,6 +2122,7 @@ pub struct LabelMenu {
     pub chosen: HashSet<String>,
     /// Typed text; only labels holding it show.
     pub filter: String,
+    pub filter_cursor: LineCursor,
     /// The cursor, among the shown labels.
     pub selected: usize,
     /// Esc was pressed once over ticks not applied yet; a second esc drops them.
@@ -2757,12 +2759,14 @@ pub struct Prompt {
     pub error: Option<String>,
     /// Words that Tab completes the text to, the most likely first.
     pub words: Vec<String>,
+    pub cursor: LineCursor,
 }
 
 impl Prompt {
-    /// The rest of the first word that starts with the typed text, ignoring case.
+    /// The rest of the first word that starts with the typed text, ignoring case. Only
+    /// with the cursor at the end, where the completion would go.
     pub fn suggestion(&self) -> Option<String> {
-        if self.text.contains(char::is_whitespace) {
+        if self.text.contains(char::is_whitespace) || !self.cursor.at_end() {
             return None;
         }
         complete(&self.words, &self.text)
@@ -3229,6 +3233,7 @@ impl App {
             text: text.to_string(),
             error: None,
             words: Vec::new(),
+            cursor: LineCursor::default(),
         });
     }
 
@@ -3238,6 +3243,7 @@ impl App {
             text: text.to_string(),
             error: Some(error),
             words: Vec::new(),
+            cursor: LineCursor::default(),
         });
     }
 
@@ -4003,6 +4009,7 @@ impl App {
         if is_open_link_shortcut(&key) {
             self.prompt = Some(Prompt {
                 words: self.pr_words(&self.clone_repos),
+                cursor: LineCursor::default(),
                 ..Prompt::default()
             });
             return self.clone_repos_request();
@@ -4182,12 +4189,12 @@ impl App {
             return;
         }
         if let Some(menu) = self.label_menu.as_mut() {
-            menu.filter.push_str(text.trim());
+            menu.filter_cursor.insert(&mut menu.filter, text.trim());
             menu.selected = 0;
             return;
         }
         let prompt = self.prompt.get_or_insert_with(Prompt::default);
-        prompt.text.push_str(text.trim());
+        prompt.cursor.insert(&mut prompt.text, text.trim());
         prompt.error = None;
     }
 
@@ -4198,6 +4205,7 @@ impl App {
             // Escaping a clone question is the same as answering no.
             KeyCode::Esc if matches!(prompt.kind, PromptKind::ConfirmClone { .. }) => {
                 prompt.text.clear();
+                prompt.cursor = LineCursor::default();
                 return self.submit_prompt();
             }
             // On first run, no folder means no diff; from the settings it changes nothing.
@@ -4230,21 +4238,20 @@ impl App {
                     && !prompt.text.trim().eq_ignore_ascii_case("y") =>
             {
                 prompt.text.clear();
+                prompt.cursor = LineCursor::default();
                 prompt.error =
                     Some("merge not sent: type y, then enter, to merge; esc cancels".to_string());
             }
             KeyCode::Esc => self.prompt = None,
-            KeyCode::Backspace => {
-                prompt.text.pop();
-            }
             KeyCode::Tab => {
                 if let Some(rest) = prompt.suggestion() {
                     prompt.text.push_str(&rest);
                 }
             }
-            KeyCode::Char(character) => prompt.text.push(character),
             KeyCode::Enter => return self.submit_prompt(),
-            _ => {}
+            _ => {
+                prompt.cursor.key(&mut prompt.text, key);
+            }
         }
         // The filter changes the rows; the cursor stays on its PR while it shows.
         self.reselect(selected);
@@ -4586,6 +4593,7 @@ impl App {
                     text: first.clone(),
                     error: None,
                     words: names,
+                    cursor: LineCursor::default(),
                 });
             }
         }
@@ -4705,6 +4713,7 @@ impl App {
             chosen: current.clone(),
             current,
             filter: String::new(),
+            filter_cursor: LineCursor::default(),
             selected: 0,
             cancel_asked: false,
         });
@@ -4737,19 +4746,17 @@ impl App {
             KeyCode::Down => menu.selected = (menu.selected + 1).min(shown.saturating_sub(1)),
             KeyCode::Up => menu.selected = menu.selected.saturating_sub(1),
             KeyCode::Char(' ') => menu.toggle(),
-            KeyCode::Backspace => {
-                menu.filter.pop();
-                menu.selected = 0;
-            }
-            KeyCode::Char(character) => {
-                menu.filter.push(character);
-                menu.selected = 0;
-            }
             KeyCode::Enter => {
                 let menu = self.label_menu.take()?;
                 return menu.change();
             }
-            _ => {}
+            _ => {
+                let before = menu.filter.clone();
+                menu.filter_cursor.key(&mut menu.filter, key);
+                if menu.filter != before {
+                    menu.selected = 0;
+                }
+            }
         }
         None
     }
@@ -4989,6 +4996,7 @@ impl App {
                     kind: PromptKind::FilterInbox,
                     text: self.inbox_filter.clone(),
                     words: self.pr_words(&[]),
+                    cursor: LineCursor::default(),
                     ..Prompt::default()
                 });
             }
@@ -5079,6 +5087,7 @@ impl App {
                 self.prompt = Some(Prompt {
                     kind: PromptKind::FindInDiff,
                     words: view.find_words.clone().unwrap_or_default(),
+                    cursor: LineCursor::default(),
                     ..Prompt::default()
                 });
                 return view.words_request();
@@ -7100,6 +7109,26 @@ mod tests {
     }
 
     #[test]
+    fn arrows_move_in_the_label_filter() {
+        let (mut app, pr) = files_tab(Vec::new());
+        app.handle_key(key(KeyCode::Char('1')));
+        app.handle_key(key(KeyCode::Char('e')));
+        let label = |name: &str| RepoLabel {
+            id: name.to_string(),
+            name: name.to_string(),
+            color: "ededed".to_string(),
+        };
+        app.set_repo_labels(&pr, Ok(vec![label("docs"), label("dx")]));
+        type_text(&mut app, "dcs");
+        app.handle_key(key(KeyCode::Left));
+        app.handle_key(key(KeyCode::Left));
+        type_text(&mut app, "o");
+        let menu = app.label_menu.as_ref().unwrap();
+        assert_eq!(menu.filter, "docs");
+        assert_eq!(menu.shown().len(), 1);
+    }
+
+    #[test]
     fn y_copies_a_file_path_or_a_folder_path() {
         let (mut app, _) = files_tab(vec![file("src/a.rs", ViewedState::Unviewed)]);
         view_mut(&mut app).tree_view = false;
@@ -8653,6 +8682,51 @@ mod tests {
         for character in text.chars() {
             app.handle_key(key(KeyCode::Char(character)));
         }
+    }
+
+    #[test]
+    fn arrows_move_in_a_prompt_and_typing_goes_at_the_cursor() {
+        let mut app = app_with(vec![group("A", &[1], false)]);
+        app.ask(PromptKind::OpenLink, "");
+        type_text(&mut app, "acme/ap#12");
+        for _ in 0..3 {
+            app.handle_key(key(KeyCode::Left));
+        }
+        type_text(&mut app, "p");
+        assert_eq!(app.prompt.as_ref().unwrap().text, "acme/app#12");
+        app.handle_key(key(KeyCode::Home));
+        app.handle_key(key(KeyCode::Delete));
+        app.handle_key(key(KeyCode::Right));
+        app.handle_key(key(KeyCode::Backspace));
+        assert_eq!(app.prompt.as_ref().unwrap().text, "me/app#12");
+        app.handle_key(key(KeyCode::Left));
+        app.handle_key(key(KeyCode::Left));
+        type_text(&mut app, "a");
+        app.handle_key(key(KeyCode::End));
+        type_text(&mut app, "3");
+        let prompt = app.prompt.as_ref().unwrap();
+        assert_eq!(prompt.text, "ame/app#123");
+        assert_eq!(
+            prompt.cursor.byte(&prompt.text),
+            prompt.text.len(),
+            "end puts the cursor last"
+        );
+    }
+
+    #[test]
+    fn tab_completes_only_with_the_cursor_at_the_end() {
+        let mut prompt = Prompt {
+            text: "ac".to_string(),
+            words: vec!["acme/app".to_string()],
+            ..Prompt::default()
+        };
+        assert_eq!(prompt.suggestion().as_deref(), Some("me/app"));
+        prompt.cursor.key(&mut prompt.text, KeyCode::Left);
+        assert_eq!(
+            prompt.suggestion(),
+            None,
+            "a completion would land after the cursor"
+        );
     }
 
     #[test]

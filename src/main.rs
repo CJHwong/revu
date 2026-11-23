@@ -9,6 +9,7 @@ mod gallery;
 mod github;
 mod handoff;
 mod highlight;
+mod line_cursor;
 mod line_diff;
 mod markdown;
 mod model;

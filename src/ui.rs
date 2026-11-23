@@ -3518,10 +3518,12 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
         width,
         height: height.min(area.height.saturating_sub(2)),
     };
+    let (before, after) = prompt.text.split_at(prompt.cursor.byte(&prompt.text));
     let mut lines = vec![Line::from(vec![
         paint.span("> ", theme.accent),
-        Span::from(prompt.text.clone()),
+        Span::from(before.to_string()),
         paint.span("▏", theme.accent),
+        Span::from(after.to_string()),
         paint.span(prompt.suggestion().unwrap_or_default(), theme.muted),
     ])];
     lines.extend(
@@ -3745,10 +3747,12 @@ fn render_label_menu(frame: &mut Frame, menu: &LabelMenu, paint: Paint) {
         width,
         height,
     };
+    let (before, after) = menu.filter.split_at(menu.filter_cursor.byte(&menu.filter));
     let mut lines = vec![Line::from(vec![
         paint.span("> ", theme.accent),
-        Span::from(menu.filter.clone()),
+        Span::from(before.to_string()),
         paint.span("▏", theme.accent),
+        Span::from(after.to_string()),
     ])];
     match &menu.labels {
         None => lines.push(Line::from(
