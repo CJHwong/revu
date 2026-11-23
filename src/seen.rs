@@ -113,6 +113,10 @@ mod tests {
             turn: None,
             conflicts: false,
             merge_state: String::new(),
+            base: "main".into(),
+            head: "feature".into(),
+            cross_repo: false,
+            default_branch: "main".to_string(),
         }
     }
 

@@ -9,6 +9,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::markdown::{self, Block, FoldId, Folds, RowAction, TextRow, fold_key, line_width};
 use crate::model::{Comment, HunkLine, Lifecycle, PrActivity, PrDetail, ReviewState, ThreadLine};
+use crate::stack::{self, RepoStack, Slot};
 use crate::theme::{PrState, Theme};
 use crate::ui::relative_time;
 
@@ -88,6 +89,10 @@ pub struct Context<'a> {
     pub comments: CommentView,
     pub theme: &'a Theme,
     pub now: DateTime<Utc>,
+    /// The stack this PR sits in.
+    pub stack: Option<&'a RepoStack>,
+    /// The Stack card lists every PR, not only the ones around this one.
+    pub stack_full: bool,
 }
 
 impl Context<'_> {
@@ -108,6 +113,10 @@ pub fn build(context: &Context, width: usize) -> Vec<TextRow> {
     folds.enter("description");
     let mut rows = merge_box(context, width);
     rows.push(TextRow::blank());
+    if let Some(found) = context.stack {
+        rows.extend(stack_card(context, found, width));
+        rows.push(TextRow::blank());
+    }
     rows.extend(description_card(context, width, &mut folds));
     rows.push(TextRow::blank());
     rows.push(TextRow::plain(comments_header(context)));
@@ -189,6 +198,94 @@ fn card(
         border,
     )));
     rows
+}
+
+/// The stack around this PR: the branch it starts on, the bottom and the top, and the
+/// PRs next to this one. Enter on a PR opens it; Enter on a gap lists every PR.
+fn stack_card(context: &Context, found: &RepoStack, width: usize) -> Vec<TextRow> {
+    let theme = context.theme;
+    let members = &found.stack.members;
+    let number = context.detail.summary.number;
+    let current = found
+        .stack
+        .position(number)
+        .map_or(0, |position| position - 1);
+    let length = members.len();
+    let mut title = vec![
+        context.bold("Stack", theme.heading),
+        context.span(format!(" {}/{length}", current + 1), theme.accent),
+    ];
+    if !found.complete {
+        title.push(context.span("  linking...", theme.warning));
+    }
+    let inner = width.saturating_sub(4);
+    let number_width = members
+        .iter()
+        .map(|member| member.number.to_string().len())
+        .max()
+        .unwrap_or(1);
+    let position_width = length.to_string().len();
+    let mut content = vec![TextRow::plain(Line::from(
+        context.span(format!("  on {}", found.stack.root), theme.muted),
+    ))];
+    for slot in stack::window(length, current + 1, context.stack_full) {
+        let row = match slot {
+            Slot::Gap(count) => TextRow {
+                action: Some(RowAction::FullStack),
+                anchor: true,
+                ..TextRow::plain(Line::from(
+                    context.span(format!("  … {count} more, enter lists all"), theme.fold),
+                ))
+            },
+            Slot::Member(index) => {
+                let member = &members[index];
+                let this = index == current;
+                let (state, color) = match (member.is_draft, member.review) {
+                    (true, _) => ("draft", theme.muted),
+                    (false, ReviewState::Approved) => ("approved", theme.success),
+                    (false, ReviewState::ChangesRequested) => ("changes requested", theme.danger),
+                    (false, ReviewState::Awaiting) => ("open", theme.muted),
+                };
+                let head = format!(
+                    "{} {:>position_width$}/{length} #{:<number_width$} ",
+                    if this { "▶" } else { " " },
+                    index + 1,
+                    member.number,
+                );
+                let room = inner.saturating_sub(head.width() + state.width() + 2);
+                let title = markdown::truncate(&member.title, room);
+                let padding = room.saturating_sub(title.width());
+                let title_span = if this {
+                    context.bold(title, theme.foreground)
+                } else {
+                    context.span(title, theme.foreground)
+                };
+                let row = TextRow::plain(Line::from(vec![
+                    context.span(head, if this { theme.accent } else { theme.muted }),
+                    title_span,
+                    Span::raw(" ".repeat(padding + 2)),
+                    context.span(state, color),
+                ]));
+                // j, k, ] and [ stop on each PR they can open.
+                TextRow {
+                    action: (!this).then_some(RowAction::OpenPr(member.number)),
+                    anchor: !this,
+                    ..row
+                }
+            }
+        };
+        content.push(row);
+    }
+    if context.stack_full && length > stack::window(length, current + 1, false).len() {
+        content.push(TextRow {
+            action: Some(RowAction::FullStack),
+            anchor: true,
+            ..TextRow::plain(Line::from(
+                context.span("  enter folds the list", theme.fold),
+            ))
+        });
+    }
+    card(title, content, width, theme, None, &HashSet::new())
 }
 
 /// GitHub's merge box: whether the PR can merge, then checks, review threads and
@@ -773,6 +870,102 @@ mod tests {
     use crate::model::tests::{sample_activity, sample_detail};
     use crate::theme;
 
+    /// The Stack card of a 10-PR stack with the sample PR at `position`.
+    fn stack_rows(position: usize, full: bool) -> Vec<TextRow> {
+        let theme = theme::by_name("dracula").unwrap();
+        let detail = sample_detail();
+        let members = (1..=10)
+            .map(|place| crate::stack::Link {
+                number: if place == position {
+                    detail.summary.number
+                } else {
+                    100 + place as u64
+                },
+                title: format!("step {place}"),
+                base: String::new(),
+                head: String::new(),
+                cross_repo: false,
+                is_draft: place == 10,
+                review: ReviewState::Awaiting,
+            })
+            .collect();
+        let found = RepoStack {
+            repo: "acme/app".to_string(),
+            stack: crate::stack::Stack {
+                root: "feature/x".to_string(),
+                members,
+            },
+            complete: true,
+        };
+        let toggled = HashSet::new();
+        let context = Context {
+            detail: &detail,
+            activity: None,
+            toggled: &toggled,
+            comments: CommentView::default(),
+            theme: &theme,
+            now: detail.created_at,
+            stack: Some(&found),
+            stack_full: full,
+        };
+        stack_card(&context, &found, 60)
+    }
+
+    fn texts(rows: &[TextRow]) -> Vec<String> {
+        rows.iter()
+            .map(|row| {
+                row.line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_stack_card_keeps_the_ends_and_the_neighbors_of_this_pr() {
+        for (position, gaps) in [
+            (1, vec!["6 more"]),
+            (5, vec!["1 more", "2 more"]),
+            (10, vec!["6 more"]),
+        ] {
+            let text = texts(&stack_rows(position, false)).join("\n");
+            assert!(text.contains(&format!("Stack {position}/10")), "{text}");
+            assert!(text.contains("on feature/x"));
+            assert!(text.contains(&format!("▶ {position:>2}/10")), "{text}");
+            assert!(
+                text.contains("step 1 ") && text.contains("step 10"),
+                "{text}"
+            );
+            for gap in gaps {
+                assert!(text.contains(gap), "{position}: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_stack_card_opens_another_pr_and_lists_all_on_a_gap() {
+        let rows = stack_rows(5, false);
+        let actions: Vec<_> = rows.iter().filter_map(|row| row.action).collect();
+        assert!(actions.contains(&RowAction::OpenPr(101)));
+        assert!(actions.contains(&RowAction::FullStack));
+        assert!(
+            !actions.contains(&RowAction::OpenPr(56)),
+            "this PR opens nothing"
+        );
+        let stops = rows.iter().filter(|row| row.anchor).count();
+        assert_eq!(
+            stops,
+            1 + 6 + 2,
+            "the border, each other PR shown and each gap"
+        );
+        let full = texts(&stack_rows(5, true)).join("\n");
+        assert!((1..=10).all(|place| full.contains(&format!("step {place} ")) || place == 10));
+        assert!(full.contains("enter folds the list") && !full.contains("more,"));
+        assert!(full.contains("draft"), "{full}");
+    }
+
     fn rendered(open: &[FoldId]) -> Vec<String> {
         rendered_with(open, CommentView::default())
     }
@@ -784,6 +977,8 @@ mod tests {
         let open: HashSet<FoldId> = open.iter().copied().collect();
         let now = detail.created_at + chrono::Duration::days(3);
         let context = Context {
+            stack: None,
+            stack_full: false,
             detail: &detail,
             activity: Some(&activity),
             toggled: &open,
@@ -822,6 +1017,8 @@ mod tests {
         let activity = Ok(activity);
         let none = HashSet::new();
         let context = |comments| Context {
+            stack: None,
+            stack_full: false,
             detail: &detail,
             activity: Some(&activity),
             toggled: &none,
@@ -931,6 +1128,8 @@ mod tests {
         let activity = Ok(sample_activity());
         let none = HashSet::new();
         let context = Context {
+            stack: None,
+            stack_full: false,
             detail: &detail,
             activity: Some(&activity),
             toggled: &none,
@@ -975,6 +1174,8 @@ mod tests {
         let activity = Ok(sample_activity());
         let toggled = HashSet::new();
         let context = Context {
+            stack: None,
+            stack_full: false,
             detail: &detail,
             activity: Some(&activity),
             toggled: &toggled,
@@ -1000,6 +1201,8 @@ mod tests {
         let now = detail.created_at + chrono::Duration::days(3);
         let shown = |detail: &PrDetail| {
             let context = Context {
+                stack: None,
+                stack_full: false,
                 detail,
                 activity: Some(&activity),
                 toggled: &HashSet::new(),
@@ -1055,6 +1258,8 @@ mod tests {
         let activity = Ok(sample_activity());
         let toggled = HashSet::new();
         let context = Context {
+            stack: None,
+            stack_full: false,
             detail: &detail,
             activity: Some(&activity),
             toggled: &toggled,

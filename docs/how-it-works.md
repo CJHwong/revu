@@ -48,6 +48,14 @@ Under the review state, the second line says who the pull request waits on, and 
 
 In a terminal at least 160 columns wide, the right 40% of the inbox previews the selected pull request: its branches, whether it can merge, the reviewers, the labels and the description. revu fetches the preview once the cursor rests on a row for 300 ms, so moving through the list sends no request per row. It fetches again when the row shows a newer update, a new head commit, other checks or another merge state, such as after a push to the base branch. A failed preview tries again on `r`. Each preview is one GraphQL call, 1 point of the API budget. Opening a pull request whose preview is current shows that preview at once and skips fetching it again; `r` in the pull request fetches everything.
 
+## Stacked pull requests
+
+A pull request sits on top of another when its base branch is the other one's head branch, in the same repository. A chain of two or more is a stack. revu links them by branch name only. A pull request from a fork never counts as the one below another.
+
+In a group, the pull requests of one stack fold into one row, at the place of the newest one. The row shows the branch the stack starts on and the repository. It also counts the group's share of the stack, such as `3 of 10 PRs here`, and how many wait on you. `Enter` or `Space` unfolds the row. The pull requests then show in stack order, bottom first, each with its place, such as `4/10`. A stack stays unfolded across refreshes. A filter unfolds every stack, so a match never hides in a folded one. A pull request alone from its stack in a group keeps a row of its own, with its place.
+
+The Overview of a pull request in a stack has a Stack card under the merge box. It shows the branch the stack starts on, the bottom and the top pull request, and the two on each side of this one, each with its state. The others fold into a line such as `… 3 more`. Links come only from open pull requests, so a merged one leaves the chain.
+
 ## Edit at the PR's head
 
 When `o` opens a file in your editor and the clone is on another branch, revu adds a worktree of the clone at the PR's head, detached, under `$XDG_CACHE_HOME/revu/worktrees/<owner>/<repo>/<number>` (else `~/.cache/revu/...`). Your clone's branch and working tree stay as they are. The worktree shares the clone's objects, so it costs only the checked-out files.
@@ -69,6 +77,10 @@ The top line shows what is left of GitHub's API budget, such as `API 4676 left, 
 GitHub keeps more than one counter and reports them at random. revu shows the lowest one, and never lets the number jump back up before its reset time.
 
 The label menu loads a repository's labels once per pull request you open, not on every keystroke.
+
+To link stacks, revu fetches the open pull requests of a repository: 100 per call, with only their branches, titles and states. Each call costs 1 point, so a repository with 156 open pull requests costs 2, however deep its stacks are. revu asks once per inbox refresh, for each repository with an inbox row based on a branch other than the default one, and for the pull request you open. A repository with more than 1,000 open pull requests links only the newest 1,000.
+
+Until the first answer arrives, a stack row says `linking...` and shows no places, because the loaded rows alone may miss a pull request in the middle. A refresh keeps the last answer until the next one arrives. If a call fails, the footer says why. A stack with no earlier answer then says `linked from the inbox only`.
 
 ## When something fails
 
