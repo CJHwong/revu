@@ -49,6 +49,8 @@ pub enum Action {
     OpenBrowser(String),
     /// Suspend the app and run the editor on a file in the clone.
     OpenEditor(EditorTarget),
+    /// Open the config file in the editor, from Settings.
+    OpenConfig,
     /// The names a line of a file uses, for D to offer.
     LineNames {
         pr: PrRef,
@@ -112,13 +114,13 @@ pub enum Action {
     /// Look for agents to hand the message to, and list them.
     PickAgent {
         message: String,
-        dir: Option<PathBuf>,
+        values: crate::handoff::Values,
     },
     /// Hand the message to the agent picked.
     HandOff {
         target: crate::handoff::Target,
         message: String,
-        dir: Option<PathBuf>,
+        values: crate::handoff::Values,
     },
     /// Send a review, or submit the pending one, with a verdict.
     SubmitReview {
@@ -451,6 +453,9 @@ pub struct DetailView {
     /// The rows the file list showed at the last draw.
     pub file_list_height: usize,
     pub repo: RepoState,
+    /// The clone the lookup found, kept while the PR is fetched into it. The handoff
+    /// offers its agents before `repo` is ready.
+    pub clone_dir: Option<PathBuf>,
     pub renderer: usize,
     pub diff_scroll: u16,
     /// Long diff lines wrap. Off, they run past the edge and `h`/`l` scroll sideways.
@@ -568,6 +573,7 @@ impl DetailView {
             hide_viewed: prefs.hide_viewed,
             viewed_sync: HashMap::new(),
             repo: RepoState::Unknown,
+            clone_dir: None,
             renderer,
             diff_scroll: 0,
             diff_wrap: prefs.diff_wrap,
@@ -2555,8 +2561,9 @@ impl Composer {
         }
     }
 
-    /// What GitHub would refuse, caught before sending.
-    fn check(&self) -> Result<(), String> {
+    /// What GitHub would refuse, caught before sending. `request_optional` is set
+    /// when a configured target takes the context alone.
+    fn check(&self, request_optional: bool) -> Result<(), String> {
         let empty = self.editor.text.trim().is_empty();
         match &self.kind {
             ComposeKind::Review {
@@ -2570,7 +2577,7 @@ impl Composer {
             } if empty => Err("write a comment, or add line comments first".to_string()),
             ComposeKind::LineComment(_) if empty => Err("write the comment first".to_string()),
             ComposeKind::Reply { .. } if empty => Err("write the reply first".to_string()),
-            ComposeKind::Handoff(_) if empty => {
+            ComposeKind::Handoff(_) if empty && !request_optional => {
                 Err("write what you want the agent to do".to_string())
             }
             _ => Ok(()),
@@ -2642,7 +2649,7 @@ impl Composer {
             },
             ComposeKind::Handoff(context) => Action::PickAgent {
                 message: crate::handoff::message(context, &body),
-                dir: context.dir.clone(),
+                values: context.values.clone(),
             },
         }
     }
@@ -2654,7 +2661,7 @@ pub struct AgentMenu {
     pub targets: Vec<crate::handoff::Target>,
     pub selected: usize,
     pub message: String,
-    pub dir: Option<PathBuf>,
+    pub values: crate::handoff::Values,
 }
 
 /// A row of the settings panel.
@@ -2837,6 +2844,11 @@ pub struct App {
     pub clone_lookup: Option<(RepoJob, Result<crate::repo::CloneLookup, String>)>,
     /// Renderers whose command is not installed; m skips them.
     pub missing_renderers: HashSet<usize>,
+    /// A configured target takes the context alone, so the request may be empty.
+    pub handoff_request_optional: bool,
+    /// The handoff asked for the clone before the diff did, so look for it now and
+    /// do not offer to clone a missing one.
+    pub handoff_clone_requested: bool,
     /// A warning for the diff footer, such as a renderer that is not installed.
     pub notice: Option<String>,
     /// The notice was drawn; the next key clears it.
@@ -2984,6 +2996,8 @@ impl App {
             next_load: 0,
             clone_lookup: None,
             missing_renderers: HashSet::new(),
+            handoff_request_optional: false,
+            handoff_clone_requested: false,
             notice: None,
             notice_seen: false,
             gh_problem: None,
@@ -3080,8 +3094,14 @@ impl App {
         if self.prompt.is_some() {
             return None;
         }
+        // A handoff needs the clone to offer the agents that run in it, and it may
+        // never visit the tabs that ask for a diff.
+        let wanted = self.handoff_clone_requested;
         let view = self.open_view()?;
-        if !matches!(view.tab, Tab::Files | Tab::Commits) || view.repo != RepoState::Unknown {
+        if view.repo != RepoState::Unknown {
+            return None;
+        }
+        if !matches!(view.tab, Tab::Files | Tab::Commits) && !wanted {
             return None;
         }
         let detail = view.loaded()?;
@@ -3123,6 +3143,23 @@ impl App {
     pub fn set_repo_state(&mut self, state: RepoState) {
         if let Some(view) = self.open_view() {
             view.repo = state;
+        }
+    }
+
+    /// Keeps the clone the lookup found, so a handoff can reach it before the fetch
+    /// that fills `repo` completes. An open handoff box points at it too.
+    pub fn set_clone_dir(&mut self, dir: Option<PathBuf>) {
+        if let Some(view) = self.open_view() {
+            view.clone_dir = dir.clone();
+        }
+        let Some(dir) = dir else {
+            return;
+        };
+        let Some(composer) = self.composer.as_mut() else {
+            return;
+        };
+        if let ComposeKind::Handoff(context) = &mut composer.kind {
+            crate::handoff::retarget_clone(context, &dir);
         }
     }
 
@@ -4020,7 +4057,7 @@ impl App {
         }
     }
 
-    /// The settings panel: j/k move, Enter edits the row, esc closes.
+    /// The settings panel: j/k move, Enter edits the row, e opens the config, esc closes.
     fn settings_key(&mut self, key: KeyCode) -> Option<Action> {
         let selected = self.settings_menu?;
         let rows = SETTINGS.len();
@@ -4032,6 +4069,10 @@ impl App {
             KeyCode::Enter => {
                 self.settings_menu = None;
                 return self.edit_setting(SETTINGS[selected]);
+            }
+            KeyCode::Char('e') => {
+                self.settings_menu = None;
+                return Some(Action::OpenConfig);
             }
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char(',') => self.settings_menu = None,
             _ => {}
@@ -4344,7 +4385,7 @@ impl App {
             Outcome::Handled => None,
             Outcome::Copy(text) => Some(Action::Copy(text)),
             Outcome::Submit => {
-                match composer.check() {
+                match composer.check(self.handoff_request_optional) {
                     Ok(()) if matches!(composer.kind, ComposeKind::Handoff(_)) => {
                         return Some(composer.action());
                     }
@@ -4498,21 +4539,36 @@ impl App {
             None if view.tab == Tab::Files => spot.file = view.selected_row_path(),
             None => {}
         }
-        let checkout = match &view.repo {
-            RepoState::Ready(repo) => Some(repo),
-            _ => None,
+        // The fetch into the clone can still be running. The lookup's folder is
+        // already known, and that is all the agents need.
+        let dir = match &view.repo {
+            RepoState::Ready(repo) => Some(repo.dir.as_path()),
+            _ => view.clone_dir.as_deref(),
         };
-        let elsewhere = checkout
-            .and_then(|repo| crate::repo::checked_out_elsewhere(&repo.dir, &detail.head_oid));
-        let checkout = checkout.map(|repo| crate::handoff::Checkout {
-            dir: &repo.dir,
+        let elsewhere =
+            dir.and_then(|dir| crate::repo::checked_out_elsewhere(dir, &detail.head_oid));
+        let checkout = dir.map(|dir| crate::handoff::Checkout {
+            dir,
             elsewhere: elsewhere.as_deref(),
         });
         let context = crate::handoff::context(&view.pr, detail, checkout, spot);
+        let want_clone = dir.is_none() && view.repo == RepoState::Unknown;
         let mut composer = Composer::handoff(view.pr.clone(), detail, context);
         composer.words = view.find_words.clone().unwrap_or_default();
         self.composer = Some(composer);
+        self.handoff_clone_requested = want_clone;
         Ok(words_request)
+    }
+
+    /// The clone the open PR's diff would use, once the lookup has it.
+    pub fn open_clone_dir(&self) -> Option<PathBuf> {
+        let Screen::Detail(view) = &self.screen else {
+            return None;
+        };
+        match &view.repo {
+            RepoState::Ready(repo) => Some(repo.dir.clone()),
+            _ => view.clone_dir.clone(),
+        }
     }
 
     /// The agent list: j/k move, Enter hands the message off, esc goes back to the box.
@@ -4529,7 +4585,7 @@ impl App {
                 return Some(Action::HandOff {
                     target,
                     message: menu.message,
-                    dir: menu.dir,
+                    values: menu.values,
                 });
             }
             _ => {}
@@ -6494,6 +6550,16 @@ mod tests {
     }
 
     #[test]
+    fn e_in_settings_opens_the_config_file() {
+        let mut app = App::new();
+        app.handle_key(key(KeyCode::Char(',')));
+        let Some(Action::OpenConfig) = app.handle_key(key(KeyCode::Char('e'))) else {
+            panic!("e should open the config");
+        };
+        assert!(app.settings_menu.is_none(), "the panel closes");
+    }
+
+    #[test]
     fn settings_edit_the_workspace_and_check_the_days() {
         let mut app = App::new();
         app.workspace_dirs = vec!["~/Work".to_string(), "~/Side".to_string()];
@@ -6799,6 +6865,19 @@ mod tests {
         KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
     }
 
+    fn handoff_values(dir: Option<PathBuf>) -> crate::handoff::Values {
+        crate::handoff::Values {
+            dir,
+            url: "https://github.com/acme/app/pull/1".to_string(),
+            repo: "acme/app".to_string(),
+            number: "1".to_string(),
+            base: "main".to_string(),
+            head: "topic".to_string(),
+            file: String::new(),
+            lines: String::new(),
+        }
+    }
+
     #[test]
     fn a_handoff_asks_for_text_then_lists_agents_then_sends_the_pick() {
         use crate::handoff::{Context, Target};
@@ -6807,7 +6886,7 @@ mod tests {
         let context = Context {
             summary: vec!["acme/app#1 Title".to_string()],
             text: "I'm reviewing a pull request in revu.\n".to_string(),
-            dir: Some(PathBuf::from("/src/app")),
+            values: handoff_values(Some(PathBuf::from("/src/app"))),
         };
         let pr = PrRef {
             repo: "acme/app".to_string(),
@@ -6827,17 +6906,17 @@ mod tests {
 
         app.handle_key(key(KeyCode::Char('h')));
         app.handle_key(key(KeyCode::Char('i')));
-        let Some(Action::PickAgent { message, dir }) = app.handle_key(ctrl('s')) else {
+        let Some(Action::PickAgent { message, values }) = app.handle_key(ctrl('s')) else {
             panic!("ctrl+s should ask for the agent list");
         };
         assert!(message.ends_with("My request:\nhi\n"));
-        assert_eq!(dir, Some(PathBuf::from("/src/app")));
+        assert_eq!(values.dir, Some(PathBuf::from("/src/app")));
 
         app.agent_menu = Some(AgentMenu {
             targets: vec![Target::NewClaude, Target::Clipboard],
             selected: 0,
             message: message.clone(),
-            dir,
+            values: values.clone(),
         });
         app.handle_key(key(KeyCode::Esc));
         assert!(app.agent_menu.is_none(), "esc closes the list");
@@ -6847,7 +6926,7 @@ mod tests {
             targets: vec![Target::NewClaude, Target::Clipboard],
             selected: 0,
             message,
-            dir: None,
+            values,
         });
         app.handle_key(key(KeyCode::Char('j')));
         let Some(Action::HandOff { target, .. }) = app.handle_key(key(KeyCode::Enter)) else {
@@ -6860,12 +6939,35 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_request_is_allowed_when_a_target_takes_the_context_alone() {
+        let mut app = App::new();
+        app.handoff_request_optional = true;
+        let detail = crate::model::tests::sample_detail();
+        let context = crate::handoff::Context {
+            summary: Vec::new(),
+            text: "I'm reviewing a pull request in revu.\n".to_string(),
+            values: handoff_values(None),
+        };
+        let pr = PrRef {
+            repo: "acme/app".to_string(),
+            number: 1,
+        };
+        app.composer = Some(Composer::handoff(pr, &detail, context));
+
+        let Some(Action::PickAgent { message, .. }) = app.handle_key(ctrl('s')) else {
+            panic!("an empty box should list the targets");
+        };
+        assert!(message.starts_with("I'm reviewing a pull request"));
+        assert!(!message.contains("My request:"));
+    }
+
+    #[test]
     fn tab_in_a_handoff_completes_the_word_before_the_cursor() {
         let detail = crate::model::tests::sample_detail();
         let context = crate::handoff::Context {
             summary: Vec::new(),
             text: String::new(),
-            dir: None,
+            values: handoff_values(None),
         };
         let pr = PrRef {
             repo: "acme/app".to_string(),

@@ -86,6 +86,47 @@ When the saved renderer is not installed, revu shows `word` instead and keeps th
 
 The shell command that `d` runs. `{repo}`, `{number}` and `{url}` are replaced. The default shows `gh pr diff {number} -R {repo}` in delta, or in `less` when delta is not installed.
 
+### handoff_targets
+
+The commands the handoff menu adds, beside the agents revu finds. Press `a`, write a request, then `ctrl+s`.
+
+| Field | Meaning |
+|---|---|
+| `name` | The target's name in the menu |
+| `command` | The shell command. It runs in the clone, or in revu's folder when there is no clone. |
+| `note` | The menu's line under the name |
+| `requires` | The program the target needs. When it is not on PATH, the menu leaves the target out and says how to install it. |
+| `install` | How to install that program, for the warning |
+
+The placeholders, replaced and quoted for the shell:
+
+| Placeholder | Value |
+|---|---|
+| `{url}` | The pull request's URL |
+| `{repo}`, `{number}` | Its repository, as `owner/name`, and its number |
+| `{base}`, `{head}` | Its base and head branches |
+| `{dir}` | The clone, empty when there is none |
+| `{file}` | The file on the cursor, empty when no file is |
+| `{lines}` | The marked lines, such as `src/app.rs:10-14`, empty when none are |
+| `{message}` | Your request, after the context |
+
+Write `{url}`, not `"{url}"`: the values are already quoted.
+
+A target that leaves out `{message}` takes the pull request's context alone. revu allows an empty box for it, and a failure shows the error without copying text to the clipboard. The first line of the command's output becomes the footer's note.
+
+This example sends the PR's URL and the clone to a tool of your own. `requires` keeps it out of the menu until `my-tool` is on PATH, and the warning says how to install it.
+
+```yaml
+handoff_targets:
+  - name: My tool
+    requires: my-tool
+    install: install my-tool the way its own project says
+    note: sends this PR to it
+    command: my-tool --pr {url} --dir {dir}
+```
+
+The command writes its own answer to the footer: its first line of output, when it prints one. Print nothing when there is nothing useful to say. A slow command runs beside the screen, so revu stays usable while it works.
+
 ### editor
 
 The editor that `o` opens a file in, at a line. Without this key, revu runs `$VISUAL`, else `$EDITOR`, else `vi`, and passes the line the way the editor takes it:

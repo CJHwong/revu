@@ -37,7 +37,7 @@ use ratatui::DefaultTerminal;
 use ratatui::layout::Rect;
 use ratatui::text::Text;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -111,6 +111,12 @@ enum Message {
     Written {
         pr: PrRef,
         result: Result<(), String>,
+    },
+    /// A configured handoff target's command finished; the footer says how it went.
+    HandedOff {
+        target: handoff::Target,
+        message: String,
+        result: Result<String, String>,
     },
     Group {
         generation: u64,
@@ -432,6 +438,11 @@ fn apply_messages(app: &mut App, receiver: &Receiver<Message>) {
             }
             Message::Files { pr, result } => app.set_files(&pr, result),
             Message::Written { pr, result } => app.set_written(&pr, result),
+            Message::HandedOff {
+                target,
+                message,
+                result,
+            } => finish_hand_off(app, &target, &message, result),
             Message::EditorFailed(message) => app.error = Some(message),
             Message::LineDiff { pr, path, result } => app.set_line_rows(&pr, &path, result),
             Message::Outline {
@@ -512,6 +523,7 @@ fn perform(
             start_worktree(app, session, target)
         }
         Action::OpenEditor(target) => open_editor(terminal, app, session, &target)?,
+        Action::OpenConfig => open_config(terminal, app, session)?,
         Action::LineNames {
             pr,
             dir,
@@ -657,19 +669,29 @@ fn perform(
         Action::Copy(text) => {
             copy_to_clipboard(app, &text);
         }
-        Action::PickAgent { message, dir } => {
+        Action::PickAgent {
+            message,
+            mut values,
+        } => {
+            // The lookup can finish while the request is typed.
+            if values.dir.is_none() {
+                values.dir = app.open_clone_dir();
+            }
             app.agent_menu = Some(app::AgentMenu {
-                targets: handoff::find_targets(dir.as_deref()),
+                targets: handoff::find_targets(
+                    values.dir.as_deref(),
+                    &session.config.handoff_targets,
+                ),
                 selected: 0,
                 message,
-                dir,
+                values,
             });
         }
         Action::HandOff {
             target,
             message,
-            dir,
-        } => hand_off(terminal, app, session, &target, &message, dir.as_deref())?,
+            values,
+        } => hand_off(terminal, app, session, &target, &values, &message)?,
         Action::SubmitReview {
             pr,
             pull_request_id,
@@ -830,6 +852,48 @@ fn renderer_warning(missing: &[String], installs: &[String]) -> Option<String> {
     Some(warning)
 }
 
+/// Leaves out configured targets whose program is not on PATH, and says how to
+/// install it. The notice joins a missing renderer's notice when both apply.
+fn check_handoff_targets(config: &Config, app: &mut App) {
+    let missing: Vec<&config::HandoffTarget> = config
+        .handoff_targets
+        .iter()
+        .filter(|target| {
+            target
+                .requires
+                .as_deref()
+                .is_some_and(|program| !repo::on_path(program))
+        })
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    let names: Vec<String> = missing.iter().map(|target| target.name.clone()).collect();
+    let installs: Vec<String> = missing
+        .iter()
+        .filter_map(|target| target.install.clone())
+        .collect();
+    let warning = target_warning(&names, &installs);
+    app.notice = match app.notice.take() {
+        Some(notice) => Some(format!("{notice}. {warning}")),
+        None => Some(warning),
+    };
+}
+
+/// "My tool needs my-tool, so the handoff menu leaves it out"
+fn target_warning(names: &[String], installs: &[String]) -> String {
+    let (joined, verb, them) = match names {
+        [] => return String::new(),
+        [one] => (one.clone(), "is", "it"),
+        [rest @ .., last] => (format!("{} and {last}", rest.join(", ")), "are", "them"),
+    };
+    let mut warning = format!("{joined} {verb} not on PATH, so the handoff menu leaves {them} out");
+    if !installs.is_empty() {
+        warning.push_str(&format!(". To add {them}: {}", installs.join("; ")));
+    }
+    warning
+}
+
 fn renderer_names(config: &Config) -> Vec<String> {
     config
         .diff_renderers
@@ -919,13 +983,21 @@ fn finish_repo_lookup(
     job: RepoJob,
     lookup: Result<CloneLookup, String>,
 ) {
+    let for_handoff = app.handoff_clone_requested;
+    app.handoff_clone_requested = false;
     match lookup {
         Ok(CloneLookup::Found(dir)) => {
             app.set_repo_state(RepoState::Busy(format!(
                 "fetching the PR into {}",
                 dir.display()
             )));
+            app.set_clone_dir(Some(dir.clone()));
             start_repo_fetch(session, job, dir, false);
+        }
+        // The handoff wanted the clone only to find an agent running in it. Leave the
+        // clone question to the diff, which needs an answer.
+        Ok(CloneLookup::Missing(_)) if for_handoff => {
+            app.set_repo_state(RepoState::Unknown);
         }
         Ok(CloneLookup::Missing(dir)) => {
             app.set_repo_state(RepoState::Busy("waiting for your answer".to_string()));
@@ -1156,6 +1228,10 @@ fn show_config(app: &mut App, config: &config::Config) {
         editor_command::editor_name(config.editor.as_ref(), &editor_command::shell_editor());
     app.editor_config = config.editor.clone();
     check_renderers(config, app);
+    check_handoff_targets(config, app);
+    app.handoff_request_optional = config.handoff_targets.iter().any(|target| {
+        !target.takes_message() && target.requires.as_deref().is_none_or(repo::on_path)
+    });
     app.workspace_dirs = config.workspace_dirs.clone();
     app.updated_within_days = config.updated_within_days;
 }
@@ -1368,14 +1444,15 @@ fn copy_to_clipboard(app: &mut App, text: &str) -> bool {
 }
 
 /// Hands the request to the agent picked. When that fails, the text goes to the
-/// clipboard; when the clipboard fails too, the box stays open with the text.
+/// clipboard, unless the target never took the text; when the clipboard fails too,
+/// the box stays open with the text.
 fn hand_off(
     terminal: &mut DefaultTerminal,
     app: &mut App,
     session: &Session,
     target: &handoff::Target,
+    values: &handoff::Values,
     message: &str,
-    dir: Option<&std::path::Path>,
 ) -> Result<()> {
     if *target == handoff::Target::Clipboard {
         if copy_to_clipboard(app, message) {
@@ -1383,23 +1460,72 @@ fn hand_off(
         }
         return Ok(());
     }
-    let outcome = match handoff::deliver(target, dir, message) {
+    // A configured command can be slow: it may clone and analyze a repository
+    // before it answers. It runs beside the screen, which stays live.
+    if matches!(target, handoff::Target::Custom { .. }) {
+        let target = target.clone();
+        let values = values.clone();
+        let request = message.to_string();
+        let sender = session.sender.clone();
+        app.handed_off(Ok(format!("handing off to {}...", target.label())));
+        thread::spawn(move || {
+            let result = match handoff::deliver(&target, &values, &request) {
+                Ok(handoff::Delivery::Sent(note)) => Ok(note),
+                Ok(handoff::Delivery::RunHere(_)) => {
+                    Err("a configured target cannot take over the terminal".to_string())
+                }
+                Err(error) => Err(error),
+            };
+            let _ = sender.send(Message::HandedOff {
+                target,
+                message: request,
+                result,
+            });
+        });
+        return Ok(());
+    }
+    let outcome = match handoff::deliver(target, values, message) {
         Ok(handoff::Delivery::Sent(note)) => Ok(note),
         Ok(handoff::Delivery::RunHere(command)) => run_in_foreground(terminal, session, command)?,
         Err(error) => Err(error),
     };
     match outcome {
         Ok(note) => app.handed_off(Ok(note)),
-        Err(error) if copy_to_clipboard(app, message) => app.handed_off(Err(format!(
-            "{error}; copied the request to the clipboard instead"
-        ))),
-        Err(error) => {
+        Err(error) if target.uses_message() && copy_to_clipboard(app, message) => {
+            app.handed_off(Err(format!(
+                "{error}; copied the request to the clipboard instead"
+            )))
+        }
+        Err(error) if target.uses_message() => {
             app.error = Some(format!(
                 "{error}, and the clipboard failed; your text is still in the box"
             ))
         }
+        Err(error) => app.handed_off(Err(error)),
     }
     Ok(())
+}
+
+/// Reports a configured target's result. A target that took the request still gets
+/// the clipboard when its command fails.
+fn finish_hand_off(
+    app: &mut App,
+    target: &handoff::Target,
+    message: &str,
+    result: Result<String, String>,
+) {
+    match result {
+        Ok(note) => app.handed_off(Ok(note)),
+        Err(error) if target.uses_message() && copy_to_clipboard(app, message) => {
+            app.handed_off(Err(format!(
+                "{error}; copied the request to the clipboard instead"
+            )))
+        }
+        Err(error) if target.uses_message() => app.handed_off(Err(format!(
+            "{error}, and the clipboard failed; the request was not kept"
+        ))),
+        Err(error) => app.handed_off(Err(error)),
+    }
 }
 
 /// Gives the terminal to an agent session until it exits, like a terminal editor.
@@ -1533,21 +1659,51 @@ fn open_editor(
     target: &EditorTarget,
 ) -> Result<()> {
     let line = target.line.or_else(|| first_change(target)).unwrap_or(1);
-    let command = editor_command::editor_command(
-        session.config.editor.as_ref(),
-        &editor_command::shell_editor(),
+    open_in_editor(
+        terminal,
+        app,
+        session,
         &target.dir,
         &target.path,
         line,
+        |name| opened_note(name, target, line),
+    )
+}
+
+/// Opens config.yaml in the editor, from Settings.
+fn open_config(terminal: &mut DefaultTerminal, app: &mut App, session: &Session) -> Result<()> {
+    let path = session.config_path.display().to_string();
+    let dir = session
+        .config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    open_in_editor(terminal, app, session, dir, &path, 1, |name| {
+        format!("opened {path} in {name}")
+    })
+}
+
+/// Runs the editor on a file, and leaves the screen to it when the editor has no window.
+fn open_in_editor(
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    session: &Session,
+    dir: &Path,
+    path: &str,
+    line: u64,
+    note: impl Fn(&str) -> String,
+) -> Result<()> {
+    let command = editor_command::editor_command(
+        session.config.editor.as_ref(),
+        &editor_command::shell_editor(),
+        dir,
+        path,
+        line,
     );
     let mut process = Command::new("sh");
-    process
-        .arg("-c")
-        .arg(&command.shell)
-        .current_dir(&target.dir);
+    process.arg("-c").arg(&command.shell).current_dir(dir);
     if !command.wait {
         start_beside(process, &command.name, session.sender.clone());
-        app.saved = Some(opened_note(&command.name, target, line));
+        app.saved = Some(note(&command.name));
         return Ok(());
     }
     let failure = suspended(terminal, session, || {
@@ -1707,6 +1863,20 @@ mod tests {
         assert_eq!(
             renderer_warning(&names(&["delta", "difftastic"]), &[]).unwrap(),
             "delta and difftastic are not installed, so m skips them"
+        );
+    }
+
+    #[test]
+    fn the_handoff_warning_names_what_is_missing_and_how_to_add_it() {
+        let names = |list: &[&str]| list.iter().map(|name| name.to_string()).collect::<Vec<_>>();
+        assert_eq!(target_warning(&[], &[]), "");
+        assert_eq!(
+            target_warning(&names(&["My tool"]), &names(&["brew install my-tool"])),
+            "My tool is not on PATH, so the handoff menu leaves it out. To add it: brew install my-tool"
+        );
+        assert_eq!(
+            target_warning(&names(&["One", "Two"]), &[]),
+            "One and Two are not on PATH, so the handoff menu leaves them out"
         );
     }
 }

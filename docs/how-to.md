@@ -84,9 +84,11 @@ The list offers, in order:
 - **New Claude Code session** and **New Codex session**: start in your clone with the text as the prompt. Inside tmux, in a new tmux window. Outside tmux, in a new tab of Ghostty, iTerm2, WezTerm, kitty, GNOME Terminal or Konsole, or a new Terminal window on macOS. In any other terminal, in this one until you quit the agent. kitty needs `allow_remote_control` in its config.
 - **Copy to clipboard**: paste it into any agent.
 
+The list also shows the commands your config adds under [`handoff_targets`](configuration.md#handoff_targets). A command that leaves out `{message}` runs on the context alone, so the box may be empty for it.
+
 The agent gets the PR, its base and head, your clone, then the lines in the same Markdown that `y` copies, and the thread, then your request. When the clone is on another branch, it also says how to read the PR's code with `git show` and `git diff`.
 
-If a send fails, revu copies the text to the clipboard and says why. The agent sees the clone's working tree, which is the PR's code only when its branch is checked out; the box says when the clone is on another branch. The first time an agent opens a folder, it may ask whether you trust it.
+If a send fails, revu copies the text to the clipboard and says why, unless the target took the context alone: then it shows the error and copies nothing. The agent sees the clone's working tree, which is the PR's code only when its branch is checked out; the box says when the clone is on another branch. The first time an agent opens a folder, it may ask whether you trust it.
 
 ## Merge a pull request
 
