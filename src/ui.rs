@@ -3825,9 +3825,10 @@ fn render_settings(frame: &mut Frame, app: &App, selected: usize, paint: Paint) 
         })
         .collect();
     lines.push(Line::default());
-    lines.push(Line::from(
-        paint.span("  Saved to config.yaml as you change them", theme.muted),
-    ));
+    lines.push(Line::from(paint.span(
+        "  Saved to config.yaml. e opens it in your editor",
+        theme.muted,
+    )));
     let area = frame.area();
     let width = 60.min(area.width);
     let height = (lines.len() as u16 + 2).min(area.height);

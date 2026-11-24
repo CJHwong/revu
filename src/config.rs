@@ -32,6 +32,19 @@ theme: dracula
 #   command: code {dir} -g {file}:{line}
 #   wait: false
 
+# The commands the handoff menu adds, beside the agents revu finds. Press a, then
+# ctrl+s. Each command runs in the clone, or in revu's folder when there is no clone.
+# The values are quoted for the shell: {url}, {repo}, {number}, {dir}, {base}, {head},
+# {file}, {lines} and {message}. A target that leaves out {message} needs no request,
+# so an empty box is allowed for it. requires names the program the target needs: when
+# it is not on PATH, the menu leaves the target out and says how to install it.
+# The example sends this PR to a tool of your own, when that tool is on PATH.
+# handoff_targets:
+#   - name: My tool
+#     requires: my-tool
+#     note: sends this PR to it
+#     command: my-tool --pr {url} --dir {dir}
+
 # Everything below is revu's built-in defaults, shown commented out. While a key
 # stays commented, revu uses its current default, so a new release can improve it.
 # To set your own, uncomment the key and edit it; it then replaces that default.
@@ -117,6 +130,35 @@ pub struct Config {
     /// Without it, o runs $VISUAL or $EDITOR.
     #[serde(default)]
     pub editor: Option<EditorConfig>,
+    /// Commands the handoff menu adds, beside the agents revu finds.
+    #[serde(default)]
+    pub handoff_targets: Vec<HandoffTarget>,
+}
+
+/// A handoff target the config adds: a shell command that gets the PR's context.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct HandoffTarget {
+    pub name: String,
+    /// `{url}`, `{repo}`, `{number}`, `{dir}`, `{base}`, `{head}`, `{file}`, `{lines}`
+    /// and `{message}` are replaced, quoted for the shell.
+    pub command: String,
+    /// The menu's line under the name.
+    #[serde(default)]
+    pub note: Option<String>,
+    /// The program the target needs; the menu leaves it out when it is not on PATH.
+    #[serde(default)]
+    pub requires: Option<String>,
+    /// How to install that program, for the warning.
+    #[serde(default)]
+    pub install: Option<String>,
+}
+
+impl HandoffTarget {
+    /// Whether the command reads the request text. A target that does not needs no
+    /// request, so the box may be empty.
+    pub fn takes_message(&self) -> bool {
+        self.command.contains("{message}")
+    }
 }
 
 /// The command o runs to open a file at a line.
@@ -507,6 +549,37 @@ mod tests {
         assert_eq!(config.theme, theme::by_name("dracula").unwrap());
         let error = parse("open_diff: x\ngroups: []\ntheme: nope\n").unwrap_err();
         assert!(format!("{error:#}").contains("unknown theme"));
+    }
+
+    #[test]
+    fn handoff_targets_default_to_none_and_parse_their_keys() {
+        let config = parse("open_diff: x\ngroups: []\n").unwrap();
+        assert!(config.handoff_targets.is_empty());
+
+        let config = parse(
+            "open_diff: x\ngroups: []\nhandoff_targets:\n  \
+             - name: Show\n    command: show {url}\n  \
+             - name: Ask\n    command: ask {message}\n    note: sends the request\n    requires: curl\n",
+        )
+        .unwrap();
+        assert_eq!(config.handoff_targets.len(), 2);
+        assert!(!config.handoff_targets[0].takes_message());
+        assert!(config.handoff_targets[1].takes_message());
+        assert_eq!(
+            config.handoff_targets[1].note.as_deref(),
+            Some("sends the request")
+        );
+        assert_eq!(config.handoff_targets[1].requires.as_deref(), Some("curl"));
+    }
+
+    #[test]
+    fn a_handoff_target_needs_a_name_and_a_command() {
+        let missing_command =
+            parse("open_diff: x\ngroups: []\nhandoff_targets:\n  - name: Nope\n").unwrap_err();
+        assert!(format!("{missing_command:#}").contains("command"));
+        let missing_name =
+            parse("open_diff: x\ngroups: []\nhandoff_targets:\n  - command: show\n").unwrap_err();
+        assert!(format!("{missing_name:#}").contains("name"));
     }
 
     #[test]

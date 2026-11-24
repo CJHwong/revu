@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
+use crate::config::HandoffTarget;
 use crate::model::{PrDetail, PrRef, ThreadLine};
+use crate::repo::{fill_template, shell_quote};
 
 /// What revu attaches to the user's request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,8 +19,43 @@ pub struct Context {
     pub summary: Vec<String>,
     /// The Markdown the agent gets.
     pub text: String,
-    /// The local clone, where a new session starts and running ones are looked for.
+    /// The values a configured command gets, and where it runs.
+    pub values: Values,
+}
+
+/// The PR, the clone and the spot, as a configured command sees them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Values {
+    /// The local clone, where a configured command runs.
     pub dir: Option<PathBuf>,
+    pub url: String,
+    pub repo: String,
+    pub number: String,
+    pub base: String,
+    pub head: String,
+    pub file: String,
+    pub lines: String,
+}
+
+impl Values {
+    /// The placeholders, quoted for the shell.
+    fn pairs(&self) -> Vec<(&'static str, String)> {
+        let dir = self
+            .dir
+            .as_deref()
+            .map(|dir| dir.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        vec![
+            ("url", shell_quote(&self.url)),
+            ("repo", shell_quote(&self.repo)),
+            ("number", shell_quote(&self.number)),
+            ("dir", shell_quote(&dir)),
+            ("base", shell_quote(&self.base)),
+            ("head", shell_quote(&self.head)),
+            ("file", shell_quote(&self.file)),
+            ("lines", shell_quote(&self.lines)),
+        ]
+    }
 }
 
 /// Where the cursor is: the marked diff lines and the thread on them, or a file.
@@ -94,7 +131,20 @@ pub fn context(pr: &PrRef, detail: &PrDetail, clone: Option<Checkout>, spot: Spo
     Context {
         summary,
         text,
-        dir: clone.map(|clone| clone.dir.to_path_buf()),
+        values: Values {
+            dir: clone.map(|clone| clone.dir.to_path_buf()),
+            url: pr.url(),
+            repo: pr.repo.clone(),
+            number: pr.number.to_string(),
+            base: detail.base.clone(),
+            head: detail.head.clone(),
+            file: spot.file.clone().unwrap_or_default(),
+            lines: spot
+                .lines
+                .as_ref()
+                .map(|(place, _)| place.clone())
+                .unwrap_or_default(),
+        },
     }
 }
 
@@ -124,13 +174,37 @@ fn thread_text(thread: &ThreadLine) -> String {
     text
 }
 
-/// The text the agent gets: the context, then the request.
+/// The text the agent gets: the context, then the request. Without a request, the
+/// context alone, as a target that takes the context needs no prompt.
 pub fn message(context: &Context, ask: &str) -> String {
-    format!(
-        "{}\n\nMy request:\n{}\n",
-        context.text.trim_end(),
-        ask.trim()
-    )
+    let text = context.text.trim_end();
+    let ask = ask.trim();
+    if ask.is_empty() {
+        return format!("{text}\n");
+    }
+    format!("{text}\n\nMy request:\n{ask}\n")
+}
+
+/// Points an open handoff at the clone the lookup found after the box opened. The
+/// box, its attached text and the command's values all say there is no clone until
+/// this runs.
+pub fn retarget_clone(context: &mut Context, dir: &Path) {
+    let line = format!("Local clone: {}", dir.display());
+    context.values.dir = Some(dir.to_path_buf());
+    if let Some(entry) = context
+        .summary
+        .iter_mut()
+        .find(|part| part.starts_with("Local clone:"))
+    {
+        *entry = line.clone();
+    }
+    let Some(start) = context.text.find("Local clone:") else {
+        return;
+    };
+    let end = context.text[start..]
+        .find('\n')
+        .map_or(context.text.len(), |end| start + end);
+    context.text.replace_range(start..end, &line);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +221,12 @@ pub enum Target {
     },
     NewClaude,
     NewCodex,
+    /// A target the config adds: its name, the menu's line, and the shell command.
+    Custom {
+        name: String,
+        note: String,
+        command: String,
+    },
     Clipboard,
 }
 
@@ -159,16 +239,33 @@ impl Target {
             }
             Target::NewClaude => "New Claude Code session".to_string(),
             Target::NewCodex => "New Codex session".to_string(),
+            Target::Custom { name, .. } => name.clone(),
             Target::Clipboard => "Copy to clipboard".to_string(),
         }
     }
 
-    pub fn note(&self) -> &'static str {
+    pub fn note(&self) -> String {
         match self {
-            Target::ClaudePane { .. } => "pastes it in that pane and takes you there; Enter sends",
-            Target::CodexSession { .. } => "queues it; the session runs it after its current turn",
-            Target::NewClaude | Target::NewCodex => "starts in the clone with this as the prompt",
-            Target::Clipboard => "paste it into any agent",
+            Target::ClaudePane { .. } => {
+                "pastes it in that pane and takes you there; Enter sends".to_string()
+            }
+            Target::CodexSession { .. } => {
+                "queues it; the session runs it after its current turn".to_string()
+            }
+            Target::NewClaude | Target::NewCodex => {
+                "starts in the clone with this as the prompt".to_string()
+            }
+            Target::Custom { note, .. } => note.clone(),
+            Target::Clipboard => "paste it into any agent".to_string(),
+        }
+    }
+
+    /// Whether this target reads the request text. A configured command that leaves
+    /// out `{message}` needs none.
+    pub fn uses_message(&self) -> bool {
+        match self {
+            Target::Custom { command, .. } => command.contains("{message}"),
+            _ => true,
         }
     }
 }
@@ -181,8 +278,9 @@ fn ago(minutes: u64) -> String {
     }
 }
 
-/// Every target for a clone, running sessions first. Without a clone, only the clipboard.
-pub fn find_targets(dir: Option<&Path>) -> Vec<Target> {
+/// Every target for a clone, running sessions first, then the config's commands.
+/// Without a clone, only the config's commands and the clipboard.
+pub fn find_targets(dir: Option<&Path>, custom: &[HandoffTarget]) -> Vec<Target> {
     let mut targets = Vec::new();
     if let Some(dir) = dir.and_then(|dir| std::fs::canonicalize(dir).ok()) {
         targets.extend(claude_panes(&dir));
@@ -194,8 +292,25 @@ pub fn find_targets(dir: Option<&Path>) -> Vec<Target> {
             targets.push(Target::NewCodex);
         }
     }
+    targets.extend(custom_targets(custom));
     targets.push(Target::Clipboard);
     targets
+}
+
+/// The config's targets whose program, when one is named, is on PATH.
+fn custom_targets(custom: &[HandoffTarget]) -> Vec<Target> {
+    custom
+        .iter()
+        .filter(|target| target.requires.as_deref().is_none_or(installed))
+        .map(|target| Target::Custom {
+            name: target.name.clone(),
+            note: target
+                .note
+                .clone()
+                .unwrap_or_else(|| "runs its command with the pull request's context".to_string()),
+            command: target.command.clone(),
+        })
+        .collect()
 }
 
 fn installed(program: &str) -> bool {
@@ -377,6 +492,7 @@ fn parse_codex_meta(line: &str) -> Option<(String, String)> {
 }
 
 /// How a target takes the message.
+#[derive(Debug)]
 pub enum Delivery {
     /// Done; the footer says this.
     Sent(String),
@@ -385,7 +501,7 @@ pub enum Delivery {
 }
 
 /// Sends the message. The clipboard is the caller's, as revu already copies text.
-pub fn deliver(target: &Target, dir: Option<&Path>, message: &str) -> Result<Delivery, String> {
+pub fn deliver(target: &Target, values: &Values, message: &str) -> Result<Delivery, String> {
     match target {
         Target::ClaudePane { pane, place } => {
             paste_into_pane(pane, message)?;
@@ -404,10 +520,47 @@ pub fn deliver(target: &Target, dir: Option<&Path>, message: &str) -> Result<Del
                 "queued to the Codex session; it runs after its current turn".to_string(),
             ))
         }
-        Target::NewClaude => start_session("claude", dir, message),
-        Target::NewCodex => start_session("codex", dir, message),
+        Target::NewClaude => start_session("claude", values.dir.as_deref(), message),
+        Target::NewCodex => start_session("codex", values.dir.as_deref(), message),
+        Target::Custom { name, command, .. } => {
+            let said = run_custom(name, command, values, message)?;
+            Ok(Delivery::Sent(if said.is_empty() {
+                format!("handed off to {name}")
+            } else {
+                said
+            }))
+        }
         Target::Clipboard => Err("the clipboard is not delivered here".to_string()),
     }
+}
+
+/// Runs a configured command in the clone, with the values filled and quoted. The
+/// first line of its output becomes the footer's note.
+fn run_custom(name: &str, command: &str, values: &Values, message: &str) -> Result<String, String> {
+    let mut pairs = values.pairs();
+    pairs.push(("message", shell_quote(message)));
+    let mut shell = Command::new("sh");
+    shell.arg("-c").arg(fill_template(command, &pairs));
+    if let Some(dir) = &values.dir {
+        shell.current_dir(dir);
+    }
+    let output = shell
+        .output()
+        .map_err(|error| format!("{name} did not run: {error}"))?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_string());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let said = stderr.trim();
+    if said.is_empty() {
+        return Err(format!("{name} failed with {}", output.status));
+    }
+    Err(format!("{name} failed: {said}"))
 }
 
 /// A bracketed paste, so newlines stay in the prompt instead of sending it. No Enter
@@ -540,11 +693,119 @@ mod tests {
         let context = Context {
             summary: Vec::new(),
             text: "I'm reviewing a pull request in revu.\n\nFile: a.rs\n".to_string(),
-            dir: None,
+            values: sample_values(),
         };
         assert_eq!(
             message(&context, "  why is this here?\n"),
             "I'm reviewing a pull request in revu.\n\nFile: a.rs\n\nMy request:\nwhy is this here?\n"
+        );
+    }
+
+    fn sample_values() -> Values {
+        Values {
+            dir: None,
+            url: "https://github.com/acme/widgets/pull/7".to_string(),
+            repo: "acme/widgets".to_string(),
+            number: "7".to_string(),
+            base: "main".to_string(),
+            head: "topic".to_string(),
+            file: "a.rs".to_string(),
+            lines: "a.rs:3".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_configured_command_gets_the_values_quoted() {
+        // $() and a quote in the URL must stay text, as revu fills the template.
+        let mut values = sample_values();
+        values.url = "https://x/$(touch pwned)'q".to_string();
+        let target = Target::Custom {
+            name: "Echo".to_string(),
+            note: String::new(),
+            command: "printf '%s\\n%s\\n' {url} {number}".to_string(),
+        };
+        let Ok(Delivery::Sent(said)) = deliver(&target, &values, "ignored") else {
+            panic!("the echo should deliver");
+        };
+        assert_eq!(said, "https://x/$(touch pwned)'q");
+    }
+
+    #[test]
+    fn a_configured_command_reads_the_message_only_when_it_names_it() {
+        let without = Target::Custom {
+            name: "Open".to_string(),
+            note: String::new(),
+            command: "open {url}".to_string(),
+        };
+        let with = Target::Custom {
+            name: "Ask".to_string(),
+            note: String::new(),
+            command: "agent {message}".to_string(),
+        };
+        assert!(!without.uses_message());
+        assert!(with.uses_message());
+        assert!(Target::NewClaude.uses_message());
+    }
+
+    #[test]
+    fn a_late_clone_replaces_the_none_line() {
+        let mut context = Context {
+            summary: vec![
+                "acme/widgets#7 Title".to_string(),
+                "Local clone: none".to_string(),
+            ],
+            text: "I'm reviewing a pull request in revu.\n\nLocal clone: none.\n".to_string(),
+            values: sample_values(),
+        };
+        retarget_clone(&mut context, Path::new("/src/widgets"));
+        assert_eq!(context.summary[1], "Local clone: /src/widgets");
+        assert!(context.text.contains("Local clone: /src/widgets\n"));
+        assert!(!context.text.contains("none"));
+        assert_eq!(context.values.dir, Some(PathBuf::from("/src/widgets")));
+    }
+
+    #[test]
+    fn a_configured_target_whose_program_is_missing_is_left_out() {
+        let custom = vec![
+            HandoffTarget {
+                name: "Here".to_string(),
+                command: "true".to_string(),
+                note: None,
+                requires: None,
+                install: None,
+            },
+            HandoffTarget {
+                name: "Nowhere".to_string(),
+                command: "true".to_string(),
+                note: None,
+                requires: Some("revu-test-no-such-program".to_string()),
+                install: None,
+            },
+        ];
+        let targets = find_targets(None, &custom);
+        assert_eq!(
+            targets,
+            vec![
+                Target::Custom {
+                    name: "Here".to_string(),
+                    note: "runs its command with the pull request's context".to_string(),
+                    command: "true".to_string(),
+                },
+                Target::Clipboard,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failing_command_says_why() {
+        let target = Target::Custom {
+            name: "Broken".to_string(),
+            note: String::new(),
+            command: "echo nope >&2; exit 3".to_string(),
+        };
+        assert_eq!(
+            deliver(&target, &sample_values(), "x").unwrap_err(),
+            "Broken failed: nope"
         );
     }
 
@@ -585,7 +846,9 @@ mod tests {
         );
         assert!(context.text.contains("+x"));
         assert!(context.text.contains(&format!("ID {}", thread.id)));
-        assert_eq!(context.dir, Some(PathBuf::from("/src/widgets")));
+        assert_eq!(context.values.dir, Some(PathBuf::from("/src/widgets")));
+        assert_eq!(context.values.url, "https://github.com/acme/widgets/pull/7");
+        assert_eq!(context.values.lines, "a.rs:3");
         assert_eq!(context.summary.len(), 4, "PR, clone, lines, thread");
     }
 

@@ -10,6 +10,7 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 | `?` | Show every key. `j`/`k` and `Space`/`b` scroll it; any other key closes it. |
 | `,` | Settings: the theme, the workspace folders, how many days back the inbox looks, and the editor `o` opens files in. `Enter` edits the selected one and saves it to its line in the config at once; comments and other lines stay as they are. Editor lists your shell's editor, the editors revu finds installed, and Custom command. A new number of days reloads the inbox. |
 | `,`, then Theme | Pick a color theme. `Enter` applies it at once, diffs included, and saves it as the `theme:` line in the config. See [Configuration](configuration.md#theme) for the list. |
+| `,`, then `e` | Open `config.yaml` in the editor: the one set in Settings, else `$VISUAL`, else `$EDITOR`, else `vi`. A terminal editor takes over until you quit it. Press `r` in the inbox to reload the file after an edit. |
 
 ## Inbox
 
@@ -36,7 +37,7 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 | `g` / `G`, `Space` / `b` | Top, bottom, page down, page up |
 | `r` | Fetch the pull request again |
 | `R` | Review: `Tab` picks Comment, Approve or Request changes. `ctrl+s` asks to confirm and `y` sends. Your pending line comments go with it. Request changes needs a comment; Comment needs a comment or line comments. Only Comment applies on your own PR, as GitHub requires, and on a merged or closed one. |
-| `a` | Hand off to a coding agent. A box shows what revu attaches: the PR, its base and head, your clone, and in select lines (`S`) the marked lines and the thread on the cursor's line. Write what you want; `Tab` completes a word from the diff's words and file names. Then `ctrl+s` lists where it goes. See [Hand a spot to a coding agent](how-to.md#hand-a-spot-to-a-coding-agent). |
+| `a` | Hand off to a coding agent. A box shows what revu attaches: the PR, its base and head, your clone, and in select lines (`S`) the marked lines and the thread on the cursor's line. Write what you want; `Tab` completes a word from the diff's words and file names. Then `ctrl+s` lists where it goes, including the commands your config adds in [`handoff_targets`](configuration.md#handoff_targets); a target that takes the context alone needs no text. See [Hand a spot to a coding agent](how-to.md#hand-a-spot-to-a-coding-agent). |
 | `X` | Discard your pending review and every line comment in it, after a `y`. Any other answer, or `Esc`, keeps it, and the footer says `review not discarded`. |
 | `{` / `}` | Open the pull request below or above this one in its stack. See [Stacked pull requests](how-it-works.md#stacked-pull-requests). |
 | `M` | Merge: the methods the repo allows, as on GitHub, starting on your usual one. `Enter` picks one and `y` sends it. Any other answer sends nothing: the question stays open and says so, and `Esc` closes it with `merge not sent` in the footer. When GitHub blocks the merge, a method turns on auto-merge instead, where the repo allows it; an admin can tick Bypass requirements to merge at once. When auto-merge is on, `M` turns it off. While GitHub is still checking the PR, `r` fetches it again. |
