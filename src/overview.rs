@@ -301,10 +301,15 @@ fn merge_box(context: &Context, width: usize) -> Vec<TextRow> {
     if let Some(note) = note {
         content.push(TextRow::plain(Line::from(context.span(note, theme.muted))));
     }
-    if let Some(method) = context.detail.merge.auto_merge {
+    if let Some(auto) = &context.detail.merge.auto_merge {
+        let by = auto
+            .by
+            .as_ref()
+            .map(|login| format!(", by {login}"))
+            .unwrap_or_default();
         let note = format!(
-            "Auto-merge is on: {} once the requirements pass",
-            method.title().to_lowercase()
+            "Auto-merge is on: {} once the requirements pass{by}",
+            auto.method.title().to_lowercase()
         );
         content.push(TextRow::plain(Line::from(
             context.span(note, theme.success),
@@ -1255,6 +1260,10 @@ mod tests {
             pending: 1,
             failing: 11,
         });
+        detail.merge.auto_merge = Some(crate::model::AutoMerge {
+            method: crate::model::MergeMethod::Squash,
+            by: Some("octo".to_string()),
+        });
         let activity = Ok(sample_activity());
         let toggled = HashSet::new();
         let context = Context {
@@ -1267,7 +1276,7 @@ mod tests {
             theme: &theme,
             now: detail.created_at,
         };
-        let rows: Vec<String> = merge_box(&context, 60)
+        let rows: Vec<String> = merge_box(&context, 90)
             .iter()
             .map(|row| {
                 row.line
@@ -1278,13 +1287,17 @@ mod tests {
             })
             .collect();
         let text = rows.join("\n");
+        assert!(
+            text.contains("Auto-merge is on: squash and merge once the requirements pass, by octo"),
+            "{text}"
+        );
         assert!(text.contains("Checks 11 failing, 1 pending"), "{text}");
         assert!(text.contains("Comments 1 unresolved"), "{text}");
         assert!(text.contains("Approvals 1 approved, 2 pending"), "{text}");
         let bar = rows.iter().find(|row| row.contains('━')).unwrap();
         assert_eq!(
             bar.chars().filter(|c| *c == '━').count(),
-            56,
+            86,
             "the bar fills the card"
         );
     }

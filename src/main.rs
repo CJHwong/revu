@@ -640,20 +640,6 @@ fn perform(
                 });
             });
         }
-        Action::ShowWholeDiff(job) => {
-            let command = renderer_command(session, &job);
-            let syntax = renderer_syntax(session, &job);
-            let sender = session.sender.clone();
-            thread::spawn(move || {
-                let result = command.and_then(|command| render_diff(&job, &command, true, syntax));
-                let path = job.paths.last().cloned().unwrap_or_default();
-                let _ = sender.send(Message::File {
-                    pr: job.pr,
-                    path,
-                    result,
-                });
-            });
-        }
         Action::SetWorkspace(text) => set_workspace(app, session, text),
         Action::SetTheme(name) => set_theme(app, session, name),
         Action::SetUpdatedWithin(days) => set_updated_within(app, session, days),
@@ -696,7 +682,6 @@ fn perform(
             pr,
             pull_request_id,
             head_oid,
-            pending_review,
             verdict,
             body,
         } => start_write(session, pr, move || {
@@ -704,13 +689,12 @@ fn perform(
                 pull_request_id: &pull_request_id,
                 head_oid: &head_oid,
             };
-            github::submit_review(&review, pending_review.as_deref(), verdict, &body)
+            github::submit_review(&review, verdict, &body)
         }),
         Action::AddComment {
             pr,
             pull_request_id,
             head_oid,
-            pending_review,
             target,
             body,
         } => start_write(session, pr, move || {
@@ -725,7 +709,7 @@ fn perform(
                 pull_request_id: &pull_request_id,
                 head_oid: &head_oid,
             };
-            github::add_line_comment(&review, pending_review.as_deref(), &comment).map(|_| ())
+            github::add_line_comment(&review, &comment).map(|_| ())
         }),
         Action::LineDiff(job) => {
             let sender = session.sender.clone();
@@ -776,9 +760,25 @@ fn perform(
         } => start_write(session, pr, move || {
             github::merge(&pull_request_id, &head_oid, request)
         }),
-        Action::DiscardReview { pr, pending_review } => {
-            start_write(session, pr, move || github::discard_review(&pending_review))
+        Action::SetDraft {
+            pr,
+            pull_request_id,
+            draft,
+        } => start_write(session, pr, move || {
+            github::set_draft(&pull_request_id, draft)
+        }),
+        Action::EditDraft { pr, comment, body } => start_write(session, pr, move || {
+            github::edit_review_comment(&comment, &body)
+        }),
+        Action::DeleteDraft { pr, comment } => {
+            start_write(session, pr, move || github::delete_review_comment(&comment))
         }
+        Action::DiscardReview {
+            pr,
+            pull_request_id,
+        } => start_write(session, pr, move || {
+            github::discard_review(&pull_request_id)
+        }),
         Action::ReplyToThread {
             pr, thread, body, ..
         } => start_write(session, pr, move || github::reply_to_thread(&thread, &body)),
@@ -1177,10 +1177,9 @@ fn renderer_syntax(session: &Session, job: &DiffJob) -> Option<Syntax> {
 fn render_diff(
     job: &DiffJob,
     command: &str,
-    whole_file: bool,
     syntax: Option<Syntax>,
 ) -> Result<Text<'static>, String> {
-    let bytes = repo::run_renderer(&job.dir, command, whole_file, job.key.width)
+    let bytes = repo::run_renderer(&job.dir, command, job.key.width)
         .map_err(|error| format!("{error:#}"))?;
     highlight::to_text(&bytes, syntax)
 }
@@ -1190,7 +1189,7 @@ fn start_diff(session: &Session, job: DiffJob) {
     let syntax = renderer_syntax(session, &job);
     let sender = session.sender.clone();
     thread::spawn(move || {
-        let result = command.and_then(|command| render_diff(&job, &command, false, syntax));
+        let result = command.and_then(|command| render_diff(&job, &command, syntax));
         let _ = sender.send(Message::Diff {
             pr: job.pr,
             key: job.key,

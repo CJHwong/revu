@@ -59,7 +59,7 @@ Note: the list replaces the default one, so copy the defaults in too if you want
 1. On Files changed, press `S` on a file to select lines. Move with `j`/`k`, press `V` for a range, and `Enter` to write a comment. `ctrl+s` saves it to your pending review.
 2. Press `R`, pick Comment, Approve or Request changes with `Tab`, write a summary, and press `ctrl+s`, then `y`.
 
-To throw away the pending review and its line comments instead, press `X`, then `y`.
+To change a pending comment, put the cursor on its line in select lines and press `Enter`; `x`, then `y`, deletes it. To throw away the pending review and its line comments instead, press `X`, then `y`.
 
 On your own pull request, and on one that is merged or closed, the review takes only Comment.
 
@@ -93,9 +93,13 @@ If a send fails, revu copies the text to the clipboard and says why, unless the 
 ## Merge a pull request
 
 1. Press `M` on any tab of the pull request.
-2. Pick Create a merge commit, Squash and merge or Rebase and merge with `j`/`k`, and press `Enter`, then `y`.
+2. On the Merge tab, pick Create a merge commit, Squash and merge or Rebase and merge with `j`/`k`, and press `Enter`, then type `y` and press `Enter`.
 
-If GitHub blocks the merge, for a missing approval or a check, the same steps turn on auto-merge, so GitHub merges it once the requirements pass. An admin can tick Bypass requirements first to merge at once. Press `M` again to turn auto-merge off.
+If GitHub blocks the merge, for a missing approval or a check, the same steps turn on auto-merge, so GitHub merges it once the requirements pass. If GitHub lets you bypass the requirements, pick a method under "Merge now, bypassing the requirements" instead to merge at once. When auto-merge is on, `M` switches it to another method or turns it off.
+
+## Switch a pull request to draft or ready for review
+
+Press `M`, then `Tab` to the Draft tab (`M` opens there on a draft). Pick Convert to draft, or Ready for review on a draft, and press `Enter`, then type `y` and press `Enter`. Converting to draft turns auto-merge off.
 
 ## Change labels
 

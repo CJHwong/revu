@@ -4,6 +4,8 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::line_cursor::{TextKey, text_key};
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Editor {
     pub text: String,
@@ -48,13 +50,20 @@ impl Editor {
         let word = key
             .modifiers
             .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL);
+        // ctrl+a is Cmd+Left in Ghostty and iTerm2, so selecting all takes shift too. A
+        // terminal that reports modifiers may send it as a capital A.
+        if control && (shift && key.code == KeyCode::Char('a') || key.code == KeyCode::Char('A')) {
+            self.anchor = Some(0);
+            self.cursor = self.text.len();
+            return Outcome::Handled;
+        }
+        if let Some(text_key) = text_key(&key) {
+            self.text_key(text_key, shift);
+            return Outcome::Handled;
+        }
         match key.code {
             KeyCode::Esc => return Outcome::Cancel,
             KeyCode::Char('s') if control => return Outcome::Submit,
-            KeyCode::Char('a') if control => {
-                self.anchor = Some(0);
-                self.cursor = self.text.len();
-            }
             KeyCode::Char('c') if control => return self.copy(false),
             KeyCode::Char('x') if control => return self.copy(true),
             KeyCode::Char(_) if control => {}
@@ -73,6 +82,24 @@ impl Editor {
             _ => {}
         }
         Outcome::Handled
+    }
+
+    /// A Cmd or Option move or delete. Lines are the cursor's line; deleting to the start
+    /// of a line the cursor already starts joins it to the line above.
+    fn text_key(&mut self, text_key: TextKey, shift: bool) {
+        match text_key {
+            TextKey::LineStart => self.move_to(self.line_start(self.cursor), shift),
+            TextKey::LineEnd => self.move_to(self.line_end(self.cursor), shift),
+            TextKey::WordLeft => self.move_to(self.word_start(), shift),
+            TextKey::WordRight => self.move_to(self.word_end(), shift),
+            TextKey::DeleteWordBack => self.erase(Editor::word_start),
+            TextKey::DeleteToLineStart => {
+                self.erase(|editor| match editor.line_start(editor.cursor) {
+                    start if start == editor.cursor => editor.previous(start),
+                    start => start,
+                })
+            }
+        }
     }
 
     /// Copies the selection, or every line when nothing is selected; a cut also removes it.
@@ -240,9 +267,58 @@ mod tests {
         );
         editor.insert("new\r\nline");
         assert_eq!(editor.text, "keep new\nline");
-        press(&mut editor, KeyCode::Char('a'), KeyModifiers::CONTROL);
+        press(
+            &mut editor,
+            KeyCode::Char('a'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
         press(&mut editor, KeyCode::Char('z'), KeyModifiers::NONE);
-        assert_eq!(editor.text, "z");
+        assert_eq!(editor.text, "z", "ctrl+shift+a selects everything");
+    }
+
+    /// Before and after the cursor, joined by a bar.
+    fn shown(editor: &Editor) -> String {
+        let (before, after) = editor.text.split_at(editor.cursor);
+        format!("{before}|{after}")
+    }
+
+    #[test]
+    fn cmd_and_option_keys_move_and_delete_on_the_cursor_line() {
+        let (control, alt, cmd) = (
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::SUPER,
+        );
+        let mut editor = typed("first line\nsecond word here");
+        // Ghostty and iTerm2 send Cmd+Left as ctrl+a: the start of this line, not all.
+        press(&mut editor, KeyCode::Char('a'), control);
+        assert_eq!(shown(&editor), "first line\n|second word here");
+        assert_eq!(editor.selection(), None);
+        press(&mut editor, KeyCode::Char('f'), alt);
+        assert_eq!(shown(&editor), "first line\nsecond| word here");
+        press(&mut editor, KeyCode::Char('e'), control);
+        assert_eq!(shown(&editor), "first line\nsecond word here|");
+        press(&mut editor, KeyCode::Char('b'), alt);
+        assert_eq!(shown(&editor), "first line\nsecond word |here");
+        press(&mut editor, KeyCode::Left, cmd);
+        assert_eq!(shown(&editor), "first line\n|second word here");
+        press(&mut editor, KeyCode::Right, cmd | KeyModifiers::SHIFT);
+        assert_eq!(
+            editor.selection(),
+            Some((11, editor.text.len())),
+            "shift selects"
+        );
+        press(&mut editor, KeyCode::Right, KeyModifiers::NONE);
+        press(&mut editor, KeyCode::Backspace, alt);
+        assert_eq!(shown(&editor), "first line\nsecond word |");
+        press(&mut editor, KeyCode::Char('u'), control);
+        assert_eq!(shown(&editor), "first line\n|");
+        press(&mut editor, KeyCode::Backspace, cmd);
+        assert_eq!(
+            shown(&editor),
+            "first line|",
+            "at a line start it joins the lines"
+        );
     }
 
     #[test]
