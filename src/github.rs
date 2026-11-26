@@ -95,8 +95,8 @@ pub fn detail_document() -> String {
          latestReviews(first: 30) {{ nodes {{ author {{ login }} state onBehalfOf(first: 5) {{ nodes {{ name }} }} }} }} \
          milestone {{ title }} state mergedAt closedAt mergedBy {{ login }} \
          closingIssuesReferences(first: 10) {{ nodes {{ number title url }} }} \
-         viewerCanMergeAsAdmin viewerCanEnableAutoMerge viewerCanDisableAutoMerge \
-         autoMergeRequest {{ mergeMethod }} \
+         viewerCanMergeAsAdmin viewerCanEnableAutoMerge viewerCanDisableAutoMerge viewerCanUpdate \
+         autoMergeRequest {{ mergeMethod enabledBy {{ login }} }} \
          baseRepository {{ viewerPermission mergeCommitAllowed squashMergeAllowed \
            rebaseMergeAllowed viewerDefaultMergeMethod }} \
          }} }} }}"
@@ -123,7 +123,7 @@ pub fn activity_document() -> String {
            ... on HeadRefForcePushedEvent {{ createdAt }} ... on BaseRefChangedEvent {{ createdAt }} \
            ... on BaseRefForcePushedEvent {{ createdAt }} ... on ReviewRequestedEvent {{ createdAt }} }} }} \
          reviewThreads(first: 100) {{ nodes {{ id isResolved path line originalLine startLine originalStartLine \
-           diffSide comments(first: 50) {{ nodes {{ pullRequestReview {{ id state }} viewerDidAuthor author {{ __typename login }} createdAt body }} }} }} }} \
+           diffSide comments(first: 50) {{ nodes {{ id pullRequestReview {{ id state }} viewerDidAuthor author {{ __typename login }} createdAt body }} }} }} }} \
          pendingReviews: reviews(first: 1, states: PENDING) {{ nodes {{ id }} }} \
          }} }} }}"
     )
@@ -357,18 +357,13 @@ fn find_pending_review(pull_request_id: &str) -> Result<Option<String>> {
 }
 
 /// Adds a line comment to your pending review, creating the review first when there is
-/// none. Returns the pending review's id.
-pub fn add_line_comment(
-    target: &Review,
-    pending_review: Option<&str>,
-    comment: &NewComment,
-) -> Result<String> {
-    let review = match pending_review {
-        Some(review) => review.to_string(),
-        None => match find_pending_review(target.pull_request_id)? {
-            Some(review) => review,
-            None => start_pending_review(target)?,
-        },
+/// none. Returns the pending review's id. The review is looked up fresh: GitHub deletes a
+/// pending review once its last comment goes, and you may submit or discard it on the
+/// web, so the id the app loaded can name a review that no longer exists.
+pub fn add_line_comment(target: &Review, comment: &NewComment) -> Result<String> {
+    let review = match find_pending_review(target.pull_request_id)? {
+        Some(review) => review,
+        None => start_pending_review(target)?,
     };
     let document = "mutation($review: ID!, $path: String!, $body: String!, $side: DiffSide!, \
                     $line: Int!, $startLine: Int) { addPullRequestReviewThread(input: { \
@@ -398,17 +393,9 @@ pub fn add_line_comment(
 }
 
 /// Submits your pending review with a verdict, or sends a new review in one step when
-/// there is no pending one.
-pub fn submit_review(
-    target: &Review,
-    pending_review: Option<&str>,
-    verdict: Verdict,
-    body: &str,
-) -> Result<()> {
-    let found = match pending_review {
-        Some(review) => Some(review.to_string()),
-        None => find_pending_review(target.pull_request_id)?,
-    };
+/// there is no pending one. The review is looked up fresh, as in `add_line_comment`.
+pub fn submit_review(target: &Review, verdict: Verdict, body: &str) -> Result<()> {
+    let found = find_pending_review(target.pull_request_id)?;
     let args = match found.as_deref() {
         Some(review) => graphql_args(
             "mutation($review: ID!, $event: PullRequestReviewEvent!, $body: String) { \
@@ -478,11 +465,82 @@ pub fn set_thread_resolved(thread: &str, resolved: bool) -> Result<()> {
     Ok(())
 }
 
-/// Deletes your pending review and every line comment in it.
-pub fn discard_review(pending_review: &str) -> Result<()> {
+/// Changes the text of a comment in your pending review.
+pub fn edit_review_comment(comment: &str, body: &str) -> Result<()> {
+    let document = "mutation($comment: ID!, $body: String!) { updatePullRequestReviewComment(\
+                    input: { pullRequestReviewCommentId: $comment, body: $body }) { \
+                    pullRequestReviewComment { id } } }";
+    let response = run_graphql(&graphql_args(
+        document,
+        &[("comment", comment), ("body", body)],
+        &[],
+    ))
+    .map_err(gone_comment)?;
+    if response
+        .pointer("/updatePullRequestReviewComment/pullRequestReviewComment")
+        .is_none_or(Value::is_null)
+    {
+        bail!("GitHub did not take the edit");
+    }
+    Ok(())
+}
+
+/// Deletes one comment from your pending review. GitHub deletes the review with its last
+/// comment.
+pub fn delete_review_comment(comment: &str) -> Result<()> {
+    let document = "mutation($comment: ID!) { deletePullRequestReviewComment(input: { \
+                    id: $comment }) { clientMutationId } }";
+    run_graphql(&graphql_args(document, &[("comment", comment)], &[])).map_err(gone_comment)?;
+    Ok(())
+}
+
+/// GitHub's answer for an id it no longer has, as for a pending comment submitted or
+/// deleted on the web since revu loaded it, in words saying so.
+fn gone_comment(error: anyhow::Error) -> anyhow::Error {
+    if format!("{error:#}").contains("Could not resolve to a node") {
+        return anyhow::anyhow!(
+            "this pending comment is no longer on GitHub: it was submitted or deleted elsewhere"
+        );
+    }
+    error
+}
+
+/// Switches the PR to draft, or out of draft, ready for review. GitHub answers a switch
+/// to the state the PR is already in with a null and no error, so the state is checked.
+pub fn set_draft(pull_request_id: &str, draft: bool) -> Result<()> {
+    let mutation = if draft {
+        "convertPullRequestToDraft"
+    } else {
+        "markPullRequestReadyForReview"
+    };
+    let document = format!(
+        "mutation($pr: ID!) {{ {mutation}(input: {{ pullRequestId: $pr }}) {{ \
+         pullRequest {{ isDraft }} }} }}"
+    );
+    let response = run_graphql(&graphql_args(&document, &[("pr", pull_request_id)], &[]))?;
+    let now = response.pointer(&format!("/{mutation}/pullRequest/isDraft"));
+    if now.and_then(Value::as_bool) != Some(draft) {
+        bail!(
+            "GitHub did not {}; r fetches the PR to show its state",
+            if draft {
+                "convert the PR to a draft"
+            } else {
+                "mark the PR ready for review"
+            }
+        );
+    }
+    Ok(())
+}
+
+/// Deletes your pending review and every line comment in it. The review is looked up
+/// fresh, as in `add_line_comment`.
+pub fn discard_review(pull_request_id: &str) -> Result<()> {
+    let Some(pending_review) = find_pending_review(pull_request_id)? else {
+        bail!("you have no pending review on GitHub now: it was submitted or deleted elsewhere");
+    };
     let document = "mutation($review: ID!) { deletePullRequestReview(input: { \
                     pullRequestReviewId: $review }) { pullRequestReview { id } } }";
-    run_graphql(&graphql_args(document, &[("review", pending_review)], &[]))?;
+    run_graphql(&graphql_args(document, &[("review", &pending_review)], &[]))?;
     Ok(())
 }
 
@@ -492,11 +550,12 @@ pub fn merge(pull_request_id: &str, head_oid: &str, request: MergeRequest) -> Re
     let (mutation, method) = match request {
         MergeRequest::Now(method) => ("mergePullRequest", method),
         MergeRequest::Auto(method) => ("enablePullRequestAutoMerge", method),
-        MergeRequest::DisableAuto => {
-            let document = "mutation($pr: ID!) { disablePullRequestAutoMerge(input: { \
-                            pullRequestId: $pr }) { clientMutationId } }";
-            run_graphql(&graphql_args(document, &[("pr", pull_request_id)], &[]))?;
-            return Ok(());
+        MergeRequest::DisableAuto => return disable_auto_merge(pull_request_id),
+        MergeRequest::ChangeAuto(method) => {
+            disable_auto_merge(pull_request_id)?;
+            return merge(pull_request_id, head_oid, MergeRequest::Auto(method)).context(
+                "auto-merge is off now: GitHub turned it off but did not turn it on again",
+            );
         }
     };
     let document = format!(
@@ -510,6 +569,13 @@ pub fn merge(pull_request_id: &str, head_oid: &str, request: MergeRequest) -> Re
         ("method", method.graphql()),
     ];
     run_graphql(&graphql_args(&document, &strings, &[]))?;
+    Ok(())
+}
+
+fn disable_auto_merge(pull_request_id: &str) -> Result<()> {
+    let document = "mutation($pr: ID!) { disablePullRequestAutoMerge(input: { \
+                    pullRequestId: $pr }) { clientMutationId } }";
+    run_graphql(&graphql_args(document, &[("pr", pull_request_id)], &[]))?;
     Ok(())
 }
 
@@ -797,6 +863,16 @@ mod tests {
             !remove_only.contains("$add") && !remove_only.contains("addLabels"),
             "{remove_only}"
         );
+    }
+
+    #[test]
+    fn a_pending_comment_gone_from_github_says_so() {
+        let gone = anyhow::anyhow!(
+            "gh api graphql failed (exit status: 1): gh: Could not resolve to a node with the global id of 'PRRC_x'."
+        );
+        assert!(format!("{}", gone_comment(gone)).contains("no longer on GitHub"));
+        let other = anyhow::anyhow!("HTTP 502");
+        assert_eq!(format!("{}", gone_comment(other)), "HTTP 502");
     }
 
     #[test]

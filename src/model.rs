@@ -283,6 +283,8 @@ const THREAD_CODE_LINES: usize = 4;
 pub struct ThreadComment {
     /// You wrote it.
     pub mine: bool,
+    /// It sits in your pending review, so only you see it.
+    pub pending: bool,
     pub author: Author,
     pub at: DateTime<Utc>,
     pub body: String,
@@ -321,15 +323,29 @@ pub struct PrActivity {
     pub drafts: Vec<Draft>,
 }
 
-/// A line comment in your pending review.
+/// A comment in your pending review: a new line comment, or a reply to a thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Draft {
+    /// The review comment's node id, which the edit and delete mutations take.
+    pub id: String,
     pub path: String,
     pub side: Side,
     pub line: u64,
     /// The first line of a range; None for one line.
     pub start_line: Option<u64>,
     pub body: String,
+    /// A reply in a thread; the thread draws it, so select lines does not again.
+    pub reply: bool,
+}
+
+impl Draft {
+    /// "b.md line 11" or "b.md lines 9-11", for a box title.
+    pub fn place(&self) -> String {
+        match self.start_line {
+            Some(start) => format!("{} lines {start}-{}", self.path, self.line),
+            None => format!("{} line {}", self.path, self.line),
+        }
+    }
 }
 
 /// Which side of the diff a line comment is on: the base (LEFT) or the head (RIGHT).
@@ -417,6 +433,9 @@ pub enum MergeRequest {
     Now(MergeMethod),
     /// Let GitHub merge once the requirements pass.
     Auto(MergeMethod),
+    /// Switch the method auto-merge will use. GitHub keeps the old method when asked to
+    /// turn it on again, so this turns it off, then on with the new one.
+    ChangeAuto(MergeMethod),
     DisableAuto,
 }
 
@@ -433,8 +452,16 @@ pub struct MergeOptions {
     pub can_disable_auto_merge: bool,
     /// You can merge past branch protection, as an admin.
     pub can_bypass: bool,
-    /// The method auto-merge will use, when it is on.
-    pub auto_merge: Option<MergeMethod>,
+    /// You can edit the PR, which GitHub requires to switch it to draft or ready.
+    pub can_update: bool,
+    pub auto_merge: Option<AutoMerge>,
+}
+
+/// Auto-merge, when it is on: the method it will use and who turned it on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoMerge {
+    pub method: MergeMethod,
+    pub by: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -707,6 +734,8 @@ struct RawDetail {
     viewer_can_enable_auto_merge: bool,
     #[serde(default)]
     viewer_can_disable_auto_merge: bool,
+    #[serde(default)]
+    viewer_can_update: bool,
     auto_merge_request: Option<RawAutoMerge>,
 }
 
@@ -724,6 +753,7 @@ struct RawMergeRepo {
 #[serde(rename_all = "camelCase")]
 struct RawAutoMerge {
     merge_method: String,
+    enabled_by: Option<Login>,
 }
 
 #[derive(Deserialize)]
@@ -882,15 +912,25 @@ impl PrActivity {
 impl RawThread {
     /// GitHub lists your pending review's threads with the others, but only you see them.
     fn is_pending(&self) -> bool {
-        let review = self.comments.nodes.first();
-        let state = review.and_then(|comment| comment.pull_request_review.as_ref());
-        state.and_then(|review| review.state.as_deref()) == Some("PENDING")
+        self.comments
+            .nodes
+            .first()
+            .is_some_and(RawThreadComment::is_pending)
+    }
+}
+
+impl RawThreadComment {
+    fn is_pending(&self) -> bool {
+        let review = self.pull_request_review.as_ref();
+        review.and_then(|review| review.state.as_deref()) == Some("PENDING")
     }
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawThreadComment {
+    #[serde(default)]
+    id: String,
     pull_request_review: Option<RawId>,
     #[serde(default)]
     viewer_did_author: bool,
@@ -1099,10 +1139,13 @@ fn merge_options(raw: &RawDetail) -> MergeOptions {
         can_enable_auto_merge: raw.viewer_can_enable_auto_merge,
         can_disable_auto_merge: raw.viewer_can_disable_auto_merge,
         can_bypass: raw.viewer_can_merge_as_admin,
-        auto_merge: raw
-            .auto_merge_request
-            .as_ref()
-            .and_then(|request| MergeMethod::from_graphql(&request.merge_method)),
+        can_update: raw.viewer_can_update,
+        auto_merge: raw.auto_merge_request.as_ref().and_then(|request| {
+            Some(AutoMerge {
+                method: MergeMethod::from_graphql(&request.merge_method)?,
+                by: request.enabled_by.as_ref().map(|by| by.login.clone()),
+            })
+        }),
     }
 }
 
@@ -1125,7 +1168,11 @@ pub fn parse_activity(pull_request: &Value) -> Result<PrActivity> {
         .pending_reviews
         .and_then(|reviews| reviews.nodes.into_iter().next())
         .map(|review| review.id);
-    let drafts = pending.into_iter().filter_map(draft_from).collect();
+    let drafts = pending
+        .iter()
+        .chain(&threads)
+        .flat_map(thread_drafts)
+        .collect();
     let commits = raw
         .commit_list
         .nodes
@@ -1145,20 +1192,30 @@ pub fn parse_activity(pull_request: &Value) -> Result<PrActivity> {
     })
 }
 
-fn draft_from(thread: RawThread) -> Option<Draft> {
-    let line = thread.line?;
+/// The thread's comments in your pending review. A thread on a line no longer in the
+/// diff has none to show, as GitHub's own page drops them too.
+fn thread_drafts(thread: &RawThread) -> Vec<Draft> {
+    let Some(line) = thread.line else {
+        return Vec::new();
+    };
     let side = match thread.diff_side.as_deref() {
         Some("LEFT") => Side::Left,
         _ => Side::Right,
     };
-    let body = thread.comments.nodes.into_iter().next()?.body;
-    Some(Draft {
-        path: thread.path,
-        side,
-        line,
-        start_line: thread.start_line.filter(|start| *start != line),
-        body,
-    })
+    let new_thread = thread.is_pending();
+    let pending = thread.comments.nodes.iter().enumerate();
+    pending
+        .filter(|(_, comment)| comment.is_pending())
+        .map(|(index, comment)| Draft {
+            id: comment.id.clone(),
+            path: thread.path.clone(),
+            side,
+            line,
+            start_line: thread.start_line.filter(|start| *start != line),
+            body: comment.body.clone(),
+            reply: !new_thread || index > 0,
+        })
+        .collect()
 }
 
 fn summary_from(raw: RawRow) -> PrSummary {
@@ -1662,6 +1719,7 @@ fn thread_line(thread: RawThread) -> ThreadLine {
         .nodes
         .into_iter()
         .map(|comment| ThreadComment {
+            pending: comment.is_pending(),
             mine: comment.viewer_did_author,
             author: author_from(comment.author),
             at: comment.created_at,
@@ -1988,7 +2046,9 @@ pub mod tests {
         });
         detail["viewerCanMergeAsAdmin"] = json!(true);
         detail["viewerCanDisableAutoMerge"] = json!(true);
-        detail["autoMergeRequest"] = json!({ "mergeMethod": "SQUASH" });
+        detail["autoMergeRequest"] =
+            json!({ "mergeMethod": "SQUASH", "enabledBy": { "login": "octo" } });
+        detail["viewerCanUpdate"] = json!(true);
         let merge = parse_detail(&detail).unwrap().merge;
         assert_eq!(
             merge,
@@ -1999,7 +2059,11 @@ pub mod tests {
                 can_enable_auto_merge: false,
                 can_disable_auto_merge: true,
                 can_bypass: true,
-                auto_merge: Some(MergeMethod::Squash),
+                can_update: true,
+                auto_merge: Some(AutoMerge {
+                    method: MergeMethod::Squash,
+                    by: Some("octo".to_string()),
+                }),
             }
         );
         detail["baseRepository"]["viewerPermission"] = json!("READ");
@@ -2237,13 +2301,21 @@ pub mod tests {
             .push(pending);
         let thread = json!({ "isResolved": false, "path": "c.md", "line": 9, "originalLine": 9,
             "startLine": 7, "originalStartLine": 7, "diffSide": "LEFT",
-            "comments": { "nodes": [{ "pullRequestReview": { "id": "P1", "state": "PENDING" },
+            "comments": { "nodes": [{ "id": "C1", "pullRequestReview": { "id": "P1", "state": "PENDING" },
                 "author": { "__typename": "User", "login": "me" },
                 "createdAt": "2026-11-15T09:00:00Z", "body": "Draft note" }] } });
         activity["reviewThreads"]["nodes"]
             .as_array_mut()
             .unwrap()
             .push(thread);
+        // A reply you wrote with r while the review was pending, in a submitted thread.
+        let reply = json!({ "id": "C2", "pullRequestReview": { "id": "P1", "state": "PENDING" },
+            "author": { "__typename": "User", "login": "me" }, "viewerDidAuthor": true,
+            "createdAt": "2026-11-15T09:30:00Z", "body": "Pending reply" });
+        activity["reviewThreads"]["nodes"][1]["comments"]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(reply);
         activity["pendingReviews"] = json!({ "nodes": [{ "id": "P1" }] });
         let parsed = parse_activity(&activity).unwrap();
         assert_eq!(
@@ -2254,13 +2326,36 @@ pub mod tests {
         assert_eq!(parsed.pending_review.as_deref(), Some("P1"));
         assert_eq!(
             parsed.drafts,
-            [Draft {
-                path: "c.md".to_string(),
-                side: Side::Left,
-                line: 9,
-                start_line: Some(7),
-                body: "Draft note".to_string(),
-            }]
+            [
+                Draft {
+                    id: "C1".to_string(),
+                    path: "c.md".to_string(),
+                    side: Side::Left,
+                    line: 9,
+                    start_line: Some(7),
+                    body: "Draft note".to_string(),
+                    reply: false,
+                },
+                Draft {
+                    id: "C2".to_string(),
+                    path: "b.md".to_string(),
+                    side: Side::Right,
+                    line: 12,
+                    start_line: None,
+                    body: "Pending reply".to_string(),
+                    reply: true,
+                },
+            ]
+        );
+        let replies: Vec<bool> = parsed
+            .threads_on("b.md")
+            .flat_map(|thread| &thread.comments)
+            .map(|comment| comment.pending)
+            .collect();
+        assert_eq!(
+            replies,
+            [false, false, true],
+            "the thread marks your pending reply"
         );
         assert!(
             parsed

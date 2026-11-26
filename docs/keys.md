@@ -40,8 +40,8 @@ Every key, by where it works. Press `?` anywhere in revu for the same list.
 | `a` | Hand off to a coding agent. A box shows what revu attaches: the PR, its base and head, your clone, and in select lines (`S`) the marked lines and the thread on the cursor's line. Write what you want; `Tab` completes a word from the diff's words and file names. Then `ctrl+s` lists where it goes, including the commands your config adds in [`handoff_targets`](configuration.md#handoff_targets); a target that takes the context alone needs no text. See [Hand a spot to a coding agent](how-to.md#hand-a-spot-to-a-coding-agent). |
 | `X` | Discard your pending review and every line comment in it, after a `y`. Any other answer, or `Esc`, keeps it, and the footer says `review not discarded`. |
 | `{` / `}` | Open the pull request below or above this one in its stack. See [Stacked pull requests](how-it-works.md#stacked-pull-requests). |
-| `M` | Merge: the methods the repo allows, as on GitHub, starting on your usual one. `Enter` picks one and `y` sends it. Any other answer sends nothing: the question stays open and says so, and `Esc` closes it with `merge not sent` in the footer. When GitHub blocks the merge, a method turns on auto-merge instead, where the repo allows it; an admin can tick Bypass requirements to merge at once. When auto-merge is on, `M` turns it off. While GitHub is still checking the PR, `r` fetches it again. |
-| `o` | Open in the browser. On a file (Files changed, select lines, a full file, a repo match), `o` asks: Editor or GitHub, starting on Editor when it can open the file. GitHub opens the PR's diff at the file, in select lines at the cursor's line, and a repo match at its line at the PR head. Editor opens the file at the PR's head, at the cursor's line, the match's line, or the file's first change, in `$VISUAL` or `$EDITOR` (else `vi`) or the [`editor`](configuration.md#editor) you set. The first time, revu asks which editor to use and remembers it; Settings (`,`) changes it. A terminal editor takes over until you quit it; VS Code, Zed, Sublime Text and the JetBrains IDEs open the clone beside revu. When your clone has the PR's head checked out, the file opens there. When the clone is on another branch, revu checks out the head in a worktree of the clone, under `~/.cache/revu/worktrees/<owner>/<repo>/<number>`, and opens the file there; the clone stays on its branch. The menu says which. See [Edit at the PR's head](how-it-works.md#edit-at-the-prs-head). |
+| `M` | Merge and draft, in two tabs: `Tab` / `Shift+Tab` switch, `j`/`k` move, `Enter` picks one and `y` sends it. Any other answer sends nothing: the question stays open and says so, and `Esc` closes it and the footer says what was not done. `M` opens on Draft for a draft, else on Merge. A tab with nothing to do says why. **Merge** lists the methods the repo allows, starting on your usual one. When GitHub blocks the merge, a method turns on auto-merge instead, where the repo allows it; GitHub does not offer auto-merge on a PR that can merge now. If GitHub lets you bypass the requirements, a second set of methods under "Merge now, bypassing the requirements" merges at once. When auto-merge is on, the tab lists the other methods, which switch it, and Disable auto-merge. **Draft** converts the PR to a draft, which turns auto-merge off, or marks a draft ready for review; it needs the right to edit the PR. While GitHub is still checking the PR, `r` fetches it again. |
+| `o` | Open in the browser. On a file (Files changed, select lines, a definition, a repo match), `o` asks: Editor or GitHub, starting on Editor when it can open the file. GitHub opens the PR's diff at the file, in select lines at the cursor's line, and a repo match at its line at the PR head. Editor opens the file at the PR's head, at the cursor's line, the match's line, or the file's first change, in `$VISUAL` or `$EDITOR` (else `vi`) or the [`editor`](configuration.md#editor) you set. The first time, revu asks which editor to use and remembers it; Settings (`,`) changes it. A terminal editor takes over until you quit it; VS Code, Zed, Sublime Text and the JetBrains IDEs open the clone beside revu. When your clone has the PR's head checked out, the file opens there. When the clone is on another branch, revu checks out the head in a worktree of the clone, under `~/.cache/revu/worktrees/<owner>/<repo>/<number>`, and opens the file there; the clone stays on its branch. The menu says which. See [Edit at the PR's head](how-it-works.md#edit-at-the-prs-head). |
 | `d` | Run the `open_diff` command |
 
 ## Overview
@@ -73,14 +73,14 @@ In select lines, `D` lists the names on the cursor's line, calls first, in a pro
 
 | Key | Action |
 |---|---|
-| `Enter` | Show the whole file with its changes marked, drawn by the current renderer, with syntax colors. On a folder, fold or open it. |
+| `Enter` | On a folder, fold or open it. |
 | `t` | Switch the list between a folder tree and flat paths |
-| `z` | Hide or show the list, so the diff gets the full width |
+| `z` | Hide or show the list, so the diff gets the full width. To read the whole file, `o` opens it in your editor. |
 | `y` | Copy the selected file's path, or the folder's path with a trailing `/`. |
 | `v` | Toggle Viewed. It syncs to GitHub's Viewed checkbox at once. On a folder, it marks every file under it viewed, or unmarks them all when every one is viewed already. |
 | `V` | Hide viewed files |
 | `]` / `[` | Next or previous unviewed file |
-| `S` | Select lines in the selected file: its plain diff with line numbers. `j`/`k` or the wheel move, `J`/`K` and `Space`/`b` scroll without moving the cursor, to read a long thread, `V` marks a range (on one side only, as GitHub requires), `Enter` writes a comment, `y` copies the line or range, `D` goes to the definition of a name on the line, `t` opens or closes every review thread in the file, `]` / `[` go to the next or previous line with a thread, `r` replies to it, `u` resolves or reopens it, `o` opens it on GitHub or in your editor, `w` wraps long lines or cuts them, as in the diff, `S`, `esc` or `h` goes back. The comment joins your pending review on GitHub, which only you see until `R` submits it; a dot marks lines it already covers. |
+| `S` | Select lines in the selected file: its plain diff with line numbers. `j`/`k` or the wheel move, `J`/`K` and `Space`/`b` scroll without moving the cursor, to read a long thread, `V` marks a range (on one side only, as GitHub requires), `Enter` writes a comment, `y` copies the line or range, `x` deletes your pending comment on the line after a `y`, `D` goes to the definition of a name on the line, `t` opens or closes every review thread in the file, `]` / `[` go to the next or previous line with a thread, `r` replies to it, `u` resolves or reopens it, `o` opens it on GitHub or in your editor, `w` wraps long lines or cuts them, as in the diff, `S`, `esc` or `h` goes back. The comment joins your pending review on GitHub, which only you see until `R` submits it; a dot marks lines it already covers, and the comment shows under its line as `pending`. On a line with a pending comment of yours, `Enter` opens it with its text to edit, and `V` then `Enter` starts a new comment. A reply you wrote with `r` while your review is pending counts too: its thread marks it `pending`, and `Enter` and `x` on the thread's line act on it. |
 
 ## Files changed and Commits
 
@@ -116,6 +116,7 @@ src/app.rs:40-42
 
 - `^` at the start ties the text to where the code starts, after line numbers, the +/- mark and indentation, so `^def ` finds definitions. `$` at the end ties it to where the code ends. In difftastic, each column counts on its own. `\^` and `\$` find the characters themselves.
 - While you type, the prompt offers a word of 4 or more characters from the diff that starts with your text, or a changed file's path, name or folder. Words from the changed lines come before words from the context lines, the most used first. `Tab` takes it.
+- On Files changed, `Enter` on a changed file's path, or on a file name only one changed file has, opens that file instead of finding the text, with its folders opened.
 - Every match is marked, the current one stronger, and the pane title shows `/text  match 2 of 3 in file 5 of 63`.
 - On Files changed, `n` past a file's last match goes on to the next file that holds the text, opening its folder. On Commits, it searches the commit on screen.
 - On Files changed, `n` past the last file's last match goes on to the matches in every other file in the repo at the PR head. Each opens at its line with the text marked, with syntax colors from `bat` when it is installed. The title shows the line and the block around it: `src/app.rs:110 ... repo match 3 of 155, 5 in the diff  n/N next/previous   in impl App > run`. Past the last one, `n` comes back to the diff; `esc` goes back at once. The footer counts them: `match 1 of 2 in file 1 of 3, 155 in the repo`. git stops at 1000 matches, shown as `1000+`. Binary, untracked and ignored files are not searched.
@@ -128,8 +129,11 @@ Reviews and comments are multi-line text boxes.
 |---|---|
 | `Enter` | New line |
 | `shift`+arrows | Select |
-| `alt`+arrows | Move by word |
-| `ctrl+a` | Select everything |
+| `Option`+`←` / `→` (`alt+b` / `alt+f`) | Move by word |
+| `Cmd`+`←` / `→` (`ctrl+a` / `ctrl+e`) | Go to the start or end of the line; with `shift`, select to it |
+| `Option`+`Backspace` | Delete the word before the cursor |
+| `Cmd`+`Backspace` (`ctrl+u`) | Delete to the start of the line; at the start, join it to the line above |
+| `ctrl+shift+a` | Select everything |
 | `ctrl+c`, `ctrl+x` | Copy, cut to the clipboard. With nothing selected, `ctrl+c` copies all the text. |
 | paste | Replaces the selection |
 | `ctrl+s` | Send |
@@ -137,7 +141,9 @@ Reviews and comments are multi-line text boxes.
 
 Copying uses OSC 52 and `pbcopy`. Inside tmux, OSC 52 needs `set -g set-clipboard on`.
 
-One-line boxes, such as `ctrl+l`, `/` and the label filter, take `←` / `→` to move, `Home` / `End` to go to either end, and `Backspace` / `Delete` on either side of the cursor. `Tab` completes only with the cursor at the end.
+One-line boxes, such as `ctrl+l`, `/` and the label filter, take `←` / `→` to move, `Home` / `End` to go to either end, and `Backspace` / `Delete` on either side of the cursor. The `Cmd` and `Option` keys above work there too, except selecting. `Tab` completes only with the cursor at the end.
+
+Ghostty and iTerm2 send `Cmd`+`←` as `ctrl+a` and `Option`+`←` as `alt+b`, so revu reads both forms. `Cmd`+`↑` / `↓` never reach revu in Ghostty, which keeps them to jump between prompts.
 
 ## Mouse
 

@@ -10,8 +10,8 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::app::{
     AgentMenu, App, Click, ClickTarget, ComposeKind, Composer, DetailView, DiffOutput,
-    EditorChoice, EditorMenu, LabelMenu, LinksState, MergeItem, MergeMenu, OpenMenu, Overlay,
-    OverviewLayout, Prompt, PromptKind, RepoState, Row, SETTINGS, SaveNote, Screen, Tab,
+    EditorChoice, EditorMenu, LabelMenu, LinksState, MergeItem, MergeMenu, MergePanel, OpenMenu,
+    Overlay, OverviewLayout, Prompt, PromptKind, RepoState, Row, SETTINGS, SaveNote, Screen, Tab,
 };
 use crate::editor::Editor;
 use crate::file_tree::FileRow;
@@ -223,7 +223,7 @@ fn render_composer(frame: &mut Frame, composer: &Composer, paint: Paint) {
             theme.muted,
         ),
         _ => paint.span(
-            " ctrl+s send, esc cancel, shift+arrows select, ctrl+a all, ctrl+c copy, ctrl+x cut",
+            " ctrl+s send, esc cancel, shift+arrows select, ctrl+shift+a all, ctrl+c copy, ctrl+x cut",
             theme.muted,
         ),
     };
@@ -319,6 +319,11 @@ fn composer_header(composer: &Composer, paint: Paint) -> (String, Vec<Line<'stat
             };
             (title, vec![Line::from(paint.span(note, theme.muted))])
         }
+        ComposeKind::EditDraft { place, .. } => {
+            let title = format!(" Edit your pending comment on {place} ");
+            let note = " only you see it until R submits the review";
+            (title, vec![Line::from(paint.span(note, theme.muted))])
+        }
         ComposeKind::Handoff(context) => {
             let mut header = vec![Line::from(paint.span(" revu attaches:", theme.muted))];
             header.extend(
@@ -350,7 +355,7 @@ fn render_agent_menu(frame: &mut Frame, menu: &AgentMenu, paint: Paint) {
             false => line,
         }));
     }
-    render_menu_box(frame, " Hand off to ".to_string(), lines, paint);
+    render_menu_box(frame, " Hand off to ".to_string(), lines, MENU_HINT, paint);
 }
 
 /// The editor's text with the selection and the cursor marked, the row the cursor is
@@ -445,7 +450,11 @@ fn render_inbox(frame: &mut Frame, app: &mut App, paint: Paint) {
         app.preview_shown = false;
         render_inbox_failure(frame, &errors, body, paint);
         frame.render_widget(
-            Paragraph::new(hints_line(INBOX_HINTS, usize::from(bottom.width), paint)),
+            Paragraph::new(hints_line(
+                INBOX_HINTS.iter().copied(),
+                usize::from(bottom.width),
+                paint,
+            )),
             bottom,
         );
         return;
@@ -498,7 +507,11 @@ fn render_inbox(frame: &mut Frame, app: &mut App, paint: Paint) {
     }
 
     frame.render_widget(
-        Paragraph::new(hints_line(INBOX_HINTS, usize::from(bottom.width), paint)),
+        Paragraph::new(hints_line(
+            INBOX_HINTS.iter().copied(),
+            usize::from(bottom.width),
+            paint,
+        )),
         bottom,
     );
 }
@@ -978,7 +991,54 @@ const INBOX_HINTS: Hints = &[
     (",", "settings"),
 ];
 
-fn detail_hints(view: &DetailView) -> Hints {
+/// The footer of the pull request: the keys for where the cursor is, with what is
+/// going on now: the find's next match first, and the pending review's count.
+pub(crate) fn detail_hints(view: &DetailView) -> Vec<(&'static str, String)> {
+    let mut hints: Vec<(&'static str, String)> = place_hints(view)
+        .iter()
+        .map(|(key, action)| (*key, action.to_string()))
+        .collect();
+    let finding = view.find.is_some()
+        && view.overlays.is_empty()
+        && view.line_mode.is_none()
+        && matches!(view.tab, Tab::Files | Tab::Commits);
+    if finding {
+        hints.insert(0, ("n/N", "next/previous match".to_string()));
+    }
+    let on_folder = view.tab == Tab::Files
+        && view.overlays.is_empty()
+        && view.line_mode.is_none()
+        && view.selected_file().is_none()
+        && !view.file_rows().is_empty();
+    if on_folder {
+        hints.insert(0, ("enter", "fold".to_string()));
+    }
+    let in_stack = view.stack_neighbor(true).is_some() || view.stack_neighbor(false).is_some();
+    if !in_stack {
+        hints.retain(|(key, _)| *key != "{/}");
+    }
+    let hidden_list = view.tab == Tab::Files && view.file_list_hidden && view.overlays.is_empty();
+    if let Some(z) = hints.iter_mut().find(|(key, _)| *key == "z" && hidden_list) {
+        z.1 = "show list".to_string();
+    }
+    let Some(Ok(activity)) = &view.activity else {
+        return hints;
+    };
+    let Some(review) = hints.iter().position(|(key, _)| *key == "R") else {
+        return hints;
+    };
+    if !activity.drafts.is_empty() {
+        hints[review].1 = format!("review ({} pending)", activity.drafts.len());
+    }
+    // X works outside select lines only, where x deletes one pending comment.
+    if activity.pending_review.is_some() && view.line_mode.is_none() {
+        hints.insert(review + 1, ("X", "discard pending".to_string()));
+    }
+    hints
+}
+
+/// The keys for where the cursor is, most used first.
+fn place_hints(view: &DetailView) -> Hints {
     if let Some(overlay) = view.overlays.last() {
         return match overlay {
             Overlay::File { .. } if view.def_walk.is_some() => &[
@@ -1003,90 +1063,144 @@ fn detail_hints(view: &DetailView) -> Hints {
             ],
         };
     }
-    let threads = match (&view.line_mode, &view.activity) {
-        (Some(mode), Some(Ok(activity))) => activity.threads_on(&mode.path).next().is_some(),
-        _ => false,
-    };
-    if threads {
-        return &[
-            ("j/k", "line"),
-            ("V", "range"),
-            ("enter", "comment"),
-            ("t", "threads"),
-            ("]/[", "next thread"),
-            ("r", "reply"),
-            ("u", "resolve"),
-            ("y", "copy"),
-            ("D", "definition"),
-            ("o", "open"),
-            ("R", "review"),
-            ("a", "agent"),
-            ("esc", "back to the diff"),
-        ];
-    }
     if view.line_mode.is_some() {
-        return &[
-            ("j/k", "line"),
-            ("V", "range"),
-            ("enter", "comment"),
-            ("y", "copy"),
-            ("D", "definition"),
-            ("o", "open"),
-            ("R", "review"),
-            ("a", "agent"),
-            ("w", "wrap"),
-            ("esc", "back to the diff"),
-        ];
+        return line_hints(view);
     }
     match view.tab {
         Tab::Overview => &[
             ("j/k", "comment"),
             ("enter", "fold"),
             ("R", "review"),
+            ("M", "merge"),
             ("a", "agent"),
             ("e", "labels"),
             ("i", "images"),
+            ("]/[", "next card"),
+            ("{/}", "stack"),
             ("f", "filter"),
-            ("F", "order"),
-            ("n", "bots"),
             ("o", "browser"),
             ("h", "back"),
+            ("F", "order"),
+            ("n", "bots"),
         ],
         Tab::Checks => &[
             ("j/k", "move"),
             ("enter", "open the run"),
             ("r", "reload"),
+            ("M", "merge"),
             ("h", "back"),
         ],
         Tab::Commits => &[
             ("j/k", "commit"),
-            ("J", "scroll diff"),
+            ("enter", "open commit"),
+            ("J/K", "scroll diff"),
             ("/", "find"),
-            ("m", "renderer"),
-            ("w", "wrap"),
+            ("M", "merge"),
             ("o", "browser"),
             ("h", "back"),
         ],
         Tab::Files => &[
             ("v", "viewed"),
-            ("]", "next"),
+            ("]/[", "next"),
+            ("J/K", "scroll diff"),
             ("S", "select lines"),
+            ("z", "hide list"),
             ("y", "copy path"),
-            ("enter", "full file"),
             ("/", "find"),
             ("R", "review"),
+            ("M", "merge"),
             ("a", "agent"),
-            ("m", "view"),
             ("o", "open"),
-            ("t", "tree"),
-            ("z", "list"),
         ],
     }
 }
 
+/// Select lines: your pending comment on the line, a thread on it, or a plain line.
+fn line_hints(view: &DetailView) -> Hints {
+    let file_has_threads = match (&view.line_mode, &view.activity) {
+        (Some(mode), Some(Ok(activity))) => activity.threads_on(&mode.path).next().is_some(),
+        _ => false,
+    };
+    if view.draft_here().is_ok() && view.thread_on_cursor() {
+        return &[
+            ("j/k", "line"),
+            ("enter", "edit pending"),
+            ("x", "delete pending"),
+            ("r", "reply"),
+            ("u", "resolve"),
+            ("V", "range"),
+            ("]/[", "next thread"),
+            ("y", "copy"),
+            ("D", "definition"),
+            ("R", "review"),
+            ("esc", "back to the diff"),
+        ];
+    }
+    if view.draft_here().is_ok() {
+        return &[
+            ("j/k", "line"),
+            ("enter", "edit pending"),
+            ("x", "delete pending"),
+            ("V", "range"),
+            ("y", "copy"),
+            ("D", "definition"),
+            ("R", "review"),
+            ("esc", "back to the diff"),
+        ];
+    }
+    if view.thread_on_cursor() {
+        return &[
+            ("j/k", "line"),
+            ("V", "range"),
+            ("enter", "comment"),
+            ("r", "reply"),
+            ("u", "resolve"),
+            ("]/[", "next thread"),
+            ("t", "threads"),
+            ("y", "copy"),
+            ("D", "definition"),
+            ("o", "open"),
+            ("R", "review"),
+            ("a", "agent"),
+            ("esc", "back to the diff"),
+        ];
+    }
+    if file_has_threads {
+        return &[
+            ("j/k", "line"),
+            ("V", "range"),
+            ("enter", "comment"),
+            ("]/[", "next thread"),
+            ("t", "threads"),
+            ("y", "copy"),
+            ("D", "definition"),
+            ("o", "open"),
+            ("R", "review"),
+            ("a", "agent"),
+            ("esc", "back to the diff"),
+        ];
+    }
+    &[
+        ("j/k", "line"),
+        ("V", "range"),
+        ("enter", "comment"),
+        ("y", "copy"),
+        ("D", "definition"),
+        ("o", "open"),
+        ("R", "review"),
+        ("a", "agent"),
+        ("w", "wrap"),
+        ("esc", "back to the diff"),
+    ]
+}
+
 /// The keys that fit in `width`, each key in the accent color, and "? all keys" last
 /// so the dropped ones stay one key away.
-fn hints_line(hints: Hints, width: usize, paint: Paint) -> Line<'static> {
+fn hints_line<'a>(
+    hints: impl IntoIterator<Item = (&'a str, &'a str)>,
+    width: usize,
+    paint: Paint,
+) -> Line<'static> {
     let theme = paint.theme;
     let pair = |key: &str, action: &str| {
         vec![
@@ -1167,7 +1281,7 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
             ("{, }", "the PR below or above this one in its stack"),
             (
                 "M",
-                "merge: pick merge commit, squash or rebase; auto-merge when blocked, or turn it off",
+                "merge and draft, in tabs that tab switches: merge with a method, or turn auto-merge on while blocked, change its method or turn it off; convert to draft or mark ready for review",
             ),
         ],
     ),
@@ -1200,13 +1314,17 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
     (
         "Files changed",
         &[
-            ("enter", "whole file with its changes; on a folder, fold it"),
+            ("enter", "on a folder, fold or open it"),
             (
                 "v, V",
                 "toggle Viewed (syncs to GitHub; on a folder, every file in it), hide viewed files",
             ),
             ("], [", "next or previous unviewed file"),
-            ("t, z", "tree or flat list, hide or show the list"),
+            ("t", "tree or flat list"),
+            (
+                "z",
+                "hide or show the list; o opens the whole file in your editor",
+            ),
             ("y", "copy the file's or folder's path"),
             (
                 "o",
@@ -1214,7 +1332,7 @@ const KEY_LIST: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "S",
-                "select lines: j/k or the wheel pick a line, J/K and space/b scroll, V a range; enter comments in your pending review, y copies them as a Markdown diff, D goes to the definition of a name on the line, t opens or closes every review thread, ] and [ go to the next and previous thread, r replies to the thread on the line and u resolves or reopens it, o opens them on GitHub",
+                "select lines: j/k or the wheel pick a line, J/K and space/b scroll, V a range; enter comments in your pending review, or edits your pending comment on the line, x deletes it, y copies them as a Markdown diff, D goes to the definition of a name on the line, t opens or closes every review thread, ] and [ go to the next and previous thread, r replies to the thread on the line and u resolves or reopens it, o opens them on GitHub",
             ),
         ],
     ),
@@ -1337,7 +1455,11 @@ fn render_detail(
     // An error, a save in progress, or a finished save replaces the help line.
     let footer = match status {
         Some(status) => Line::from(status),
-        None => hints_line(detail_hints(view), usize::from(bottom.width), paint),
+        None => {
+            let hints = detail_hints(view);
+            let pairs = hints.iter().map(|(key, action)| (*key, action.as_str()));
+            hints_line(pairs, usize::from(bottom.width), paint)
+        }
     };
     frame.render_widget(Paragraph::new(footer), bottom);
 
@@ -1514,12 +1636,7 @@ fn render_file_list(frame: &mut Frame, view: &mut DetailView, area: Rect, paint:
         .iter()
         .filter(|file| file.viewed == ViewedState::Viewed)
         .count();
-    let hidden_note = if view.hide_viewed {
-        ", viewed hidden"
-    } else {
-        ""
-    };
-    let title = format!(" {viewed}/{} viewed{hidden_note} ", files.len());
+    let count = format!(" {viewed}/{} viewed ", files.len());
     let width = area.width as usize;
     let selected = view.file_state.selected();
     let items: Vec<ListItem> = view
@@ -1541,6 +1658,12 @@ fn render_file_list(frame: &mut Frame, view: &mut DetailView, area: Rect, paint:
             }
         })
         .collect();
+    // Every file hidden as viewed: the list is at its narrowest, so the title has no
+    // room for V, and the list says it instead.
+    let items = match (items.is_empty(), view.hide_viewed && !files.is_empty()) {
+        (true, true) => vec![ListItem::new(paint.span(" V shows viewed", theme.muted))],
+        _ => items,
+    };
     let heights: Vec<usize> = items.iter().map(ListItem::height).collect();
     let list_area = Rect {
         y: area.y + 1,
@@ -1571,7 +1694,8 @@ fn render_file_list(frame: &mut Frame, view: &mut DetailView, area: Rect, paint:
         _ => Line::from(paint.span(format!("{arrow} {count} more "), theme.muted)).right_aligned(),
     };
     let title_row = Rect { height: 1, ..area };
-    frame.render_widget(Paragraph::new(paint.span(title, theme.heading)), title_row);
+    let title = list_title(count, view.hide_viewed, view.tree_view, above, width, paint);
+    frame.render_widget(Paragraph::new(title), title_row);
     frame.render_widget(more(above, "↑"), title_row);
     if overflows {
         let bottom_row = Rect {
@@ -2077,9 +2201,16 @@ fn line_mode_threads(
         .iter()
         .map(|row| {
             let threads = view.threads_on_row(&mode.path, row);
+            let drafts = activity.drafts.iter().filter(|draft| {
+                !draft.reply
+                    && draft.path == mode.path
+                    && row.target() == Some((draft.side, draft.line))
+            });
+            let drafts = drafts.map(|draft| (draft_line(draft, width, paint), None));
             threads
                 .iter()
                 .flat_map(|thread| drawn(thread, None))
+                .chain(drafts)
                 .collect()
         })
         .collect();
@@ -2100,6 +2231,21 @@ fn line_mode_threads(
         }
     }
     (top, under)
+}
+
+/// A comment of your pending review under its line, cut to one line; Enter edits it.
+fn draft_line(draft: &crate::model::Draft, width: usize, paint: Paint) -> Line<'static> {
+    let theme = paint.theme;
+    let label = "pending";
+    let gist = first_rendered_line(&draft.body, width, theme);
+    let used = SELECT_GUTTER + 2 + label.len() + 2;
+    let gist = markdown::truncate(&gist, width.saturating_sub(used));
+    Line::from(vec![
+        Span::raw(" ".repeat(SELECT_GUTTER)),
+        paint.span("╭ ", theme.warning),
+        paint.bold(label, theme.warning),
+        paint.span(format!(": {gist}"), theme.foreground),
+    ])
 }
 
 /// A line in select lines, with the place of the review thread it belongs to.
@@ -2135,9 +2281,15 @@ fn thread_lines(
         ""
     };
     if !open {
-        let more = match thread.comments.len() {
-            1 => String::new(),
-            count => format!("  ({} more)", count - 1),
+        let pending = thread
+            .comments
+            .iter()
+            .filter(|comment| comment.pending)
+            .count();
+        let more = match (thread.comments.len(), pending) {
+            (1, _) => String::new(),
+            (count, 0) => format!("  ({} more)", count - 1),
+            (count, pending) => format!("  ({} more, {pending} pending)", count - 1),
         };
         let place = place.map(|place| format!("{place}, ")).unwrap_or_default();
         let gist = first_rendered_line(&first.body, width, theme);
@@ -2175,6 +2327,10 @@ fn thread_lines(
             paint.span(
                 format!("  {}", relative_time(comment.at, paint.now)),
                 theme.muted,
+            ),
+            paint.span(
+                if comment.pending { "  pending" } else { "" },
+                theme.warning,
             ),
         ]));
         let mut folds = markdown::Folds::new(&toggled);
@@ -2763,6 +2919,41 @@ pub fn mark_matches(line: Line<'static>, query: &str, mark: Style) -> Line<'stat
     Line::from(spans).style(line_style)
 }
 
+/// The file list's title: the viewed count, then what V and t switch, as the diff
+/// pane shows m and w. Each goes when it does not fit beside the "↑ N more" count.
+fn list_title(
+    count: String,
+    hide_viewed: bool,
+    tree_view: bool,
+    above: usize,
+    width: usize,
+    paint: Paint,
+) -> Line<'static> {
+    let theme = paint.theme;
+    let viewed = match hide_viewed {
+        true => "V shows viewed ",
+        false => "V hides viewed ",
+    };
+    let layout = match tree_view {
+        true => "t flat ",
+        false => "t tree ",
+    };
+    let more = match above {
+        0 => 0,
+        _ => display_width(&format!("↑ {above} more ")) + 1,
+    };
+    let mut used = display_width(&count) + more;
+    let mut spans = vec![paint.span(count, theme.heading)];
+    for hint in [viewed, layout] {
+        if used + display_width(hint) > width {
+            break;
+        }
+        used += display_width(hint);
+        spans.push(paint.span(hint.to_string(), theme.muted));
+    }
+    Line::from(spans)
+}
+
 /// "w wraps", or how far an unwrapped diff is scrolled sideways.
 fn wrap_note(view: &DetailView) -> String {
     match (view.diff_wrap, view.diff_shift) {
@@ -3041,6 +3232,8 @@ fn tab_bar(current: Tab, detail: &PrDetail, paint: Paint) -> Line<'static> {
         spans.extend(tab_badge(tab, detail, paint));
         spans.push(Span::raw(TAB_RIGHT));
     }
+    // Where the tabs are, as the panes name their own keys in their titles.
+    spans.push(paint.span("  tab/1-4 switches", theme.muted));
     Line::from(spans)
 }
 
@@ -3497,6 +3690,27 @@ fn render_prompt(frame: &mut Frame, prompt: &Prompt, paint: Paint) {
             bypass,
             ..
         } => merge_question(*request, base, *bypass),
+        PromptKind::ConfirmDraft {
+            draft: true,
+            auto_merge,
+            ..
+        } => (
+            " Convert to draft? ".to_string(),
+            match auto_merge {
+                true => "y and enter: reviewers stop getting asked, and GitHub turns auto-merge off. esc keeps it ready",
+                false => "y and enter: reviewers stop getting asked, and it cannot merge until it is ready again. esc keeps it ready",
+            }
+            .to_string(),
+        ),
+        PromptKind::ConfirmDraft { .. } => (
+            " Ready for review? ".to_string(),
+            "y and enter takes it out of draft and asks its reviewers. esc keeps it a draft"
+                .to_string(),
+        ),
+        PromptKind::ConfirmDeleteDraft { place, .. } => (
+            " Delete your pending comment? ".to_string(),
+            format!("y and enter deletes it from your pending review, on {place}. esc keeps it"),
+        ),
         PromptKind::ConfirmClone { pr, dir } => (
             format!(" Clone {}? ", pr.repo),
             format!(
@@ -3875,6 +4089,13 @@ fn merge_question(request: MergeRequest, base: &str, bypass: bool) -> (String, S
                 merge(method)
             ),
         ),
+        MergeRequest::ChangeAuto(method) => (
+            " Change the auto-merge method? ".to_string(),
+            format!(
+                "y and enter: GitHub turns auto-merge off, then on to {} once the requirements pass. esc keeps the old method",
+                merge(method)
+            ),
+        ),
         MergeRequest::DisableAuto => (
             " Disable auto-merge? ".to_string(),
             "y and enter turns it off; the PR stays open. esc keeps it on".to_string(),
@@ -3912,69 +4133,154 @@ fn merge_method_note(method: MergeMethod, commits: u64) -> String {
     }
 }
 
-/// The merge menu's lines: each row's title and GitHub's note under it.
-fn merge_menu_lines(menu: &MergeMenu, paint: Paint) -> Vec<Line<'static>> {
+/// The merge menu's tabs, the one shown marked.
+fn merge_tabs(menu: &MergeMenu, paint: Paint) -> Line<'static> {
+    let theme = paint.theme;
+    let mut spans = vec![Span::raw(" ")];
+    for (index, panel) in MergePanel::ALL.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(paint.span(" │ ", theme.muted));
+        }
+        spans.push(match panel == menu.panel {
+            true => Span::styled(
+                format!(" {} ", panel.title()),
+                Style::new()
+                    .fg(theme.background)
+                    .bg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            false => paint.span(format!(" {} ", panel.title()), theme.muted),
+        });
+    }
+    Line::from(spans)
+}
+
+/// One row of the merge menu: its mark, title, color, and GitHub's note under it.
+fn merge_row(menu: &MergeMenu, item: MergeItem) -> (&'static str, String, bool, String) {
+    let usual = |method: MergeMethod| match menu.default_method == Some(method) {
+        true => "✓",
+        false => " ",
+    };
+    let method_row = |mark, method: MergeMethod| {
+        let note = merge_method_note(method, menu.commit_count);
+        (mark, method.title().to_string(), false, note)
+    };
+    match item {
+        MergeItem::Method(method) | MergeItem::EnableAuto(method) => {
+            method_row(usual(method), method)
+        }
+        MergeItem::ChangeAuto(method) => method_row(" ", method),
+        MergeItem::BypassMerge(method) => {
+            let note = merge_method_note(method, menu.commit_count);
+            (" ", method.title().to_string(), true, note)
+        }
+        MergeItem::DisableAuto => (
+            " ",
+            "Disable auto-merge".to_string(),
+            false,
+            "GitHub stops waiting to merge it. The PR stays open.".to_string(),
+        ),
+        MergeItem::ReadyForReview => (
+            " ",
+            "Ready for review".to_string(),
+            false,
+            "Take it out of draft, so its reviewers are asked and it can merge.".to_string(),
+        ),
+        MergeItem::ConvertToDraft => (
+            " ",
+            "Convert to draft".to_string(),
+            false,
+            "Reviewers stop getting asked; it cannot merge until it is ready.".to_string(),
+        ),
+    }
+}
+
+/// A panel's lines under the tabs: its rows with GitHub's notes, or why it has none.
+fn merge_panel_lines(menu: &MergeMenu, panel: MergePanel, paint: Paint) -> Vec<Line<'static>> {
     let theme = paint.theme;
     let mut lines = Vec::new();
-    for (index, item) in menu.items.iter().enumerate() {
-        let (mark, title, note, color) = match *item {
-            MergeItem::Method(method) => {
-                let mark = if menu.default_method == Some(method) {
-                    "✓"
-                } else {
-                    " "
-                };
-                let note = merge_method_note(method, menu.commit_count);
-                (mark, method.title(), note, theme.foreground)
-            }
-            MergeItem::Bypass => {
+    if let (MergePanel::Merge, Some(method)) = (panel, menu.auto_merge) {
+        let on = format!(" Auto-merge is on: {}", method.title().to_lowercase());
+        lines.push(Line::from(paint.span(on, theme.success)));
+        lines.push(Line::from(""));
+    }
+    let items = match &menu.panels[panel as usize] {
+        Ok(items) => items,
+        Err(why) => {
+            lines.push(Line::from(paint.span(format!(" {why}"), theme.muted)));
+            return lines;
+        }
+    };
+    let bypass = |item: &MergeItem| matches!(item, MergeItem::BypassMerge(_));
+    let first_bypass = items.iter().position(bypass);
+    for (index, item) in items.iter().enumerate() {
+        let (mark, title, danger, note) = merge_row(menu, *item);
+        // Headings only where auto-merge and the bypass share the panel, so the same
+        // method names read apart.
+        if index == 0 && first_bypass > Some(0) && matches!(item, MergeItem::EnableAuto(_)) {
+            let heading = " Auto-merge when the requirements pass";
+            lines.push(Line::from(paint.bold(heading.to_string(), theme.muted)));
+        }
+        if Some(index) == first_bypass {
+            if index > 0 {
                 lines.push(Line::from(""));
-                let mark = if menu.bypass { "✓" } else { " " };
-                let note =
-                    "Merge now with the selected method, without waiting for the requirements.";
-                (mark, "Bypass requirements", note.to_string(), theme.danger)
             }
-            MergeItem::DisableAuto => {
-                let note = "GitHub stops waiting to merge it. The PR stays open.";
-                (
-                    " ",
-                    "Disable auto-merge",
-                    note.to_string(),
-                    theme.foreground,
-                )
-            }
+            let heading = " Merge now, bypassing the requirements";
+            lines.push(Line::from(paint.bold(heading.to_string(), theme.danger)));
+        }
+        let color = if danger {
+            theme.danger
+        } else {
+            theme.foreground
         };
-        let row = vec![
+        let row = [
             Line::from(vec![
                 paint.span(format!(" {mark} "), theme.success),
-                paint.bold(title.to_string(), color),
+                paint.bold(title, color),
             ]),
             Line::from(paint.span(format!("   {note}"), theme.muted)),
         ];
-        let selected = index == menu.selected;
+        let selected = panel == menu.panel && index == menu.selected;
         lines.extend(row.into_iter().map(|line| match selected {
             true => line.style(Style::new().bg(theme.selection)),
             false => line,
         }));
     }
-    if let Some(note) = menu.note {
-        lines.push(Line::from(""));
-        lines.push(Line::from(paint.span(format!(" {note}"), theme.warning)));
-    }
     lines
 }
 
-/// The merge menu: GitHub's merge button and its dropdown.
+/// The hint under a menu box.
+const MENU_HINT: &str = " j/k move, enter picks, esc ";
+
+/// The merge menu: the tabs, the panel shown, and why Enter did nothing. The tab row is
+/// padded to the widest panel, so the box keeps its width as Tab switches.
 fn render_merge_menu(frame: &mut Frame, menu: &MergeMenu, paint: Paint) {
-    let lines = merge_menu_lines(menu, paint);
-    let title = match (menu.items.first(), menu.ready, menu.bypass) {
-        (Some(MergeItem::DisableAuto), ..) => " Auto-merge is on ".to_string(),
-        (_, _, true) => " Bypass requirements and merge ".to_string(),
-        (_, true, _) => format!(" Merge into {} ", menu.base),
-        (_, false, _) if menu.can_auto_merge => " Enable auto-merge ".to_string(),
+    let widest = MergePanel::ALL
+        .into_iter()
+        .flat_map(|panel| merge_panel_lines(menu, panel, paint))
+        .map(|line| line.width())
+        .max()
+        .unwrap_or(0);
+    let mut tabs = merge_tabs(menu, paint);
+    let pad = widest.saturating_sub(tabs.width());
+    tabs.spans.push(Span::raw(" ".repeat(pad)));
+    let mut lines = vec![tabs, Line::from("")];
+    lines.extend(merge_panel_lines(menu, menu.panel, paint));
+    if let Some(note) = &menu.note {
+        lines.push(Line::from(""));
+        lines.push(Line::from(
+            paint.span(format!(" {note}"), paint.theme.warning),
+        ));
+    }
+    let title = match menu.panel {
+        MergePanel::Draft => " Draft ".to_string(),
+        _ if menu.auto_merge.is_some() => " Auto-merge is on ".to_string(),
+        _ if menu.ready => format!(" Merge into {} ", menu.base),
+        _ if menu.can_auto_merge => " Enable auto-merge ".to_string(),
         _ => " Merging is blocked ".to_string(),
     };
-    render_menu_box(frame, title, lines, paint);
+    let hint = " tab panel, j/k move, enter picks, esc ";
+    render_menu_box(frame, title, lines, hint, paint);
 }
 
 /// o's choice: the file's GitHub page, or the clone's copy in the editor.
@@ -4019,11 +4325,17 @@ fn render_open_menu(frame: &mut Frame, menu: &OpenMenu, paint: Paint) {
         }));
     }
     let name = menu.file.rsplit('/').next().unwrap_or(&menu.file);
-    render_menu_box(frame, format!(" Open {name} "), lines, paint);
+    render_menu_box(frame, format!(" Open {name} "), lines, MENU_HINT, paint);
 }
 
 /// A centered box as wide as its longest line, so notes wrap only on a narrow terminal.
-fn render_menu_box(frame: &mut Frame, title: String, lines: Vec<Line<'static>>, paint: Paint) {
+fn render_menu_box(
+    frame: &mut Frame,
+    title: String,
+    lines: Vec<Line<'static>>,
+    hint: &str,
+    paint: Paint,
+) {
     let theme = paint.theme;
     let area = frame.area();
     let longest = lines.iter().map(Line::width).max().unwrap_or(0) + 1;
@@ -4045,7 +4357,7 @@ fn render_menu_box(frame: &mut Frame, title: String, lines: Vec<Line<'static>>, 
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(theme.heading))
         .title(paint.bold(title, theme.heading))
-        .title_bottom(paint.span(" j/k move, enter picks, esc ", theme.muted))
+        .title_bottom(paint.span(hint.to_string(), theme.muted))
         .style(Style::new().bg(theme.background).fg(theme.foreground));
     frame.render_widget(Clear, box_area);
     frame.render_widget(
@@ -4336,6 +4648,49 @@ mod tests {
             row(5, 5, 40).scroll(0, 10),
             5,
             "a thread taller than the pane: its code at the top, J reads on"
+        );
+    }
+
+    #[test]
+    fn the_file_list_title_shows_what_v_and_t_do_when_they_fit() {
+        let theme = theme::by_name("dracula").unwrap();
+        let paint = Paint {
+            theme: &theme,
+            now: Utc::now(),
+        };
+        let text = |hidden, tree, above, width| {
+            list_title(
+                " 3/9 viewed ".to_string(),
+                hidden,
+                tree,
+                above,
+                width,
+                paint,
+            )
+            .to_string()
+        };
+        assert_eq!(
+            text(false, true, 0, 40),
+            " 3/9 viewed V hides viewed t flat "
+        );
+        assert_eq!(
+            text(true, false, 0, 40),
+            " 3/9 viewed V shows viewed t tree "
+        );
+        assert_eq!(
+            text(false, true, 0, 30),
+            " 3/9 viewed V hides viewed ",
+            "t goes first"
+        );
+        assert_eq!(
+            text(false, true, 0, 20),
+            " 3/9 viewed ",
+            "too narrow: the count alone"
+        );
+        assert_eq!(
+            text(false, true, 72, 36),
+            " 3/9 viewed ",
+            "the ↑ 72 more count keeps its room"
         );
     }
 

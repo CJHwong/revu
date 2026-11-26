@@ -96,7 +96,6 @@ pub enum Action {
         line: usize,
     },
     /// A changed file in full, drawn by the diff renderer with its changes marked.
-    ShowWholeDiff(DiffJob),
     SetWorkspace(String),
     /// Apply a built-in theme and save it to the config.
     SetTheme(&'static str),
@@ -127,7 +126,6 @@ pub enum Action {
         pr: PrRef,
         pull_request_id: String,
         head_oid: String,
-        pending_review: Option<String>,
         verdict: Verdict,
         body: String,
     },
@@ -136,7 +134,6 @@ pub enum Action {
         pr: PrRef,
         pull_request_id: String,
         head_oid: String,
-        pending_review: Option<String>,
         target: LineTarget,
         body: String,
     },
@@ -147,10 +144,28 @@ pub enum Action {
         head_oid: String,
         request: MergeRequest,
     },
-    /// Delete the pending review and its line comments.
+    /// Switch the PR to draft, or out of draft, ready for review.
+    SetDraft {
+        pr: PrRef,
+        pull_request_id: String,
+        draft: bool,
+    },
+    /// Change the text of a comment in your pending review.
+    EditDraft {
+        pr: PrRef,
+        comment: String,
+        body: String,
+    },
+    /// Delete one comment from your pending review.
+    DeleteDraft {
+        pr: PrRef,
+        comment: String,
+    },
+    /// Delete the pending review and its line comments. It is looked up fresh by the
+    /// PR's node id, as it may have changed outside revu.
     DiscardReview {
         pr: PrRef,
-        pending_review: String,
+        pull_request_id: String,
     },
     /// Reply to a review thread. `pending`: you have a pending review, which the reply
     /// joins.
@@ -312,7 +327,7 @@ pub enum Overlay {
         /// The file with the renderer's or bat's colors.
         lines: Option<Result<Text<'static>, String>>,
         scroll: u16,
-        /// For a file read at the PR head, the line it opened at; None for a whole diff.
+        /// The line it opened at, marked.
         line: Option<usize>,
     },
 }
@@ -1002,6 +1017,31 @@ impl DetailView {
         }
     }
 
+    /// The comment of your pending review that Enter edits and x deletes: the first one
+    /// on the cursor's line.
+    pub fn draft_here(&self) -> Result<&crate::model::Draft, String> {
+        let mode = self.line_mode.as_ref().ok_or("select lines first")?;
+        let Some(Ok(rows)) = &mode.rows else {
+            return Err("the diff is still loading".to_string());
+        };
+        let Some(Ok(activity)) = &self.activity else {
+            return Err("the review threads are still loading".to_string());
+        };
+        let here = rows.get(mode.cursor).and_then(DiffRow::target);
+        let on_line = |draft: &&crate::model::Draft| {
+            let lines = draft.start_line.unwrap_or(draft.line)..=draft.line;
+            let covers = |(side, line)| side == draft.side && lines.contains(&line);
+            draft.path == mode.path && here.is_some_and(covers)
+        };
+        let found = activity.drafts.iter().find(on_line);
+        found.ok_or_else(|| "no pending comment of yours on this line".to_string())
+    }
+
+    /// Whether r and u have a thread to act on, for the footer.
+    pub fn thread_on_cursor(&self) -> bool {
+        self.thread_here().is_ok()
+    }
+
     /// The review thread r and u act on: the one on the cursor's line, an outdated one
     /// with the cursor on the first row, or the one clicked when there are several.
     fn thread_here(&self) -> Result<&crate::model::ThreadLine, String> {
@@ -1144,32 +1184,6 @@ impl DetailView {
         })
     }
 
-    /// The selected changed file in full, with its changes, as the current renderer draws
-    /// it across the whole screen.
-    fn open_whole_diff(&mut self) -> Result<Action, String> {
-        let RepoState::Ready(repo) = &self.repo else {
-            return Err(self.clone_not_ready("the local clone is not ready yet"));
-        };
-        let mut key = self.current_diff_key().ok_or("select a file first")?;
-        let DiffTarget::File(path) = &key.target else {
-            return Err("select a file first".to_string());
-        };
-        key.width = self.body_width.max(self.diff_width);
-        let job = diff_job(
-            &self.pr,
-            repo,
-            self.loaded().ok_or("the pull request is still loading")?,
-            key.clone(),
-        );
-        self.overlays.push(Overlay::File {
-            path: path.clone(),
-            lines: None,
-            scroll: 0,
-            line: None,
-        });
-        Ok(Action::ShowWholeDiff(job))
-    }
-
     fn overlay_key(&mut self, key: KeyCode) -> Result<Option<Action>, String> {
         let Some(overlay) = self.overlays.last_mut() else {
             return Ok(None);
@@ -1218,6 +1232,11 @@ impl DetailView {
         if query.trim().is_empty() {
             return Err("type some text to find".to_string());
         }
+        if self.tab == Tab::Files
+            && let Some(file) = self.changed_file_named(query.trim())
+        {
+            return self.select_changed_file(file).map(|()| None);
+        }
         self.find = Some(query.to_string());
         self.find_hit = None;
         self.find_files = None;
@@ -1241,6 +1260,40 @@ impl DetailView {
             head,
             query: query.to_string(),
         }))
+    }
+
+    /// The changed file the text names: its exact path, or a file name only one changed
+    /// file has. The find prompt completes both.
+    fn changed_file_named(&self, text: &str) -> Option<usize> {
+        let files = self.loaded_files()?;
+        if let Some(exact) = files.iter().position(|file| file.path == text) {
+            return Some(exact);
+        }
+        let named = |file: &&ChangedFile| file.path.rsplit('/').next() == Some(text);
+        match files.iter().filter(named).count() {
+            1 => files.iter().position(|file| named(&file)),
+            _ => None,
+        }
+    }
+
+    /// Selects a changed file and shows its diff, opening its folders, in place of a find.
+    fn select_changed_file(&mut self, file: usize) -> Result<(), String> {
+        let files = self
+            .loaded_files()
+            .ok_or("the file list is still loading")?;
+        let path = files[file].path.clone();
+        if !self.visible_files().contains(&file) {
+            return Err(format!(
+                "{path} is viewed, and viewed files are hidden; V shows them"
+            ));
+        }
+        self.clear_find();
+        self.folded_dirs
+            .retain(|dir| !path.starts_with(&format!("{dir}/")));
+        self.file_list_top = None;
+        self.select_file_row(Some(file));
+        self.reset_diff_position();
+        Ok(())
     }
 
     /// Esc: ends the find, its marks and its counts.
@@ -1808,7 +1861,7 @@ impl DetailView {
     }
 
     /// The PR right above or below this one in its stack.
-    fn stack_neighbor(&self, above: bool) -> Option<u64> {
+    pub fn stack_neighbor(&self, above: bool) -> Option<u64> {
         let members = &self.stack.as_ref()?.stack.members;
         let index = members
             .iter()
@@ -2046,7 +2099,21 @@ pub enum PromptKind {
     /// Asks before deleting your pending review and its line comments.
     ConfirmDiscard {
         pr: PrRef,
-        pending_review: String,
+        pull_request_id: String,
+    },
+    /// Asks before switching the PR to draft (`draft`) or ready for review.
+    ConfirmDraft {
+        pr: PrRef,
+        pull_request_id: String,
+        draft: bool,
+        /// Auto-merge is on, and GitHub turns it off on a draft.
+        auto_merge: bool,
+    },
+    /// Asks before deleting one comment of your pending review.
+    ConfirmDeleteDraft {
+        pr: PrRef,
+        comment: String,
+        place: String,
     },
     /// Asks before a merge write, which cannot be undone.
     ConfirmMerge {
@@ -2080,8 +2147,26 @@ impl Action {
                     "turning auto-merge on...",
                     "auto-merge on; GitHub merges it once the requirements pass",
                 ),
+                MergeRequest::ChangeAuto(_) => (
+                    "changing the auto-merge method...",
+                    "auto-merge method changed",
+                ),
                 MergeRequest::DisableAuto => ("turning auto-merge off...", "auto-merge off"),
             },
+            Action::SetDraft { draft: true, .. } => {
+                ("converting the PR to a draft...", "the PR is a draft")
+            }
+            Action::SetDraft { .. } => (
+                "marking the PR ready for review...",
+                "the PR is ready for review",
+            ),
+            Action::EditDraft { .. } => (
+                "saving the pending comment...",
+                "pending comment saved; R submits the review",
+            ),
+            Action::DeleteDraft { .. } => {
+                ("deleting the pending comment...", "pending comment deleted")
+            }
             Action::DiscardReview { .. } => (
                 "discarding your pending review...",
                 "pending review discarded",
@@ -2097,7 +2182,19 @@ impl Action {
             Action::ResolveThread { .. } => ("reopening the thread...", "thread reopened"),
             _ => return None,
         };
-        let reload_on_error = matches!(self, Action::SetLabels { .. });
+        // A method change that fails halfway leaves auto-merge off, and a pending
+        // comment that fails may be gone from GitHub already.
+        let reload_on_error = matches!(
+            self,
+            Action::SetLabels { .. }
+                | Action::DiscardReview { .. }
+                | Action::EditDraft { .. }
+                | Action::DeleteDraft { .. }
+                | Action::Merge {
+                    request: MergeRequest::ChangeAuto(_),
+                    ..
+                }
+        );
         Some(SaveNote {
             doing,
             done,
@@ -2113,6 +2210,23 @@ pub struct SaveNote {
     pub done: &'static str,
     /// A failure may still have changed GitHub, so the PR loads again to show it.
     pub reload_on_error: bool,
+}
+
+/// A question that only y answers: what did not happen when it closes without one, and
+/// what y does, for the warning on any other answer.
+fn y_question(kind: &PromptKind) -> Option<(&'static str, &'static str)> {
+    let words = match kind {
+        PromptKind::ConfirmMerge { .. } => ("merge not sent", "merge"),
+        PromptKind::ConfirmDiscard { .. } => ("review not discarded", "discard it"),
+        PromptKind::ConfirmDraft { draft: true, .. } => {
+            ("the PR stays ready for review", "convert it to a draft")
+        }
+        PromptKind::ConfirmDraft { .. } => ("the PR stays a draft", "mark it ready for review"),
+        PromptKind::ConfirmDeleteDraft { .. } => ("comment not deleted", "delete it"),
+        PromptKind::ConfirmClone { .. } => ("not cloned", "clone it"),
+        _ => return None,
+    };
+    Some(words)
 }
 
 /// The label checklist: the repo's labels, ticked for the ones the PR will have.
@@ -2223,13 +2337,53 @@ fn note_viewed_write(sync: &mut HashMap<String, ViewedSync>, path: &str, before:
 /// A row of the merge menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MergeItem {
+    /// Merge now with this method.
     Method(MergeMethod),
-    /// Ticks merging now past branch protection, for an admin.
-    Bypass,
+    /// Merge now with this method, past the branch's requirements, for whoever GitHub
+    /// lets bypass them.
+    BypassMerge(MergeMethod),
+    /// Turn auto-merge on with this method.
+    EnableAuto(MergeMethod),
+    /// Auto-merge is on with another method; this one replaces it.
+    ChangeAuto(MergeMethod),
     DisableAuto,
+    ReadyForReview,
+    ConvertToDraft,
 }
 
-/// The merge menu: GitHub's merge button and its dropdown.
+/// A panel of the merge menu; Tab goes to the next. Merge holds auto-merge too, as
+/// GitHub's merge box does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergePanel {
+    Merge,
+    Draft,
+}
+
+impl MergePanel {
+    pub const ALL: [MergePanel; 2] = [MergePanel::Merge, MergePanel::Draft];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            MergePanel::Merge => "Merge",
+            MergePanel::Draft => "Draft",
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// What Enter on a row of the merge menu asks to send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuChoice {
+    /// The request, and whether it bypasses the requirements.
+    Merge(MergeRequest, bool),
+    /// Switch to draft (true) or ready for review (false).
+    Draft(bool),
+}
+
+/// The merge menu: merging and auto-merge in one panel, the draft switch in another.
 #[derive(Debug)]
 pub struct MergeMenu {
     pub pr: PrRef,
@@ -2237,64 +2391,130 @@ pub struct MergeMenu {
     pub head_oid: String,
     pub base: String,
     pub commit_count: u64,
-    pub items: Vec<MergeItem>,
     pub default_method: Option<MergeMethod>,
-    /// The PR can merge now; otherwise a method turns auto-merge on.
+    /// The PR can merge now.
     pub ready: bool,
     pub can_auto_merge: bool,
-    /// Bypass requirements is ticked.
-    pub bypass: bool,
+    /// The method auto-merge uses, when it is on.
+    pub auto_merge: Option<MergeMethod>,
+    /// Each panel's rows, in `MergePanel::ALL` order, or why it has none.
+    pub panels: [Result<Vec<MergeItem>, String>; 2],
+    pub panel: MergePanel,
+    /// The cursor, in the panel shown.
     pub selected: usize,
-    /// Why Enter did nothing, such as a blocked merge with no way past it.
-    pub note: Option<&'static str>,
+    /// Why Enter did nothing.
+    pub note: Option<String>,
 }
 
 impl MergeMenu {
-    /// The menu for the PR, or why GitHub would not merge it from here.
+    /// The menu for the PR, or why no panel can do anything.
     pub fn new(pr: &PrRef, detail: &PrDetail) -> Result<MergeMenu, String> {
-        let items = merge_items(detail)?;
-        let merge = &detail.merge;
-        let selected = items
-            .iter()
-            .position(|item| {
-                merge
-                    .default_method
-                    .is_some_and(|method| item == &MergeItem::Method(method))
-            })
-            .unwrap_or(0);
-        Ok(MergeMenu {
+        let panels = [merge_panel(detail), draft_panel(detail)];
+        if panels.iter().all(Result::is_err) {
+            return Err(panels[0].clone().unwrap_err());
+        }
+        let panel = match detail.lifecycle {
+            Lifecycle::Draft => MergePanel::Draft,
+            _ => MergePanel::Merge,
+        };
+        let mut menu = MergeMenu {
             pr: pr.clone(),
             pull_request_id: detail.id.clone(),
             head_oid: detail.head_oid.clone(),
             base: detail.base.clone(),
             commit_count: detail.commit_count,
-            items,
-            default_method: merge.default_method,
+            default_method: detail.merge.default_method,
             ready: merges_now(detail),
-            can_auto_merge: merge.can_enable_auto_merge,
-            bypass: false,
-            selected,
+            can_auto_merge: detail.merge.can_enable_auto_merge,
+            auto_merge: detail.merge.auto_merge.as_ref().map(|auto| auto.method),
+            panels,
+            panel,
+            selected: 0,
             note: None,
-        })
+        };
+        menu.show(panel);
+        Ok(menu)
+    }
+
+    /// The rows of the panel shown; none when it says why it has none.
+    pub fn items(&self) -> &[MergeItem] {
+        self.panels[self.panel.index()]
+            .as_deref()
+            .unwrap_or_default()
+    }
+
+    /// Shows a panel, with the cursor on your usual method when the panel has it. The
+    /// cursor starts on a bypass row only when the panel has nothing else, so a quick
+    /// enter never merges past the requirements.
+    fn show(&mut self, panel: MergePanel) {
+        self.panel = panel;
+        self.note = None;
+        let usual = |item: &MergeItem| match (item, self.default_method) {
+            (
+                MergeItem::Method(method)
+                | MergeItem::EnableAuto(method)
+                | MergeItem::BypassMerge(method),
+                Some(usual),
+            ) => *method == usual,
+            _ => false,
+        };
+        let bypass = |item: &MergeItem| matches!(item, MergeItem::BypassMerge(_));
+        let items = self.items();
+        let only_bypass = items.iter().all(bypass);
+        let start = items
+            .iter()
+            .position(|item| usual(item) && (only_bypass || !bypass(item)));
+        self.selected = start.unwrap_or(0);
+    }
+
+    /// Tab and shift+tab: the next or previous panel, round.
+    fn step(&mut self, forward: bool) {
+        let shift = if forward {
+            1
+        } else {
+            MergePanel::ALL.len() - 1
+        };
+        let next = (self.panel.index() + shift) % MergePanel::ALL.len();
+        self.show(MergePanel::ALL[next]);
     }
 
     /// What Enter on the selected row asks to send, if anything.
-    fn request(&self) -> Result<(MergeRequest, bool), &'static str> {
-        let method = match self.items[self.selected] {
-            MergeItem::Method(method) => method,
-            MergeItem::DisableAuto => return Ok((MergeRequest::DisableAuto, false)),
-            MergeItem::Bypass => return Err("enter ticks bypass"),
+    fn request(&self) -> Result<MenuChoice, &'static str> {
+        let Some(item) = self.items().get(self.selected) else {
+            return Err("nothing to pick here; tab shows the other panels");
         };
-        if self.bypass {
-            return Ok((MergeRequest::Now(method), true));
+        let merge = |request| Ok(MenuChoice::Merge(request, false));
+        match *item {
+            MergeItem::Method(method) => merge(MergeRequest::Now(method)),
+            MergeItem::BypassMerge(method) => {
+                Ok(MenuChoice::Merge(MergeRequest::Now(method), true))
+            }
+            MergeItem::EnableAuto(method) => merge(MergeRequest::Auto(method)),
+            MergeItem::ChangeAuto(method) => merge(MergeRequest::ChangeAuto(method)),
+            MergeItem::DisableAuto => merge(MergeRequest::DisableAuto),
+            MergeItem::ReadyForReview => Ok(MenuChoice::Draft(false)),
+            MergeItem::ConvertToDraft => Ok(MenuChoice::Draft(true)),
         }
-        if self.ready {
-            return Ok((MergeRequest::Now(method), false));
-        }
-        if self.can_auto_merge {
-            return Ok((MergeRequest::Auto(method), false));
-        }
-        Err("GitHub blocks the merge; tick Bypass requirements to merge anyway")
+    }
+}
+
+/// The question that confirms a choice of the merge menu.
+fn choice_question(menu: &MergeMenu, choice: MenuChoice) -> PromptKind {
+    match choice {
+        MenuChoice::Merge(request, bypass) => PromptKind::ConfirmMerge {
+            pr: menu.pr.clone(),
+            pull_request_id: menu.pull_request_id.clone(),
+            head_oid: menu.head_oid.clone(),
+            request,
+            base: menu.base.clone(),
+            bypass,
+        },
+        MenuChoice::Draft(draft) => PromptKind::ConfirmDraft {
+            pr: menu.pr.clone(),
+            pull_request_id: menu.pull_request_id.clone(),
+            draft,
+            auto_merge: menu.auto_merge.is_some(),
+        },
     }
 }
 
@@ -2306,22 +2526,29 @@ fn merges_now(detail: &PrDetail) -> bool {
     )
 }
 
-/// The merge menu's rows, as GitHub's merge box offers them, or why there are none.
-fn merge_items(detail: &PrDetail) -> Result<Vec<MergeItem>, String> {
-    let merge = &detail.merge;
+/// Why nothing applies to a PR that is not open, or None for an open one.
+fn finished(detail: &PrDetail) -> Option<String> {
     match detail.lifecycle {
-        Lifecycle::Merged { .. } => return Err("the PR is merged already".to_string()),
-        Lifecycle::Closed { .. } => return Err("the PR is closed".to_string()),
-        Lifecycle::Draft => {
-            return Err("the PR is a draft; mark it ready for review first".to_string());
-        }
-        Lifecycle::Open => {}
+        Lifecycle::Merged { .. } => Some("the PR is merged already".to_string()),
+        Lifecycle::Closed { .. } => Some("the PR is closed".to_string()),
+        _ => None,
     }
-    if merge.auto_merge.is_some() {
-        if merge.can_disable_auto_merge {
-            return Ok(vec![MergeItem::DisableAuto]);
-        }
-        return Err("auto-merge is on; GitHub merges it once the requirements pass".to_string());
+}
+
+/// Merging and auto-merge, as GitHub's merge box offers them: the methods merge now,
+/// or turn auto-merge on while GitHub blocks the merge, with Bypass requirements for an
+/// admin; when auto-merge is on, the other methods switch it and Disable turns it off.
+/// Or why none of it applies.
+fn merge_panel(detail: &PrDetail) -> Result<Vec<MergeItem>, String> {
+    let merge = &detail.merge;
+    if let Some(why) = finished(detail) {
+        return Err(why);
+    }
+    if detail.lifecycle == Lifecycle::Draft {
+        return Err("the PR is a draft; the Draft tab marks it ready for review".to_string());
+    }
+    if let Some(auto) = &merge.auto_merge {
+        return auto_merge_rows(detail, auto.method);
     }
     if !merge.can_write && !merge.can_bypass {
         return Err("you cannot merge in this repo".to_string());
@@ -2340,19 +2567,54 @@ fn merge_items(detail: &PrDetail) -> Result<Vec<MergeItem>, String> {
         return Err("GitHub reports no merge method for this repo".to_string());
     }
     let ready = merges_now(detail);
-    if !ready && !merge.can_enable_auto_merge && !merge.can_bypass {
-        return Err("GitHub blocks the merge, and auto-merge is off for this repo".to_string());
-    }
-    let mut items: Vec<MergeItem> = merge
-        .methods
-        .iter()
-        .copied()
-        .map(MergeItem::Method)
-        .collect();
+    let methods = merge.methods.iter().copied();
+    // GitHub refuses auto-merge on a PR that can merge now: "Pull request is in clean status".
+    let mut items: Vec<MergeItem> = match (ready, merge.can_enable_auto_merge) {
+        (true, _) => methods.map(MergeItem::Method).collect(),
+        (false, true) => methods.map(MergeItem::EnableAuto).collect(),
+        (false, false) if merge.can_bypass => Vec::new(),
+        (false, false) => {
+            return Err("GitHub blocks the merge, and auto-merge is off for this repo".to_string());
+        }
+    };
     if !ready && merge.can_bypass {
-        items.push(MergeItem::Bypass);
+        items.extend(merge.methods.iter().copied().map(MergeItem::BypassMerge));
     }
     Ok(items)
+}
+
+/// With auto-merge on: the other methods, which switch it, and Disable auto-merge.
+/// An admin also gets the bypass rows, as GitHub's merge box offers them while
+/// auto-merge waits.
+fn auto_merge_rows(detail: &PrDetail, on: MergeMethod) -> Result<Vec<MergeItem>, String> {
+    let merge = &detail.merge;
+    let mut items: Vec<MergeItem> = Vec::new();
+    if merge.can_disable_auto_merge {
+        let others = merge.methods.iter().filter(|method| **method != on);
+        items.extend(others.copied().map(MergeItem::ChangeAuto));
+        items.push(MergeItem::DisableAuto);
+    }
+    if !merges_now(detail) && merge.can_bypass {
+        items.extend(merge.methods.iter().copied().map(MergeItem::BypassMerge));
+    }
+    match items.is_empty() {
+        true => Err("auto-merge is on; GitHub merges it once the requirements pass".to_string()),
+        false => Ok(items),
+    }
+}
+
+/// The draft switch, for whoever can edit the PR.
+fn draft_panel(detail: &PrDetail) -> Result<Vec<MergeItem>, String> {
+    if let Some(why) = finished(detail) {
+        return Err(why);
+    }
+    if !detail.merge.can_update {
+        return Err("you cannot edit this PR, so you cannot switch its draft state".to_string());
+    }
+    match detail.lifecycle {
+        Lifecycle::Draft => Ok(vec![MergeItem::ReadyForReview]),
+        _ => Ok(vec![MergeItem::ConvertToDraft]),
+    }
 }
 
 /// Select lines' state: the file's numbered rows, the cursor, and a range's other end.
@@ -2452,6 +2714,11 @@ pub enum ComposeKind {
     Reply {
         thread: String,
         author: String,
+        place: String,
+    },
+    /// An edit to a comment in your pending review: its ID, and where it is, for the title.
+    EditDraft {
+        comment: String,
         place: String,
     },
     /// A request to a coding agent, with the context revu attaches.
@@ -2577,6 +2844,9 @@ impl Composer {
             } if empty => Err("write a comment, or add line comments first".to_string()),
             ComposeKind::LineComment(_) if empty => Err("write the comment first".to_string()),
             ComposeKind::Reply { .. } if empty => Err("write the reply first".to_string()),
+            ComposeKind::EditDraft { .. } if empty => {
+                Err("a comment needs text; x in select lines deletes it".to_string())
+            }
             ComposeKind::Handoff(_) if empty && !request_optional => {
                 Err("write what you want the agent to do".to_string())
             }
@@ -2611,6 +2881,10 @@ impl Composer {
             ComposeKind::Reply { .. } => {
                 "post this reply on GitHub? y posts it, any other key goes back".to_string()
             }
+            ComposeKind::EditDraft { .. } => {
+                "save the edit to your pending comment? y saves it, any other key goes back"
+                    .to_string()
+            }
             // ctrl+s opens the agent list, which is the confirm step.
             ComposeKind::Handoff(_) => String::new(),
         }
@@ -2629,7 +2903,6 @@ impl Composer {
                 pr,
                 pull_request_id,
                 head_oid,
-                pending_review,
                 verdict: *verdict,
                 body,
             },
@@ -2637,7 +2910,6 @@ impl Composer {
                 pr,
                 pull_request_id,
                 head_oid,
-                pending_review,
                 target: target.clone(),
                 body,
             },
@@ -2646,6 +2918,11 @@ impl Composer {
                 thread: thread.clone(),
                 body,
                 pending: pending_review.is_some(),
+            },
+            ComposeKind::EditDraft { comment, .. } => Action::EditDraft {
+                pr,
+                comment: comment.clone(),
+                body,
             },
             ComposeKind::Handoff(context) => Action::PickAgent {
                 message: crate::handoff::message(context, &body),
@@ -3999,7 +4276,7 @@ impl App {
             return self.gallery_key(key.code);
         }
         if self.label_menu.is_some() {
-            return self.label_menu_key(key.code);
+            return self.label_menu_key(key);
         }
         if self.merge_menu.is_some() {
             self.merge_menu_key(key.code);
@@ -4009,7 +4286,7 @@ impl App {
             return self.open_menu_key(key.code);
         }
         if self.prompt.is_some() {
-            return self.prompt_key(key.code);
+            return self.prompt_key(key);
         }
         if self.show_help {
             match key.code {
@@ -4239,10 +4516,10 @@ impl App {
         prompt.error = None;
     }
 
-    fn prompt_key(&mut self, key: KeyCode) -> Option<Action> {
+    fn prompt_key(&mut self, event: KeyEvent) -> Option<Action> {
         let selected = self.selected_pr().map(PrSummary::reference);
         let prompt = self.prompt.as_mut()?;
-        match key {
+        match event.code {
             // Escaping a clone question is the same as answering no.
             KeyCode::Esc if matches!(prompt.kind, PromptKind::ConfirmClone { .. }) => {
                 prompt.text.clear();
@@ -4265,25 +4542,25 @@ impl App {
                 self.inbox_filter = prompt.text.trim().to_string();
                 self.prompt = None;
             }
-            // A merge is hard to undo, so an answer that sends nothing says so.
-            KeyCode::Esc if matches!(prompt.kind, PromptKind::ConfirmMerge { .. }) => {
+            // A y-question sends nothing on esc, and says so.
+            KeyCode::Esc => {
+                let question = y_question(&prompt.kind);
                 self.prompt = None;
-                self.error = Some("merge not sent".to_string());
+                if let Some((not_done, _)) = question {
+                    self.error = Some(not_done.to_string());
+                }
             }
-            KeyCode::Esc if matches!(prompt.kind, PromptKind::ConfirmDiscard { .. }) => {
-                self.prompt = None;
-                self.error = Some("review not discarded".to_string());
-            }
-            KeyCode::Enter
-                if matches!(prompt.kind, PromptKind::ConfirmMerge { .. })
-                    && !prompt.text.trim().eq_ignore_ascii_case("y") =>
-            {
+            // Only y does it; any other answer asks again rather than counting as no.
+            KeyCode::Enter if !prompt.text.trim().eq_ignore_ascii_case("y") => {
+                let Some((not_done, verb)) = y_question(&prompt.kind) else {
+                    return self.submit_prompt();
+                };
                 prompt.text.clear();
                 prompt.cursor = LineCursor::default();
-                prompt.error =
-                    Some("merge not sent: type y, then enter, to merge; esc cancels".to_string());
+                prompt.error = Some(format!(
+                    "{not_done}: type y, then enter, to {verb}; esc cancels"
+                ));
             }
-            KeyCode::Esc => self.prompt = None,
             KeyCode::Tab => {
                 if let Some(rest) = prompt.suggestion() {
                     prompt.text.push_str(&rest);
@@ -4291,7 +4568,7 @@ impl App {
             }
             KeyCode::Enter => return self.submit_prompt(),
             _ => {
-                prompt.cursor.key(&mut prompt.text, key);
+                prompt.cursor.key(&mut prompt.text, event);
             }
         }
         // The filter changes the rows; the cursor stays on its PR while it shows.
@@ -4313,12 +4590,26 @@ impl App {
             }
             PromptKind::UpdatedWithin => self.submit_updated_within(&prompt.text),
             PromptKind::Editor { open } => self.submit_editor(&prompt.text, open),
-            PromptKind::ConfirmDiscard { pr, pending_review } => {
-                if prompt.text.trim().eq_ignore_ascii_case("y") {
-                    return Some(Action::DiscardReview { pr, pending_review });
-                }
-                self.error = Some("review not discarded".to_string());
-                None
+            // prompt_key lets only y through to the questions below.
+            PromptKind::ConfirmDiscard {
+                pr,
+                pull_request_id,
+            } => Some(Action::DiscardReview {
+                pr,
+                pull_request_id,
+            }),
+            PromptKind::ConfirmDraft {
+                pr,
+                pull_request_id,
+                draft,
+                ..
+            } => Some(Action::SetDraft {
+                pr,
+                pull_request_id,
+                draft,
+            }),
+            PromptKind::ConfirmDeleteDraft { pr, comment, .. } => {
+                Some(Action::DeleteDraft { pr, comment })
             }
             PromptKind::ConfirmMerge {
                 pr,
@@ -4326,16 +4617,12 @@ impl App {
                 head_oid,
                 request,
                 ..
-            } => prompt
-                .text
-                .trim()
-                .eq_ignore_ascii_case("y")
-                .then_some(Action::Merge {
-                    pr,
-                    pull_request_id,
-                    head_oid,
-                    request,
-                }),
+            } => Some(Action::Merge {
+                pr,
+                pull_request_id,
+                head_oid,
+                request,
+            }),
         }
     }
 
@@ -4445,7 +4732,15 @@ impl App {
                 return Some(Action::Copy(crate::line_diff::snippet(&mode.path, picked)));
             }
             KeyCode::Enter => {
-                let result = self.open_line_comment();
+                let marked = mode.anchor.is_some();
+                let result = match !marked && view.draft_here().is_ok() {
+                    true => self.open_draft_edit(),
+                    false => self.open_line_comment(),
+                };
+                self.error = result.err();
+            }
+            KeyCode::Char('x') => {
+                let result = self.ask_delete_draft();
                 self.error = result.err();
             }
             KeyCode::Char('R') => {
@@ -4600,6 +4895,41 @@ impl App {
             Ok(note) => self.saved = Some(note),
             Err(error) => self.error = Some(error),
         }
+    }
+
+    /// Enter on a line with a pending comment of yours: a box holding its text.
+    fn open_draft_edit(&mut self) -> Result<(), String> {
+        let Screen::Detail(view) = &self.screen else {
+            return Ok(());
+        };
+        let draft = view.draft_here()?;
+        let (Some(Ok(detail)), Some(Ok(activity))) = (&view.detail, &view.activity) else {
+            return Err("wait for the PR to load before editing".to_string());
+        };
+        let kind = ComposeKind::EditDraft {
+            comment: draft.id.clone(),
+            place: draft.place(),
+        };
+        let mut composer = Composer::new(view.pr.clone(), detail, activity, kind);
+        composer.editor.text = draft.body.clone();
+        composer.editor.cursor = draft.body.len();
+        self.composer = Some(composer);
+        Ok(())
+    }
+
+    /// x in select lines: asks before deleting the pending comment on the cursor's line.
+    fn ask_delete_draft(&mut self) -> Result<(), String> {
+        let Screen::Detail(view) = &self.screen else {
+            return Ok(());
+        };
+        let draft = view.draft_here()?;
+        let kind = PromptKind::ConfirmDeleteDraft {
+            pr: view.pr.clone(),
+            comment: draft.id.clone(),
+            place: draft.place(),
+        };
+        self.ask(kind, "");
+        Ok(())
     }
 
     /// Enter in select lines: a box for the line, or the range V marked.
@@ -4786,11 +5116,11 @@ impl App {
     }
 
     /// Typing filters, up and down move, space ticks, enter applies, esc closes.
-    fn label_menu_key(&mut self, key: KeyCode) -> Option<Action> {
+    fn label_menu_key(&mut self, event: KeyEvent) -> Option<Action> {
         let menu = self.label_menu.as_mut()?;
         let shown = menu.shown().len();
         let cancel_asked = std::mem::take(&mut menu.cancel_asked);
-        match key {
+        match event.code {
             // Ticks are a write to GitHub not sent yet, so esc asks once before it drops them.
             KeyCode::Esc if menu.changed() && !cancel_asked => menu.cancel_asked = true,
             KeyCode::Esc => {
@@ -4808,7 +5138,7 @@ impl App {
             }
             _ => {
                 let before = menu.filter.clone();
-                menu.filter_cursor.key(&mut menu.filter, key);
+                menu.filter_cursor.key(&mut menu.filter, event);
                 if menu.filter != before {
                     menu.selected = 0;
                 }
@@ -4850,31 +5180,20 @@ impl App {
         let Some(menu) = self.merge_menu.as_mut() else {
             return;
         };
-        let count = menu.items.len();
+        let count = menu.items().len().max(1);
         match key {
             KeyCode::Char('j') | KeyCode::Down => menu.selected = (menu.selected + 1) % count,
             KeyCode::Char('k') | KeyCode::Up => menu.selected = (menu.selected + count - 1) % count,
+            KeyCode::Tab => menu.step(true),
+            KeyCode::BackTab => menu.step(false),
             KeyCode::Esc | KeyCode::Char('q') => self.merge_menu = None,
-            KeyCode::Enter | KeyCode::Char(' ')
-                if menu.items[menu.selected] == MergeItem::Bypass =>
-            {
-                menu.bypass = !menu.bypass;
-                menu.note = None;
-            }
             KeyCode::Enter => match menu.request() {
-                Ok((request, bypass)) => {
-                    let kind = PromptKind::ConfirmMerge {
-                        pr: menu.pr.clone(),
-                        pull_request_id: menu.pull_request_id.clone(),
-                        head_oid: menu.head_oid.clone(),
-                        request,
-                        base: menu.base.clone(),
-                        bypass,
-                    };
+                Ok(choice) => {
+                    let kind = choice_question(menu, choice);
                     self.merge_menu = None;
                     self.ask(kind, "");
                 }
-                Err(note) => menu.note = Some(note),
+                Err(note) => menu.note = Some(note.to_string()),
             },
             _ => {}
         }
@@ -4916,15 +5235,15 @@ impl App {
             return Ok(());
         };
         let pending = match &view.activity {
-            Some(Ok(activity)) => activity.pending_review.clone(),
-            _ => None,
+            Some(Ok(activity)) => activity.pending_review.is_some(),
+            _ => false,
         };
-        let Some(pending_review) = pending else {
+        let Some(detail) = view.loaded().filter(|_| pending) else {
             return Err("you have no pending review on this PR".to_string());
         };
         let kind = PromptKind::ConfirmDiscard {
             pr: view.pr.clone(),
-            pending_review,
+            pull_request_id: detail.id.clone(),
         };
         self.ask(kind, "");
         Ok(())
@@ -5158,10 +5477,6 @@ impl App {
             }
             KeyCode::Char('z') if view.tab == Tab::Files => {
                 view.file_list_hidden = !view.file_list_hidden
-            }
-            KeyCode::Enter if view.tab == Tab::Files => {
-                let result = view.open_whole_diff().map(Some);
-                return self.report(result);
             }
             KeyCode::Char('w') if diff_pane => {
                 view.diff_wrap = !view.diff_wrap;
@@ -6782,13 +7097,15 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_a_file_shows_the_whole_file() {
+    fn z_hides_or_shows_the_list_and_enter_on_a_file_does_nothing() {
         let (mut app, pr) = files_tab(vec![file("a.md", ViewedState::Unviewed)]);
         ready_repo(&mut app, &pr);
-        let Some(Action::ShowWholeDiff(job)) = app.handle_key(key(KeyCode::Enter)) else {
-            panic!("expected the whole file with its changes");
-        };
-        assert_eq!(job.paths, ["a.md"]);
+        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
+        assert!(view(&app).overlays.is_empty());
+        app.handle_key(key(KeyCode::Char('z')));
+        assert!(view(&app).file_list_hidden);
+        app.handle_key(key(KeyCode::Char('z')));
+        assert!(!view(&app).file_list_hidden);
     }
 
     #[test]
@@ -7187,27 +7504,25 @@ mod tests {
 
     #[test]
     fn a_discard_answer_other_than_y_says_the_review_stays() {
-        for answer in [Some("n"), None] {
-            let (mut app, pr) = files_tab(Vec::new());
-            let mut activity = crate::model::tests::sample_activity();
-            activity.pending_review = Some("PRR_1".to_string());
-            app.set_activity(&pr, Ok(activity));
-            app.handle_key(key(KeyCode::Char('X')));
-            assert!(app.prompt.is_some(), "X asks first");
-            let action = match answer {
-                Some(text) => {
-                    type_text(&mut app, text);
-                    app.handle_key(key(KeyCode::Enter))
-                }
-                None => app.handle_key(key(KeyCode::Esc)),
-            };
-            assert!(action.is_none() && app.prompt.is_none());
-            assert_eq!(
-                app.error.as_deref(),
-                Some("review not discarded"),
-                "{answer:?}"
-            );
-        }
+        let (mut app, pr) = files_tab(Vec::new());
+        let mut activity = crate::model::tests::sample_activity();
+        activity.pending_review = Some("PRR_1".to_string());
+        app.set_activity(&pr, Ok(activity));
+        app.handle_key(key(KeyCode::Char('X')));
+        assert!(app.prompt.is_some(), "X asks first");
+        type_text(&mut app, "n");
+        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
+        let prompt = app.prompt.as_ref().expect("another answer asks again");
+        assert!(
+            prompt
+                .error
+                .as_deref()
+                .unwrap()
+                .starts_with("review not discarded: type y")
+        );
+        assert!(app.handle_key(key(KeyCode::Esc)).is_none());
+        assert!(app.prompt.is_none());
+        assert_eq!(app.error.as_deref(), Some("review not discarded"));
     }
 
     #[test]
@@ -7704,12 +8019,14 @@ mod tests {
         app.set_written(&pr, Err("label not found".to_string()));
         assert_eq!(app.reload_after_write.as_ref(), Some(&pr));
         assert_eq!(app.error.as_deref(), Some("label not found"));
-        let discard = Action::DiscardReview {
+        let reply = Action::ReplyToThread {
             pr: pr.clone(),
-            pending_review: "R1".to_string(),
+            thread: "T1".to_string(),
+            body: "ok".to_string(),
+            pending: false,
         };
         app.reload_after_write = None;
-        app.saving = discard.save_note();
+        app.saving = reply.save_note();
         app.set_written(&pr, Err("offline".to_string()));
         assert!(
             app.reload_after_write.is_none(),
@@ -7904,6 +8221,116 @@ mod tests {
     }
 
     #[test]
+    fn the_footer_shows_the_keys_for_what_is_under_the_cursor() {
+        let keys = |app: &App| -> Vec<(String, String)> {
+            crate::ui::detail_hints(view(app))
+                .into_iter()
+                .map(|(key, action)| (key.to_string(), action))
+                .collect()
+        };
+        let has = |app: &App, key: &str| keys(app).iter().any(|(k, _)| k == key);
+        let at = |app: &App, key: &str| keys(app).iter().position(|(k, _)| k == key);
+
+        let (mut app, _) = files_tab(vec![file("b.md", ViewedState::Unviewed)]);
+        assert!(has(&app, "M"), "merge and draft show on Files changed");
+        assert_eq!(
+            at(&app, "J/K"),
+            Some(2),
+            "scroll diff right after next file"
+        );
+        app.handle_key(key(KeyCode::Char('2')));
+        assert_eq!(at(&app, "enter"), Some(1), "enter opens the commit");
+        assert!(!has(&app, "w"), "the diff pane's title shows w");
+        app.handle_key(key(KeyCode::Char('4')));
+        let label = |app: &App, key: &str| {
+            let hints = keys(app);
+            hints
+                .into_iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, action)| action)
+        };
+        assert_eq!(label(&app, "z").as_deref(), Some("hide list"));
+        view_mut(&mut app).file_list_hidden = true;
+        assert_eq!(label(&app, "z").as_deref(), Some("show list"));
+        view_mut(&mut app).file_list_hidden = false;
+        assert!(!has(&app, "n/N"));
+        view_mut(&mut app).find = Some("x".to_string());
+        assert_eq!(
+            at(&app, "n/N"),
+            Some(0),
+            "after a find, the next match first"
+        );
+        app.handle_key(key(KeyCode::Char('1')));
+        assert!(
+            at(&app, "M") < at(&app, "F"),
+            "merge before the comment order"
+        );
+        for tab in ['2', '3'] {
+            app.handle_key(key(KeyCode::Char(tab)));
+            assert!(has(&app, "M"), "tab {tab}");
+        }
+
+        let (mut app, _) = lines_with_a_draft(2);
+        let hints = keys(&app);
+        assert!(hints.contains(&("enter".to_string(), "edit pending".to_string())));
+        assert!(hints.contains(&("V".to_string(), "range".to_string())));
+        assert!(has(&app, "D"));
+        assert!(hints.contains(&("R".to_string(), "review (1 pending)".to_string())));
+        assert!(
+            !has(&app, "X"),
+            "no pending review on GitHub in this fixture"
+        );
+        if let Some(Ok(activity)) = view_mut(&mut app).activity.as_mut() {
+            activity.pending_review = Some("PRR_1".to_string());
+        }
+        assert!(!has(&app, "X"), "X does not work in select lines");
+        view_mut(&mut app).line_mode = None;
+        assert_eq!(
+            at(&app, "X"),
+            at(&app, "R").map(|r| r + 1),
+            "discard next to review"
+        );
+
+        let (mut app, _) = files_tab(vec![file("b.md", ViewedState::Unviewed)]);
+        let lines = |cursor| LineMode {
+            path: "b.md".to_string(),
+            rows: Some(Ok(crate::line_diff::parse(
+                "@@ -10,3 +10,3 @@\n x\n y\n z\n",
+            ))),
+            cursor,
+            anchor: None,
+            scroll: 0,
+        };
+        view_mut(&mut app).line_mode = Some(lines(3));
+        assert_eq!(
+            at(&app, "r"),
+            Some(3),
+            "on a thread: reply right after comment"
+        );
+        assert_eq!(at(&app, "u"), Some(4));
+        view_mut(&mut app).line_mode = Some(lines(1));
+        assert!(!has(&app, "r") && !has(&app, "u"), "no thread on this line");
+        if let Some(Ok(activity)) = view_mut(&mut app).activity.as_mut() {
+            activity.drafts.push(crate::model::Draft {
+                id: "C2".to_string(),
+                path: "b.md".to_string(),
+                side: Side::Right,
+                line: 12,
+                start_line: None,
+                body: "Draft".to_string(),
+                reply: false,
+            });
+        }
+        view_mut(&mut app).line_mode = Some(lines(3));
+        assert_eq!(at(&app, "enter"), Some(1), "your pending comment first");
+        assert!(
+            has(&app, "r") && has(&app, "u"),
+            "and the thread on the line"
+        );
+        assert!(has(&app, "]/["), "the file still has threads to go to");
+    }
+
+    #[test]
     fn r_replies_to_the_thread_on_the_line_and_u_resolves_it() {
         let (mut app, pr) = files_tab(vec![file("b.md", ViewedState::Unviewed)]);
         let lines = |cursor| LineMode {
@@ -7957,6 +8384,94 @@ mod tests {
             panic!("u resolves the thread");
         };
         assert_eq!((thread.as_str(), resolved), ("T2", true));
+    }
+
+    /// Select lines on b.md lines 10-12, with a pending comment of yours on line 11.
+    fn lines_with_a_draft(cursor: usize) -> (App, PrRef) {
+        let (mut app, pr) = files_tab(vec![file("b.md", ViewedState::Unviewed)]);
+        let view = view_mut(&mut app);
+        if let Some(Ok(activity)) = view.activity.as_mut() {
+            activity.drafts.push(crate::model::Draft {
+                id: "C1".to_string(),
+                path: "b.md".to_string(),
+                side: Side::Right,
+                line: 11,
+                start_line: None,
+                body: "Draft note".to_string(),
+                reply: false,
+            });
+        }
+        view.line_mode = Some(LineMode {
+            path: "b.md".to_string(),
+            rows: Some(Ok(crate::line_diff::parse(
+                "@@ -10,3 +10,3 @@\n x\n y\n z\n",
+            ))),
+            cursor,
+            anchor: None,
+            scroll: 0,
+        });
+        (app, pr)
+    }
+
+    #[test]
+    fn enter_on_a_pending_comment_edits_it_and_a_range_starts_a_new_one() {
+        let (mut app, pr) = lines_with_a_draft(2);
+        app.handle_key(key(KeyCode::Enter));
+        let composer = app.composer.as_ref().expect("enter opens the box");
+        assert_eq!(
+            composer.kind,
+            ComposeKind::EditDraft {
+                comment: "C1".to_string(),
+                place: "b.md line 11".to_string(),
+            }
+        );
+        assert_eq!(composer.editor.text, "Draft note", "the box holds its text");
+        type_text(&mut app, " again");
+        app.handle_key(ctrl('s'));
+        let action = app.handle_key(key(KeyCode::Char('y')));
+        let Some(Action::EditDraft {
+            pr: to,
+            comment,
+            body,
+        }) = action
+        else {
+            panic!("y saves the edit, got {action:?}");
+        };
+        assert_eq!(
+            (to, comment.as_str(), body.as_str()),
+            (pr, "C1", "Draft note again")
+        );
+
+        let (mut app, _) = lines_with_a_draft(2);
+        app.handle_key(key(KeyCode::Char('V')));
+        app.handle_key(key(KeyCode::Enter));
+        let kind = app.composer.as_ref().map(|composer| composer.kind.clone());
+        assert!(
+            matches!(kind, Some(ComposeKind::LineComment(_))),
+            "V marks the line for a new comment: {kind:?}"
+        );
+    }
+
+    #[test]
+    fn x_deletes_the_pending_comment_on_the_line_after_a_y() {
+        let (mut app, _) = lines_with_a_draft(1);
+        app.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(
+            app.error.as_deref(),
+            Some("no pending comment of yours on this line")
+        );
+        let (mut app, _) = lines_with_a_draft(2);
+        app.handle_key(key(KeyCode::Char('x')));
+        type_text(&mut app, "y");
+        let action = app.handle_key(key(KeyCode::Enter));
+        assert!(
+            matches!(&action, Some(Action::DeleteDraft { comment, .. }) if comment == "C1"),
+            "{action:?}"
+        );
+        let (mut app, _) = lines_with_a_draft(2);
+        app.handle_key(key(KeyCode::Char('x')));
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.error.as_deref(), Some("comment not deleted"));
     }
 
     #[test]
@@ -8111,7 +8626,7 @@ mod tests {
         let (mut app, pr) = files_tab(vec![file("a.rs", ViewedState::Unviewed)]);
         let action = Action::DiscardReview {
             pr: pr.clone(),
-            pending_review: "P1".to_string(),
+            pull_request_id: "PR_node".to_string(),
         };
         app.saving = action.save_note();
         app.set_written(&pr, Ok(()));
@@ -8217,48 +8732,201 @@ mod tests {
         detail
     }
 
+    fn auto_on(method: MergeMethod) -> crate::model::AutoMerge {
+        crate::model::AutoMerge { method, by: None }
+    }
+
+    type Panels = (MergePanel, [Result<Vec<MergeItem>, String>; 2]);
+
+    /// The panel M opens on and each panel's rows or why it has none, or why M opens nothing.
+    fn panels(detail: &PrDetail) -> Result<Panels, String> {
+        let pr = PrRef {
+            repo: "o/r".to_string(),
+            number: 1,
+        };
+        MergeMenu::new(&pr, detail).map(|menu| (menu.panel, menu.panels))
+    }
+
+    fn rows(panel: &Result<Vec<MergeItem>, String>) -> Vec<MergeItem> {
+        panel.clone().unwrap_or_else(|why| panic!("no rows: {why}"))
+    }
+
+    fn why(panel: &Result<Vec<MergeItem>, String>) -> String {
+        panel.clone().expect_err("a reason, not rows")
+    }
+
     #[test]
-    fn the_merge_menu_offers_what_github_would() {
-        let items = |detail: &PrDetail| merge_items(detail);
-        let methods = vec![
-            MergeItem::Method(MergeMethod::Squash),
-            MergeItem::Method(MergeMethod::Rebase),
-        ];
-        assert_eq!(items(&mergeable("CLEAN")), Ok(methods.clone()));
-        assert_eq!(items(&mergeable("UNSTABLE")), Ok(methods.clone()));
-        let blocked = mergeable("BLOCKED");
-        assert!(items(&blocked).unwrap_err().contains("auto-merge is off"));
-        let mut auto = mergeable("BLOCKED");
-        auto.merge.can_enable_auto_merge = true;
-        assert_eq!(items(&auto), Ok(methods.clone()));
+    fn the_merge_tab_merges_now_or_runs_auto_merge_and_draft_has_its_own() {
+        use MergeItem::{BypassMerge, ChangeAuto, ConvertToDraft, DisableAuto, EnableAuto, Method};
+        let (squash, rebase) = (MergeMethod::Squash, MergeMethod::Rebase);
+        let mut editor = mergeable("CLEAN");
+        editor.merge.can_update = true;
+        let (open, [merge, draft]) = panels(&editor).unwrap();
+        assert_eq!(open, MergePanel::Merge);
+        assert_eq!(rows(&merge), [Method(squash), Method(rebase)]);
+        assert_eq!(rows(&draft), [ConvertToDraft]);
+        let (_, [merge, draft]) = panels(&mergeable("UNSTABLE")).unwrap();
+        assert_eq!(rows(&merge), [Method(squash), Method(rebase)]);
+        assert!(why(&draft).contains("cannot edit"));
+
+        let mut blocked = mergeable("BLOCKED");
+        blocked.merge.can_enable_auto_merge = true;
+        let (_, [merge, _]) = panels(&blocked).unwrap();
+        assert_eq!(rows(&merge), [EnableAuto(squash), EnableAuto(rebase)]);
+        blocked.merge.can_bypass = true;
+        let (_, [merge, _]) = panels(&blocked).unwrap();
+        assert_eq!(
+            rows(&merge),
+            [
+                EnableAuto(squash),
+                EnableAuto(rebase),
+                BypassMerge(squash),
+                BypassMerge(rebase)
+            ],
+            "an admin can still merge at once"
+        );
+
         let mut admin = mergeable("BEHIND");
         admin.merge.can_bypass = true;
-        let mut with_bypass = methods.clone();
-        with_bypass.push(MergeItem::Bypass);
-        assert_eq!(items(&admin), Ok(with_bypass));
+        let (_, [merge, _]) = panels(&admin).unwrap();
+        assert_eq!(
+            rows(&merge),
+            [BypassMerge(squash), BypassMerge(rebase)],
+            "with no auto-merge, the admin's merge is the only way"
+        );
+
         let mut on = mergeable("BLOCKED");
-        on.merge.auto_merge = Some(MergeMethod::Squash);
-        assert!(items(&on).unwrap_err().contains("auto-merge is on"));
+        on.merge.auto_merge = Some(auto_on(squash));
         on.merge.can_disable_auto_merge = true;
-        assert_eq!(items(&on), Ok(vec![MergeItem::DisableAuto]));
+        let (open, [merge, _]) = panels(&on).unwrap();
+        assert_eq!(open, MergePanel::Merge);
+        assert_eq!(
+            rows(&merge),
+            [ChangeAuto(rebase), DisableAuto],
+            "the other methods switch it, as GitHub keeps the old one on a second enable"
+        );
+        on.merge.can_disable_auto_merge = false;
+        on.merge.can_update = true;
+        let (_, [merge, _]) = panels(&on).unwrap();
+        assert!(why(&merge).contains("auto-merge is on"));
+        on.merge.can_bypass = true;
+        let (_, [merge, _]) = panels(&on).unwrap();
+        assert_eq!(
+            rows(&merge),
+            [BypassMerge(squash), BypassMerge(rebase)],
+            "an admin can still merge at once while auto-merge waits"
+        );
+        on.merge.can_disable_auto_merge = true;
+        let (_, [merge, _]) = panels(&on).unwrap();
+        assert_eq!(
+            rows(&merge),
+            [
+                ChangeAuto(rebase),
+                DisableAuto,
+                BypassMerge(squash),
+                BypassMerge(rebase)
+            ]
+        );
+        let pr = PrRef {
+            repo: "o/r".to_string(),
+            number: 1,
+        };
+        assert_eq!(
+            MergeMenu::new(&pr, &on).unwrap().selected,
+            0,
+            "your usual method is only a bypass row here, so the cursor starts on top"
+        );
+
+        let mut draft_pr = editor.clone();
+        draft_pr.lifecycle = Lifecycle::Draft;
+        let (open, [merge, draft]) = panels(&draft_pr).unwrap();
+        assert_eq!(open, MergePanel::Draft);
+        assert!(why(&merge).contains("draft"));
+        assert_eq!(rows(&draft), [MergeItem::ReadyForReview]);
+    }
+
+    #[test]
+    fn the_merge_tab_says_why_it_cannot_merge() {
+        let reasons = |detail: &PrDetail| match panels(detail) {
+            Ok((_, [merge, _])) => why(&merge),
+            Err(error) => error,
+        };
         let mut reader = mergeable("CLEAN");
         reader.merge.can_write = false;
-        assert!(items(&reader).unwrap_err().contains("cannot merge"));
-        assert!(
-            items(&mergeable("DIRTY"))
-                .unwrap_err()
-                .contains("conflicts")
-        );
+        assert!(reasons(&reader).contains("cannot merge"));
+        assert!(reasons(&mergeable("DIRTY")).contains("conflicts"));
         for checking in ["UNKNOWN", ""] {
-            let error = items(&mergeable(checking)).unwrap_err();
+            let error = reasons(&mergeable(checking));
             assert!(error.contains("still checking"), "{checking}: {error}");
         }
+        assert!(reasons(&mergeable("BLOCKED")).contains("auto-merge is off"));
         let mut merged = mergeable("CLEAN");
+        merged.merge.can_update = true;
         merged.lifecycle = Lifecycle::Merged { by: None, at: None };
-        assert!(items(&merged).unwrap_err().contains("merged already"));
+        assert_eq!(
+            panels(&merged).unwrap_err(),
+            "the PR is merged already",
+            "no tab can act, so M opens nothing"
+        );
         let mut draft = mergeable("CLEAN");
         draft.lifecycle = Lifecycle::Draft;
-        assert!(items(&draft).unwrap_err().contains("draft"));
+        assert!(panels(&draft).unwrap_err().contains("draft"));
+    }
+
+    #[test]
+    fn tab_switches_to_draft_and_enter_acts_in_the_tab_shown() {
+        let mut open = mergeable("CLEAN");
+        open.merge.can_update = true;
+        let sent_draft = |action: Option<Action>| match action {
+            Some(Action::SetDraft { draft, .. }) => Some(draft),
+            _ => None,
+        };
+        let (_, action) = merge_through_menu(open.clone(), &[KeyCode::Tab, KeyCode::Enter]);
+        assert_eq!(sent_draft(action), Some(true));
+        let (_, action) = merge_through_menu(open.clone(), &[KeyCode::BackTab, KeyCode::Enter]);
+        assert_eq!(sent_draft(action), Some(true), "shift+tab wraps round");
+        let (_, action) = merge_through_menu(
+            open,
+            &[
+                KeyCode::Char('j'),
+                KeyCode::Tab,
+                KeyCode::Tab,
+                KeyCode::Enter,
+            ],
+        );
+        assert!(
+            matches!(
+                action,
+                Some(Action::Merge {
+                    request: MergeRequest::Now(MergeMethod::Rebase),
+                    ..
+                })
+            ),
+            "back on Merge, the cursor starts on your usual method: {action:?}"
+        );
+    }
+
+    #[test]
+    fn y_sends_the_draft_switch_and_other_answers_keep_it() {
+        let sent = |action: Option<Action>| match action {
+            Some(Action::SetDraft { draft, .. }) => Some(draft),
+            _ => None,
+        };
+        let mut draft = mergeable("CLEAN");
+        draft.merge.can_update = true;
+        draft.lifecycle = Lifecycle::Draft;
+        let (_, action) = merge_through_menu(draft.clone(), &[KeyCode::Enter]);
+        assert_eq!(sent(action), Some(false), "ready for review");
+
+        let (mut app, pr) = files_tab(Vec::new());
+        app.set_detail(&pr, Ok(draft));
+        app.handle_key(key(KeyCode::Char('M')));
+        app.handle_key(key(KeyCode::Enter));
+        type_text(&mut app, "n");
+        assert!(app.handle_key(key(KeyCode::Enter)).is_none());
+        assert!(app.prompt.is_some(), "another answer asks again");
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.error.as_deref(), Some("the PR stays a draft"));
     }
 
     /// Opens the PR on the given detail, presses M, moves j times, Enter, then y Enter.
@@ -8351,31 +9019,62 @@ mod tests {
         let (_, action) = merge_through_menu(auto, &[KeyCode::Enter]);
         assert_eq!(
             sent_request(action),
-            Some(MergeRequest::Auto(MergeMethod::Rebase))
+            Some(MergeRequest::Auto(MergeMethod::Rebase)),
+            "the cursor starts on your usual method"
         );
 
         let mut admin = mergeable("BLOCKED");
         admin.merge.can_bypass = true;
         let (app, action) = merge_through_menu(admin.clone(), &[KeyCode::Enter]);
-        assert!(action.is_none(), "blocked, and bypass not ticked");
-        assert!(app.merge_menu.as_ref().unwrap().note.is_some());
-        let tick_then_merge = [
-            KeyCode::Char('j'),
-            KeyCode::Enter,
-            KeyCode::Char('k'),
-            KeyCode::Enter,
-        ];
-        let (app, action) = merge_through_menu(admin, &tick_then_merge);
         assert_eq!(
             sent_request(action),
-            Some(MergeRequest::Now(MergeMethod::Rebase))
+            Some(MergeRequest::Now(MergeMethod::Rebase)),
+            "a bypass row merges at once, starting on your usual method"
         );
         assert!(app.merge_menu.is_none());
+        let bypassed = |app: &App| match &app.prompt {
+            Some(Prompt {
+                kind: PromptKind::ConfirmMerge { bypass, .. },
+                ..
+            }) => *bypass,
+            _ => false,
+        };
+        let (mut app, pr) = files_tab(Vec::new());
+        app.set_detail(&pr, Ok(admin.clone()));
+        app.handle_key(key(KeyCode::Char('M')));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(
+            bypassed(&app),
+            "the question says it bypasses the requirements"
+        );
+
+        let mut both = admin;
+        both.merge.can_enable_auto_merge = true;
+        let (_, action) = merge_through_menu(
+            both.clone(),
+            &[KeyCode::Char('j'), KeyCode::Char('j'), KeyCode::Enter],
+        );
+        assert_eq!(
+            sent_request(action),
+            Some(MergeRequest::Now(MergeMethod::Rebase)),
+            "past the auto-merge rows, the same methods merge now"
+        );
+        let (_, action) = merge_through_menu(both, &[KeyCode::Enter]);
+        assert_eq!(
+            sent_request(action),
+            Some(MergeRequest::Auto(MergeMethod::Rebase)),
+            "the cursor still starts on auto-merge with your usual method"
+        );
 
         let mut on = mergeable("BLOCKED");
-        on.merge.auto_merge = Some(MergeMethod::Squash);
+        on.merge.auto_merge = Some(auto_on(MergeMethod::Squash));
         on.merge.can_disable_auto_merge = true;
-        let (_, action) = merge_through_menu(on, &[KeyCode::Enter]);
+        let (_, action) = merge_through_menu(on.clone(), &[KeyCode::Enter]);
+        assert_eq!(
+            sent_request(action),
+            Some(MergeRequest::ChangeAuto(MergeMethod::Rebase))
+        );
+        let (_, action) = merge_through_menu(on, &[KeyCode::Char('j'), KeyCode::Enter]);
         assert_eq!(sent_request(action), Some(MergeRequest::DisableAuto));
     }
 
@@ -8424,6 +9123,47 @@ mod tests {
         assert_eq!(view.renderer, 1);
         assert!(!view.diff_wrap && !view.tree_view && view.hide_viewed && view.file_list_hidden);
         assert!(view.comments.newest_first && view.comments.no_bots);
+    }
+
+    #[test]
+    fn find_with_a_changed_files_path_or_name_opens_that_file() {
+        let (mut app, _) = files_tab(vec![
+            file("src/a.rs", ViewedState::Unviewed),
+            file("docs/guide.md", ViewedState::Unviewed),
+            file("src/mod.rs", ViewedState::Unviewed),
+            file("lib/mod.rs", ViewedState::Viewed),
+        ]);
+        let find = |app: &mut App, text: &str| {
+            app.ask(PromptKind::FindInDiff, "");
+            type_text(app, text);
+            app.handle_key(key(KeyCode::Enter))
+        };
+        view_mut(&mut app).folded_dirs.insert("docs".to_string());
+        let action = find(&mut app, "docs/guide.md");
+        assert!(action.is_none(), "no text search: {action:?}");
+        assert_eq!(view(&app).selected_file(), Some(1), "its folder opens");
+        assert!(view(&app).find.is_none());
+
+        find(&mut app, "a.rs");
+        assert_eq!(
+            view(&app).selected_file(),
+            Some(0),
+            "a name held by one file"
+        );
+
+        find(&mut app, "mod.rs");
+        assert_eq!(
+            view(&app).find.as_deref(),
+            Some("mod.rs"),
+            "two files hold the name, so it searches the text"
+        );
+
+        view_mut(&mut app).hide_viewed = true;
+        find(&mut app, "lib/mod.rs");
+        assert_eq!(
+            app.error.as_deref(),
+            Some("lib/mod.rs is viewed, and viewed files are hidden; V shows them")
+        );
     }
 
     #[test]
@@ -8523,6 +9263,63 @@ mod tests {
             ("aaa111~1", "aaa111")
         );
         assert!(job.paths.is_empty());
+    }
+
+    #[test]
+    fn every_y_question_warns_on_another_answer_like_merge() {
+        let (mut app, pr) = files_tab(vec![]);
+        let questions = [
+            (
+                PromptKind::ConfirmDiscard {
+                    pr: pr.clone(),
+                    pull_request_id: "PR_node".to_string(),
+                },
+                "review not discarded: type y, then enter, to discard it; esc cancels",
+            ),
+            (
+                PromptKind::ConfirmDraft {
+                    pr: pr.clone(),
+                    pull_request_id: "PR_node".to_string(),
+                    draft: true,
+                    auto_merge: false,
+                },
+                "the PR stays ready for review: type y, then enter, to convert it to a draft; esc cancels",
+            ),
+            (
+                PromptKind::ConfirmDraft {
+                    pr: pr.clone(),
+                    pull_request_id: "PR_node".to_string(),
+                    draft: false,
+                    auto_merge: false,
+                },
+                "the PR stays a draft: type y, then enter, to mark it ready for review; esc cancels",
+            ),
+            (
+                PromptKind::ConfirmDeleteDraft {
+                    pr: pr.clone(),
+                    comment: "C1".to_string(),
+                    place: "b.md line 11".to_string(),
+                },
+                "comment not deleted: type y, then enter, to delete it; esc cancels",
+            ),
+            (
+                PromptKind::ConfirmClone {
+                    pr: pr.clone(),
+                    dir: PathBuf::from("/w/app"),
+                },
+                "not cloned: type y, then enter, to clone it; esc cancels",
+            ),
+        ];
+        for (kind, warning) in questions {
+            app.ask(kind.clone(), "");
+            type_text(&mut app, "n");
+            assert!(app.handle_key(key(KeyCode::Enter)).is_none(), "{kind:?}");
+            let prompt = app.prompt.as_ref().expect("the question stays open");
+            assert_eq!(prompt.error.as_deref(), Some(warning));
+            assert!(prompt.text.is_empty(), "the wrong answer is cleared");
+            assert!(prompt.kind == kind);
+            app.prompt = None;
+        }
     }
 
     #[test]
@@ -8823,7 +9620,9 @@ mod tests {
             ..Prompt::default()
         };
         assert_eq!(prompt.suggestion().as_deref(), Some("me/app"));
-        prompt.cursor.key(&mut prompt.text, KeyCode::Left);
+        prompt
+            .cursor
+            .key(&mut prompt.text, KeyEvent::from(KeyCode::Left));
         assert_eq!(
             prompt.suggestion(),
             None,
