@@ -592,11 +592,11 @@ pub fn run_renderer(dir: &Path, command: &str, width: u16) -> Result<Vec<u8>> {
         shell.env("DFT_DISPLAY", "inline");
     }
     let output = shell.output().context("run the diff renderer")?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
     // Some diff tools exit 1 when files differ, so output counts as success.
-    if output.status.success() || !output.stdout.is_empty() {
+    if !output.stdout.is_empty() {
         return Ok(output.stdout);
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
     match missing_program(&stderr) {
         // Every renderer needs git, so m has nothing to switch to.
         Some("git") => bail!("git is not installed, so no diff can show. To add it: {GIT_INSTALL}"),
@@ -610,11 +610,17 @@ pub fn run_renderer(dir: &Path, command: &str, width: u16) -> Result<Vec<u8>> {
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect();
-    bail!(
-        "renderer exited with {}:\n{}",
-        output.status,
-        lines.join("\n")
-    )
+    // `sh` reports the last command's status. When git fails inside a pipeline such as
+    // `git diff ... | delta`, delta exits 0 and prints nothing, so stderr is the only
+    // sign of what broke.
+    if output.status.success() && lines.is_empty() {
+        return Ok(output.stdout);
+    }
+    let reason = match output.status.success() {
+        true => "the renderer printed no diff, and said".to_string(),
+        false => format!("renderer exited with {}", output.status),
+    };
+    bail!("{reason}:\n{}", lines.join("\n"))
 }
 
 /// The program the shell could not find, from bash's "sh: delta: command not found",
@@ -971,6 +977,19 @@ mod tests {
                 .to_string()
                 .contains("broken")
         );
+    }
+
+    #[test]
+    fn a_pipeline_that_fails_says_what_the_shell_printed_to_stderr() {
+        let dir = std::env::temp_dir();
+        // `sh` reports the last command's status, so a failed first stage reads as success.
+        let error = run_renderer(&dir, "echo 'fatal: bad revision' >&2 | cat", 200)
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with("the renderer printed no diff"), "{error}");
+        assert!(error.contains("fatal: bad revision"), "{error}");
+        // An empty diff prints nothing and says nothing, so it stays an empty diff.
+        assert!(run_renderer(&dir, "true", 200).unwrap().is_empty());
     }
 
     #[test]

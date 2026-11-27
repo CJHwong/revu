@@ -31,6 +31,15 @@ pub fn to_text(bytes: &[u8], syntax: Option<Syntax>) -> Result<Text<'static>, St
     })
 }
 
+/// True when the renderer printed no diff: no lines, or only lines with no text. A
+/// renderer that fails inside a pipeline prints nothing, and an empty diff prints
+/// nothing too, so the pane needs one test for both.
+pub fn shows_nothing(text: &Text<'static>) -> bool {
+    text.lines
+        .iter()
+        .all(|line| line.spans.iter().all(|span| span.content.trim().is_empty()))
+}
+
 fn add_syntax(mut text: Text<'static>, syntax: Syntax) -> Text<'static> {
     let plain: Vec<String> = text.lines.iter().map(plain_line).collect();
     for (path, indexes) in sections(&plain) {
@@ -404,6 +413,15 @@ mod tests {
         let colored = bat_column(&column, "x.sh", "ansi").unwrap();
         assert_eq!(colored.len(), 2);
         assert_eq!(plain_line(&colored[0]), "a=1");
+    }
+
+    #[test]
+    fn empty_output_still_holds_one_blank_line() {
+        let empty = to_text(b"", None).unwrap();
+        assert_eq!(empty.lines.len(), 1);
+        assert!(shows_nothing(&empty));
+        assert!(shows_nothing(&to_text(b"\n \n", None).unwrap()));
+        assert!(!shows_nothing(&to_text(b" x\n", None).unwrap()));
     }
 
     #[test]

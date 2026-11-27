@@ -1797,7 +1797,7 @@ fn render_diff_pane(
         RepoState::Ready(_) => match view.current_diff_key().and_then(|key| view.diffs.get(&key)) {
             None | Some(DiffOutput::Pending) => notice(" rendering...".to_string(), theme.warning),
             Some(DiffOutput::Done(Err(error))) => notice(format!(" {error}"), theme.danger),
-            Some(DiffOutput::Done(Ok(text))) if text.lines.is_empty() => notice(
+            Some(DiffOutput::Done(Ok(text))) if crate::highlight::shows_nothing(text) => notice(
                 " this renderer shows no changes here".to_string(),
                 theme.muted,
             ),
